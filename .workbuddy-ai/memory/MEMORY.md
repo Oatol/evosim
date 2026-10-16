@@ -105,6 +105,37 @@
 - **放置笔刷（`BRUSH_CLONE`）复用为手动放置**：`editor.setCloneBlueprint()` 装蓝图，`spawnFromBlueprint()` 投放。`editor.isPlacing` = `brushType==='clone' && !!cloneBlueprint`；`cancelClone()` 退出
 - **放置反馈**：`Editor` 记 `_placed`/`_missed`，`pointerup` 时 `onPlaceFeedback(placed, missed)` 汇报
 
+## 下一步扩展（2026-10-16 与用户敲定，尚未动手）
+
+参考 **The Powder Toy**（`The-Powder-Toy-master.zip` 在项目根，仅作参考不纳入仓库）：
+它的空气/热场是**粗粒度**的（`Air.h` 的 `ovx[YCELLS][XCELLS]`，`CELL = 4`，即每 4×4 像素一个场单元）；
+每个粒子带 `temp` + 4 个通用槽；元素属性声明式（`HeatConduct/HeatCapacity/Diffusion/Advection/`
+`LowTemperature→Transition/Properties(RADIOACTIVE)`）。**这些结论直接决定了我们的场设计。**
+
+**已锁定的四个决策**（用户通过选择题拍板）：
+
+1. **场用粗粒度**（8×8 或 4×4 世界格一个场单元）——全分辨率场实测不可行：扩散 O(30000)/tick，
+   ×50 倍速下约 1000 tick/s ≈ 1.2 亿次操作/秒。粗场（475 单元）几乎免费
+2. **温度/辐射先只做"可观察"**：场会扩散/衰减、悬停能看，但**暂不影响生物**。先验证视觉与性能
+3. **毒素走完整场**：毒素细胞释放 → 浓度扩散 + 随时间降解；抗性 = Σ毒素细胞 × k，**上限 0.9**
+   （用户明确要求"有抗性但不是免疫"）。复用同一套场，只是多一个通道
+4. **分批交付**：onEnter+4 地形 → 场+悬停 → 储食/再生/刺 → 毒素/粘附 → 派生画笔+视觉扩容。
+   每批跑全量回归后给用户验收
+
+**用户已批准"存档断代"**（以后任何改动造成断代都接受，只需提前说一声）——这解锁了
+`VISUAL_SLOTS` 9→N 与 `SENSE_DIM` 40→N 的扩容（新地形才能真正"被看见"）。断代时推 `SAVE_VERSION`
+并在读旧档时给明确提示。
+
+**我自己定的三处（用户未反对）**：
+- `onEnter` 拆成 **`onEnter`（踏入瞬间）+ `onStand`（站着每 tick）**——辐射带/腐殖质这类"区域效果"
+  只做 onEnter 实现不了
+- **储食细胞**抬高繁殖阈值 `reproduceAt = foodNeeded × (1 + Σ储食细胞 × k)`，无储食细胞者 k=0
+  基线逐位不变。这是让"全局消耗量倍率"成为主玩法的钥匙（生态崩掉的根因就是没有能量缓冲）
+- **第 0 项**：橡皮擦改成"只擦墙、留下食物"（当前会连食物一起清）
+
+**用户原始清单**：细胞 = 储食(脂肪)/再生/刺-反伤/毒素/粘附-触手；
+地形 = 腐殖质/岩浆/沼泽/水/冰/辐射带。悬停查看参考 TPT。
+
 ## 操作映射
 
 左键拖=绘制 · 右键/中键/Alt+左键=平移 · 滚轮=以光标为锚缩放(0.5~40 px/格) · 空格=播放/暂停 · S=单步 · R=重置 · F=适应窗口 · P=参数抽屉 · T=物种树 · G=物种工坊 · I=切换检视工具 · Ctrl/Cmd+S=保存到文件 · Esc=按「检视器 → 物种工坊 → 物种树 → 参数抽屉 → 退出放置」逐层关
@@ -118,6 +149,10 @@
 
 ## 工作约定
 
+- **版本控制**：`git@github.com:Oatol/evosim.git`（私有），远端 `origin`，主分支 `main`。
+  `.gitignore` 排除 `node_modules/`、`build/`、`dist/evosim.exe`（83MB，可复现）、
+  `The-Powder-Toy-master.zip`（第三方 GPL 源码，仅作参考）；**`dist/evosim.html` 纳入版本控制**
+  （317KB，就是"双击即玩"的交付物）。`.gitattributes` 强制 `eol=lf`，避免 Windows 上 CRLF 满屏 diff
 - 设计文档 `DESIGN.md`，**架构变更需同步更新**
 - 开发用 `python -m http.server`（ES Modules 需 HTTP）；交付用 `dist/evosim.exe` 或 `dist/evosim.html`（双击即玩）
 - 8 阶段路线，每阶段结束项目都应可运行、可观察
