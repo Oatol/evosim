@@ -44,6 +44,12 @@ export const CellType = Object.freeze({
   KILLER: 6,     // 杀手：伤害相邻其他生物
   ARMOR: 7,      // 装甲：免疫杀手伤害
   EYE: 8,        // 眼睛：赋予感知能力（带朝向）
+
+  // 地形（阶段 8）
+  LAVA: 9,       // 岩浆：踏入与驻留都灼伤
+  SWAMP: 10,     // 沼泽：移动要额外耗能
+  RAD: 11,       // 辐射带：驻留扣血 + 变异率飙升
+  HUMUS: 12,     // 腐殖质：缓慢向周围释放食物
 });
 
 /** 所有定义共用的默认值 */
@@ -55,6 +61,13 @@ const CELL_DEFAULTS = Object.freeze({
   directional: false,
   flag: null,
   behavior: null,
+
+  // 地形相关（阶段 8）
+  terrain: false,     // 算不算"地形"：写进 floor 层、重置时可保留、橡皮擦的目标
+  passable: false,    // 生物能否走进去
+  enter: null,        // 踏入瞬间的行为名（见 Terrain.TERRAIN_ENTER）
+  stand: null,        // 驻留每 tick 的行为名（见 Terrain.TERRAIN_STAND）
+  tick: null,         // 世界级每 tick 的行为名（见 Terrain.TERRAIN_TICK，需索引）
 
   hp: 1,
   cost: 0,
@@ -87,7 +100,7 @@ export const CELL_DEFS = Object.freeze([
   }),
   def({
     id: CellType.WALL, key: 'WALL', name: 'wall', label: '墙',
-    independent: true, paintable: true, visible: true,
+    independent: true, paintable: true, visible: true, terrain: true,
     colors: { classic: '#3a4150', highContrast: '#5c6470', colorblindSafe: '#454c57' },
   }),
   def({
@@ -132,6 +145,40 @@ export const CELL_DEFS = Object.freeze([
     flag: 'hasEye', behavior: 'eye',
     cost: 0.006,
     colors: { classic: '#d8b4fe', highContrast: '#ffffff', colorblindSafe: '#f0e442' },
+  }),
+
+  // ── 地形（阶段 8）──
+  //
+  // 地形的四个关键点：
+  //   1. `terrain: true` → 写进 GridMap 的 **floor 层**，所以生物从上面走过
+  //      不会把它抹掉（见 GridMap.floor 的注释）
+  //   2. `passable: true` → 生物能走进去；`false` 就是墙那样的实心障碍
+  //   3. `enter` / `stand` → 生物踏入 / 驻留时触发 Terrain 表里的函数
+  //   4. `visible` 默认 false：**这一批先不让生物"看见"地形**，
+  //      感知扩容（VISUAL_SLOTS 9→N）留到最后一批，那时会一并作废旧存档
+  def({
+    id: CellType.LAVA, key: 'LAVA', name: 'lava', label: '岩浆',
+    independent: true, paintable: true, terrain: true, passable: true,
+    enter: 'burn', stand: 'burn',
+    colors: { classic: '#ff6a00', highContrast: '#ff2d00', colorblindSafe: '#e05a00' },
+  }),
+  def({
+    id: CellType.SWAMP, key: 'SWAMP', name: 'swamp', label: '沼泽',
+    independent: true, paintable: true, terrain: true, passable: true,
+    enter: 'bog',
+    colors: { classic: '#3f5540', highContrast: '#5a7d5a', colorblindSafe: '#4d6b4d' },
+  }),
+  def({
+    id: CellType.RAD, key: 'RAD', name: 'rad', label: '辐射带',
+    independent: true, paintable: true, terrain: true, passable: true,
+    stand: 'irradiate',
+    colors: { classic: '#d4f000', highContrast: '#eeff00', colorblindSafe: '#c8d400' },
+  }),
+  def({
+    id: CellType.HUMUS, key: 'HUMUS', name: 'humus', label: '腐殖质',
+    independent: true, paintable: true, terrain: true, passable: true,
+    tick: 'fertilize',
+    colors: { classic: '#6b4f2a', highContrast: '#8d6e3a', colorblindSafe: '#7a5c33' },
   }),
 ]);
 
@@ -187,6 +234,40 @@ export const DIRECTIONAL_CELL_TYPES = Object.freeze(
   CELL_DEFS.filter((d) => d.directional).map((d) => d.id),
 );
 
+/** 地形类型（写进 floor 层；重置时可保留；橡皮擦的目标） */
+export const TERRAIN_CELL_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.terrain).map((d) => d.id),
+);
+
+/**
+ * 可直接在世界画布上绘制的地形 —— 工具栏的笔刷列表由它派生。
+ *
+ * 注意不能用 `PAINTABLE_CELL_TYPES`：那个还包含身体细胞（嘴/生产者/…），
+ * 而身体细胞只能在物种工坊的蓝图里画，不该出现在世界画笔里。
+ */
+export const TERRAIN_BRUSH_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.independent && d.paintable).map((d) => d.id),
+);
+
+/** 有"世界级每 tick 行为"的地形（World 会给它们维护索引，避免每 tick 扫全网格） */
+export const TICKING_TERRAIN_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.tick).map((d) => d.id),
+);
+
+/** id → 是不是地形（热路径用，按 id 直接索引的查表） */
+export const TERRAIN_MASK = (() => {
+  const m = new Uint8Array(256);
+  for (const d of CELL_DEFS) if (d.terrain) m[d.id] = 1;
+  return m;
+})();
+
+/** id → 是不是"需要每 tick 更新"的地形 */
+export const TICKS_TERRAIN = (() => {
+  const m = new Uint8Array(256);
+  for (const d of CELL_DEFS) if (d.tick) m[d.id] = 1;
+  return m;
+})();
+
 // ────────────────────────────── 查询 ──────────────────────────────
 
 export function cellDef(id) {
@@ -206,6 +287,26 @@ export function isBodyCell(id) {
 export function isDirectional(id) {
   const d = CELL_DEF_BY_ID[id];
   return !!(d && d.directional);
+}
+
+/** 是不是地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质…） */
+export function isTerrain(id) {
+  const d = CELL_DEF_BY_ID[id];
+  return !!(d && d.terrain);
+}
+
+/**
+ * 生物能否走进这一格。
+ *
+ * **只对地形生效**（`terrain: true` 的类型）。空地和食物不算地形，它们的通行性
+ * 由调用方单独判断——食物是否阻挡取决于 `combat.foodBlocksReproduction`。
+ * 这样"食物"这条特例只有一处管，不会和这里打架
+ * （踩过的坑：一开始给 FOOD 也标了 `passable: true`，结果把
+ *  `foodBlocksReproduction = true` 直接架空了，读档回归测试立刻分叉）。
+ */
+export function isPassable(id) {
+  const d = CELL_DEF_BY_ID[id];
+  return !!(d && d.terrain && d.passable);
 }
 
 /**

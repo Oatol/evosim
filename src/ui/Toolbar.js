@@ -1,12 +1,16 @@
-import { CellType, cellTypeLabel } from '../life/CellType.js';
+import { cellTypeLabel, cellDef, TERRAIN_BRUSH_TYPES } from '../life/CellType.js';
 import { BRUSH_ORGANISM, BRUSH_CLONE, BRUSH_ERASER } from './Editor.js';
 import { seedOriginOfLife, spawnPopulation } from '../life/OrganismFactory.js';
 
-/** 笔刷可选项：三种地形 + 橡皮擦 + 随机生物 + 克隆选中 */
+/**
+ * 笔刷列表 —— **由注册表派生**，不再手写。
+ *
+ * 顺序：所有"能直接画在世界上的地形"（空 / 食物 / 墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质，
+ * 由 `TERRAIN_BRUSH_TYPES` 决定，加一种新地形这里自动多一格）
+ * → 橡皮擦（特殊笔刷，清地形）→ 随机生物 → 克隆。
+ */
 const BRUSHES = [
-  { id: CellType.EMPTY, label: '空' },
-  { id: CellType.FOOD, label: '食物' },
-  { id: CellType.WALL, label: '墙' },
+  ...TERRAIN_BRUSH_TYPES.map((id) => ({ id, label: cellDef(id).label })),
   { id: BRUSH_ERASER, label: '橡皮擦' },
   { id: BRUSH_ORGANISM, label: '随机生物' },
   { id: BRUSH_CLONE, label: '克隆', needsBlueprint: true },
@@ -290,7 +294,7 @@ export class Toolbar {
 
     if (this.brushHint) {
       if (this.editor.brushType === BRUSH_ERASER) {
-        this.brushHint.textContent = '橡皮擦：只擦地形（墙 / 食物），生物细胞一律不动';
+        this.brushHint.textContent = '橡皮擦：只擦地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），食物与生物不动';
       } else if (!hasBlueprint) {
         this.brushHint.textContent = '克隆笔刷：用"检视"工具点一个个体，再点"克隆选中"';
       } else if (this.editor.brushType === BRUSH_CLONE) {
@@ -317,6 +321,6 @@ export class Toolbar {
 function brushTitle(brush) {
   if (brush.id === BRUSH_ORGANISM) return '点击投放一个随机小生物';
   if (brush.id === BRUSH_CLONE) return '投放指定蓝图的个体（需要先装入一份蓝图）';
-  if (brush.id === BRUSH_ERASER) return '橡皮擦：只清除地形（墙 / 食物），不会碰到任何生物细胞';
+  if (brush.id === BRUSH_ERASER) return '橡皮擦：只清除地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），食物与生物一律不动';
   return cellTypeLabel(brush.id);
 }

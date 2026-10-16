@@ -217,9 +217,10 @@ async function main() {
     // 橡皮擦笔刷
     const brushes = [...document.querySelectorAll('.swatch-label')].map((s) => s.textContent);
     const hasEraser = brushes.includes('橡皮擦');
+    const hasTerrainBrushes = ['岩浆', '沼泽', '辐射带', '腐殖质'].every((b) => brushes.includes(b));
     editor.setBrushType('eraser');
     const eraserType = editor.brushType;
-    // 橡皮擦擦一堵墙：墙没了，生物不受影响
+    // 橡皮擦擦一堵墙：墙没了，食物与生物不受影响
     const grid = world.grid;
     let wallIdx = -1;
     for (let i = 0; i < grid.length; i++) {
@@ -229,28 +230,48 @@ async function main() {
     if (wallIdx >= 0) {
       const [c, r] = grid.coords(wallIdx);
       const orgBefore = world.organisms.length;
+      // 顺手在墙旁边放一份食物，验证"留食物"
+      const foodIdx = grid.index(c + 1, r);
+      const hadFood = grid.types[foodIdx] === 1;
+      if (!hadFood) world.setCell(c + 1, r, 1, -1);
       editor.setBrushSize(1);
       editor._eraseCell(c, r);
-      erased = { gone: grid.types[wallIdx] === 0, orgSame: world.organisms.length === orgBefore };
+      editor._eraseCell(c + 1, r);
+      erased = {
+        gone: grid.types[wallIdx] === 0,
+        foodKept: grid.types[foodIdx] === 1,
+        orgSame: world.organisms.length === orgBefore,
+      };
     }
     editor.setBrushType(2);
 
     return { panelOpen, rows, inspectorOpen, orgId, srcId: src.id,
-             labels, hasEraser, eraserType, erased,
+             labels, hasEraser, hasTerrainBrushes, eraserType, erased,
              burnLabel: labels.includes('全局消耗量倍率'),
              foodLabel: labels.includes('食物量倍率'),
-             foodScale: Config.life.foodEnergyScale };
+             foodScale: Config.life.foodEnergyScale,
+             terrainRows: (() => {
+               const groups = [...document.querySelectorAll('.param-group')];
+               const g = groups.find((x) => x.querySelector('.param-group-head span').textContent === '地形');
+               return g ? g.querySelectorAll('.param-row').length : 0;
+             })(),
+             hasFloor: grid.floor instanceof Uint8Array };
   })()`);
   check('参数抽屉能打开且有控件', ui.panelOpen === true && ui.rows > 30, `${ui.rows} 行`);
   check('检视器能打开并选中正确个体', ui.inspectorOpen === true && ui.orgId === ui.srcId,
     `id=${ui.orgId}`);
   check('工具栏里有「橡皮擦」笔刷且可选中', ui.hasEraser === true && ui.eraserType === 'eraser');
-  check('橡皮擦擦掉地形但不影响生物',
-    ui.erased && ui.erased.gone === true && ui.erased.orgSame === true,
-    ui.erased ? `墙被清除 ${ui.erased.gone} · 生物数不变 ${ui.erased.orgSame}` : '没找到可擦的墙');
+  check('工具栏里有岩浆/沼泽/辐射带/腐殖质笔刷', ui.hasTerrainBrushes === true);
+  check('橡皮擦擦掉地形但不影响食物与生物',
+    ui.erased && ui.erased.gone === true && ui.erased.foodKept === true && ui.erased.orgSame === true,
+    ui.erased
+      ? `墙被清除 ${ui.erased.gone} · 食物保留 ${ui.erased.foodKept} · 生物数不变 ${ui.erased.orgSame}`
+      : '没找到可擦的墙');
   check('参数面板有「全局消耗量倍率」与「食物量倍率」',
     ui.burnLabel === true && ui.foodLabel === true && ui.foodScale === 1,
     `食物量倍率默认 ${ui.foodScale}`);
+  check('参数面板有 6 项地形参数', ui.terrainRows === 6, `${ui.terrainRows} 项`);
+  check('网格带 floor 层（地形不会被生物啃掉）', ui.hasFloor === true);
 
   // ── 5b. 阶段 6：物种树 / 导出接口 / 着色模式 ──
   console.log('\n=== 5b. 物种树与导出 ===');

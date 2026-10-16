@@ -221,7 +221,7 @@ async function main() {
   check('参数抽屉默认关闭', boot.panelOpen === false);
   check('顶栏有参数/保存/读取按钮', boot.hasParams && boot.hasSave && boot.hasLoad);
   check('隐藏的文件选择框存在', boot.fileInput === true);
-  check('参数面板按分组生成（含"细胞属性"）', boot.groups === 9, `${boot.groups} 组`);
+  check('参数面板按分组生成（含"细胞属性"）', boot.groups === 10, `${boot.groups} 组`);
   check('参数控件由元数据生成（行/滑块/开关）',
     boot.rows > 30 && boot.sliders > 20 && boot.switches === 8,
     `${boot.rows} 行 · ${boot.sliders} 滑块 · ${boot.switches} 开关`);
@@ -603,7 +603,10 @@ async function main() {
   // ── 9c. 橡皮擦：只清地形，不碰细胞 ──
   console.log('\n=== 9c. 橡皮擦 ===');
   await evaluate(`window.evosim.engine.pause()`);
-  await sleep(200);
+  // 先把整个世界装进视口：这样后面找"画布上的生物"一定找得到，
+  // 不会因为个体跑到视口外而偶发失败
+  await evaluate(`window.evosim.toolbar.fitToWindow()`);
+  await sleep(300);
 
   const brushLabels = await evaluate(
     `[...document.querySelectorAll('.swatch-label')].map((s) => s.textContent)`);

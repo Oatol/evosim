@@ -106,7 +106,7 @@ function mouthFunction(organism, cell) {
     const index = grid.index(col + NEIGHBORS_4[i][0], row + NEIGHBORS_4[i][1]);
     if (index < 0) continue;
     if (grid.types[index] === CellType.FOOD) {
-      world.setCellAt(index, CellType.EMPTY, -1);
+      world.revealFloor(index);     // 吃掉的只是食物；底下有地形就露出来
       organism.energy += gain;
     }
   }

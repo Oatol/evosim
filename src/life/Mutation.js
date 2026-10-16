@@ -35,10 +35,18 @@ export function mutateOrganism(child, parent, rng, config) {
   child.mutability = parent.mutability;
 
   // ── 2. 结构变异 ──
-  const rate = mut.useGlobalMutability ? mut.globalMutability : child.mutability;
+  const base = mut.useGlobalMutability ? mut.globalMutability : child.mutability;
+
+  // 辐射带加成：站在辐射带里的个体，**后代**更容易突变。
+  // 只在这一步临时乘，不改 child.mutability——否则会指数爆炸。
+  const radBoost = parent.inRadiation
+    ? Math.max(1, numOr(config.terrain && config.terrain.radMutationBoost, 3))
+    : 1;
+  const rate = base * radBoost;
+
   let changed = false;
 
-  if (rate > 0 && rng.chance(rate)) {
+  if (rate > 0 && rng.chance(Math.min(100, rate))) {
     changed = mutateAnatomy(child.anatomy, rng, mut);
 
     // 变异真的发生了，变异率本身也漂移一点。
@@ -137,4 +145,9 @@ export function mutateBrain(brain, rng, mut) {
 
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** 读一个可能不存在的配置数值，非法时回退（旧存档没有 terrain 段） */
+function numOr(v, fallback) {
+  return Number.isFinite(v) ? v : fallback;
 }

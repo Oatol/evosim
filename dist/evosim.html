@@ -1280,7 +1280,7 @@ select.field-input { cursor: pointer; }
 .se-status { margin-top: 8px; font-size: 10px; color: var(--text-3); }
 
 </style>
-<!-- 由 tools/bundle.mjs 打包生成 · 33 个模块 · 零依赖单文件 -->
+<!-- 由 tools/bundle.mjs 打包生成 · 34 个模块 · 零依赖单文件 -->
 </head>
 <body>
 <div class="app">
@@ -1337,7 +1337,7 @@ select.field-input { cursor: pointer; }
 
     <div class="canvas-wrap">
       <canvas id="world-canvas"></canvas>
-      <div class="canvas-badge" id="stage-badge">阶段 7 · 细胞模块化与物种工坊</div>
+      <div class="canvas-badge" id="stage-badge">阶段 8 · 地形与 onEnter 钩子</div>
       <div class="canvas-toast" id="toast" hidden></div>
     </div>
 
@@ -1414,6 +1414,12 @@ const CellType = Object.freeze({
   KILLER: 6,     // 杀手：伤害相邻其他生物
   ARMOR: 7,      // 装甲：免疫杀手伤害
   EYE: 8,        // 眼睛：赋予感知能力（带朝向）
+
+  // 地形（阶段 8）
+  LAVA: 9,       // 岩浆：踏入与驻留都灼伤
+  SWAMP: 10,     // 沼泽：移动要额外耗能
+  RAD: 11,       // 辐射带：驻留扣血 + 变异率飙升
+  HUMUS: 12,     // 腐殖质：缓慢向周围释放食物
 });
 
 /** 所有定义共用的默认值 */
@@ -1425,6 +1431,13 @@ const CELL_DEFAULTS = Object.freeze({
   directional: false,
   flag: null,
   behavior: null,
+
+  // 地形相关（阶段 8）
+  terrain: false,     // 算不算"地形"：写进 floor 层、重置时可保留、橡皮擦的目标
+  passable: false,    // 生物能否走进去
+  enter: null,        // 踏入瞬间的行为名（见 Terrain.TERRAIN_ENTER）
+  stand: null,        // 驻留每 tick 的行为名（见 Terrain.TERRAIN_STAND）
+  tick: null,         // 世界级每 tick 的行为名（见 Terrain.TERRAIN_TICK，需索引）
 
   hp: 1,
   cost: 0,
@@ -1457,7 +1470,7 @@ const CELL_DEFS = Object.freeze([
   }),
   def({
     id: CellType.WALL, key: 'WALL', name: 'wall', label: '墙',
-    independent: true, paintable: true, visible: true,
+    independent: true, paintable: true, visible: true, terrain: true,
     colors: { classic: '#3a4150', highContrast: '#5c6470', colorblindSafe: '#454c57' },
   }),
   def({
@@ -1502,6 +1515,40 @@ const CELL_DEFS = Object.freeze([
     flag: 'hasEye', behavior: 'eye',
     cost: 0.006,
     colors: { classic: '#d8b4fe', highContrast: '#ffffff', colorblindSafe: '#f0e442' },
+  }),
+
+  // ── 地形（阶段 8）──
+  //
+  // 地形的四个关键点：
+  //   1. `terrain: true` → 写进 GridMap 的 **floor 层**，所以生物从上面走过
+  //      不会把它抹掉（见 GridMap.floor 的注释）
+  //   2. `passable: true` → 生物能走进去；`false` 就是墙那样的实心障碍
+  //   3. `enter` / `stand` → 生物踏入 / 驻留时触发 Terrain 表里的函数
+  //   4. `visible` 默认 false：**这一批先不让生物"看见"地形**，
+  //      感知扩容（VISUAL_SLOTS 9→N）留到最后一批，那时会一并作废旧存档
+  def({
+    id: CellType.LAVA, key: 'LAVA', name: 'lava', label: '岩浆',
+    independent: true, paintable: true, terrain: true, passable: true,
+    enter: 'burn', stand: 'burn',
+    colors: { classic: '#ff6a00', highContrast: '#ff2d00', colorblindSafe: '#e05a00' },
+  }),
+  def({
+    id: CellType.SWAMP, key: 'SWAMP', name: 'swamp', label: '沼泽',
+    independent: true, paintable: true, terrain: true, passable: true,
+    enter: 'bog',
+    colors: { classic: '#3f5540', highContrast: '#5a7d5a', colorblindSafe: '#4d6b4d' },
+  }),
+  def({
+    id: CellType.RAD, key: 'RAD', name: 'rad', label: '辐射带',
+    independent: true, paintable: true, terrain: true, passable: true,
+    stand: 'irradiate',
+    colors: { classic: '#d4f000', highContrast: '#eeff00', colorblindSafe: '#c8d400' },
+  }),
+  def({
+    id: CellType.HUMUS, key: 'HUMUS', name: 'humus', label: '腐殖质',
+    independent: true, paintable: true, terrain: true, passable: true,
+    tick: 'fertilize',
+    colors: { classic: '#6b4f2a', highContrast: '#8d6e3a', colorblindSafe: '#7a5c33' },
   }),
 ]);
 
@@ -1557,6 +1604,40 @@ const DIRECTIONAL_CELL_TYPES = Object.freeze(
   CELL_DEFS.filter((d) => d.directional).map((d) => d.id),
 );
 
+/** 地形类型（写进 floor 层；重置时可保留；橡皮擦的目标） */
+const TERRAIN_CELL_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.terrain).map((d) => d.id),
+);
+
+/**
+ * 可直接在世界画布上绘制的地形 —— 工具栏的笔刷列表由它派生。
+ *
+ * 注意不能用 `PAINTABLE_CELL_TYPES`：那个还包含身体细胞（嘴/生产者/…），
+ * 而身体细胞只能在物种工坊的蓝图里画，不该出现在世界画笔里。
+ */
+const TERRAIN_BRUSH_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.independent && d.paintable).map((d) => d.id),
+);
+
+/** 有"世界级每 tick 行为"的地形（World 会给它们维护索引，避免每 tick 扫全网格） */
+const TICKING_TERRAIN_TYPES = Object.freeze(
+  CELL_DEFS.filter((d) => d.tick).map((d) => d.id),
+);
+
+/** id → 是不是地形（热路径用，按 id 直接索引的查表） */
+const TERRAIN_MASK = (() => {
+  const m = new Uint8Array(256);
+  for (const d of CELL_DEFS) if (d.terrain) m[d.id] = 1;
+  return m;
+})();
+
+/** id → 是不是"需要每 tick 更新"的地形 */
+const TICKS_TERRAIN = (() => {
+  const m = new Uint8Array(256);
+  for (const d of CELL_DEFS) if (d.tick) m[d.id] = 1;
+  return m;
+})();
+
 // ────────────────────────────── 查询 ──────────────────────────────
 
 function cellDef(id) {
@@ -1576,6 +1657,26 @@ function isBodyCell(id) {
 function isDirectional(id) {
   const d = CELL_DEF_BY_ID[id];
   return !!(d && d.directional);
+}
+
+/** 是不是地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质…） */
+function isTerrain(id) {
+  const d = CELL_DEF_BY_ID[id];
+  return !!(d && d.terrain);
+}
+
+/**
+ * 生物能否走进这一格。
+ *
+ * **只对地形生效**（`terrain: true` 的类型）。空地和食物不算地形，它们的通行性
+ * 由调用方单独判断——食物是否阻挡取决于 `combat.foodBlocksReproduction`。
+ * 这样"食物"这条特例只有一处管，不会和这里打架
+ * （踩过的坑：一开始给 FOOD 也标了 `passable: true`，结果把
+ *  `foodBlocksReproduction = true` 直接架空了，读档回归测试立刻分叉）。
+ */
+function isPassable(id) {
+  const d = CELL_DEF_BY_ID[id];
+  return !!(d && d.terrain && d.passable);
 }
 
 /**
@@ -1640,7 +1741,7 @@ function dirVector(dir) {
   return DIR_VECTORS[dir & 3];
 }
 
-  return { CellType, CELL_DEFS, CELL_DEF_BY_ID, CELL_DEF_BY_KEY, CELL_TYPE_COUNT, CELL_TYPES, CELL_TYPE_BY_ID, LIVING_CELL_TYPES, INDEPENDENT_CELL_TYPES, PAINTABLE_CELL_TYPES, VISIBLE_CELL_TYPES, CELL_FLAG_NAMES, DIRECTIONAL_CELL_TYPES, cellDef, cellTypeLabel, isBodyCell, isDirectional, cellAttr, cellAttrDefaults, CELL_ATTR_FIELDS, DIR, DIR_VECTORS, oppositeDir, dirVector };
+  return { CellType, CELL_DEFS, CELL_DEF_BY_ID, CELL_DEF_BY_KEY, CELL_TYPE_COUNT, CELL_TYPES, CELL_TYPE_BY_ID, LIVING_CELL_TYPES, INDEPENDENT_CELL_TYPES, PAINTABLE_CELL_TYPES, VISIBLE_CELL_TYPES, CELL_FLAG_NAMES, DIRECTIONAL_CELL_TYPES, TERRAIN_CELL_TYPES, TERRAIN_BRUSH_TYPES, TICKING_TERRAIN_TYPES, TERRAIN_MASK, TICKS_TERRAIN, cellDef, cellTypeLabel, isBodyCell, isDirectional, isTerrain, isPassable, cellAttr, cellAttrDefaults, CELL_ATTR_FIELDS, DIR, DIR_VECTORS, oppositeDir, dirVector };
 });
 
 __define("src/core/config.js", function () {
@@ -1673,7 +1774,6 @@ const Config = {
     clearWallsOnReset: false,
     autoReset: false,
   },
-
   life: {
     lifespanMultiplier: 100,
     extraMoverFoodCost: 0,
@@ -1684,6 +1784,21 @@ const Config = {
     metabolismScale: 0,        // 全局消耗量倍率（0 = 关闭每 tick 消耗）
     foodEnergyScale: 1,        // 食物量倍率：一份食物能提供多少能量
     starvationTicks: 60,       // 能量见底后还能撑多少个 tick 才饿死
+  },
+
+  /**
+   * 地形效果数值（阶段 8）。
+   *
+   * 效果本身写在 `life/Terrain.js`（哪个地形做什么），
+   * 这里只放"做多少"——和细胞属性同一个思路。
+   */
+  terrain: {
+    lavaEnterDamage: 2,        // 踏进岩浆那一下的冲击伤害
+    lavaStandDamage: 1,        // 待在岩浆里每 tick 的持续伤害
+    swampMoveCost: 0.5,        // 在沼泽里移动一次额外消耗的能量
+    radDamage: 0.25,           // 待在辐射带里每 tick 扣的血
+    radMutationBoost: 3,       // 辐射带对后代变异率的倍率（不是免疫式加成，是乘法）
+    humusFoodProb: 0.5,        // 腐殖质每 tick 往相邻空格冒食物的概率（%）
   },
 
   /**
@@ -1739,6 +1854,7 @@ const Config = {
 const CONFIG_SECTIONS = [
   { key: 'world',    label: '世界' },
   { key: 'life',     label: '生命' },
+  { key: 'terrain',  label: '地形' },
   { key: 'cells',    label: '细胞属性' },
   { key: 'mutation', label: '变异' },
   { key: 'sense',    label: '感知' },
@@ -1757,7 +1873,7 @@ const CONFIG_FIELDS = {
     wrapEdges: { label: '边界环绕', type: 'bool', rebuildHint: '立即生效' },
     foodDropProb: { label: '食物掉落率', min: 0, max: 200, step: 1 },
     foodDecayRate: { label: '食物腐败率(%)', min: 0, max: 20, step: 0.1 },
-    clearWallsOnReset: { label: '重置时保留墙', type: 'bool' },
+    clearWallsOnReset: { label: '重置时保留地形', type: 'bool', note: '保留墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质' },
     autoReset: { label: '灭绝后自动重置', type: 'bool' },
   },
   life: {
@@ -1770,6 +1886,14 @@ const CONFIG_FIELDS = {
     metabolismScale: { label: '全局消耗量倍率', min: 0, max: 5, step: 0.05, note: '乘在所有细胞的每 tick 消耗上。0 = 关闭。调高会带来真实的选择压力，但当前食物经济撑不住太大值' },
     foodEnergyScale: { label: '食物量倍率', min: 0.1, max: 10, step: 0.1, note: '一份食物能提供多少能量（默认 1）。调高 → 吃一口就攒够繁殖，种群扩张更快' },
     starvationTicks: { label: '饿死延时(tick)', min: 0, max: 600, step: 5, note: '能量见底后还能撑多久' },
+  },
+  terrain: {
+    lavaEnterDamage: { label: '岩浆·踏入伤害', min: 0, max: 20, step: 1, note: '踏进去那一下挨多少' },
+    lavaStandDamage: { label: '岩浆·驻留伤害', min: 0, max: 20, step: 1, note: '待在岩浆里每 tick 挨多少' },
+    swampMoveCost: { label: '沼泽·移动耗能', min: 0, max: 10, step: 0.05 },
+    radDamage: { label: '辐射带·每tick伤害', min: 0, max: 10, step: 0.05 },
+    radMutationBoost: { label: '辐射带·变异率倍率', min: 1, max: 20, step: 0.5, note: '站过辐射带的个体，后代变异率 × 这个数' },
+    humusFoodProb: { label: '腐殖质·造食率(%)', min: 0, max: 20, step: 0.1 },
   },
   // 每种身体细胞的属性（生命值/消耗/伤害/感知/食物值）。
   // 键是 `类型KEY.属性名`，下面按注册表自动填。
@@ -1986,17 +2110,30 @@ class RNG {
 });
 
 __define("src/core/GridMap.js", function () {
-const { CellType } = __req('src/life/CellType.js');
+const { CellType, TERRAIN_MASK } = __req('src/life/CellType.js');
 
 /**
  * 网格数据结构：结构体数组（SoA）+ TypedArray。
  *
  * 不用对象数组——20 万格的对象开销太大。
- *   types  : Uint8Array   细胞类型枚举
+ *   types  : Uint8Array   细胞类型枚举（**顶层**：可能被生物的身体盖住）
  *   owners : Int32Array   所属生物 id，-1 表示独立格
+ *   floor  : Uint8Array   **地板层**：这一格的地形是什么
  *
  * 索引公式：idx = row * cols + col
  * 越界统一返回 -1 / EMPTY，边界处理全部收在这里。
+ *
+ * ── 为什么要单独一层 floor（阶段 8）──
+ *
+ * 生物写格子时会把 `types` 覆盖成自己的细胞类型。如果地形只存在 `types` 里，
+ * 那么一只生物从岩浆上走过，岩浆就被"抹掉"了——地形会被生物啃光，
+ * 岩浆/辐射带/腐殖质这类需要长期存在的地形根本立不住。
+ *
+ * 所以地形单独记在 `floor` 里：生物盖上去只改 `types`，`floor` 不动；
+ * 生物离开时调用 `World.revealFloor()` 把地板重新铺回顶层。
+ * **只有玩家显式画"空"/用橡皮擦才会真正清掉地板。**
+ *
+ * 食物**不在** floor 里——它是资源不是地形，被生物压过去就该消失（既有行为）。
  */
 class GridMap {
   constructor(cols, rows, wrap = true) {
@@ -2010,6 +2147,7 @@ class GridMap {
     this.length = cols * rows;
     this.types = new Uint8Array(this.length);
     this.owners = new Int32Array(this.length).fill(-1);
+    this.floor = new Uint8Array(this.length);
   }
 
   /** 世界坐标 → 扁平索引；越界且不环绕时返回 -1 */
@@ -2055,24 +2193,26 @@ class GridMap {
     return true;
   }
 
-  /** 把整张网格填成同一种类型（保留墙体可选） */
-  fill(type, keepWalls = false) {
-    if (!keepWalls) {
+  /** 把整张网格填成同一种类型。`keepTerrain` 为真时保留 floor 层里的地形 */
+  fill(type, keepTerrain = false) {
+    if (!keepTerrain) {
       this.types.fill(type);
       this.owners.fill(-1);
+      // 填成地形类型时地板跟着走，否则地板清空
+      this.floor.fill(TERRAIN_MASK[type] ? type : CellType.EMPTY);
       return;
     }
+    // 保留地形：地板层是权威，把它铺回顶层（顺便把被生物盖住的格子还原）
     for (let i = 0; i < this.length; i++) {
-      if (this.types[i] !== CellType.WALL) {
-        this.types[i] = type;
-        this.owners[i] = -1;
-      }
+      const f = this.floor[i];
+      this.types[i] = TERRAIN_MASK[f] ? f : type;
+      this.owners[i] = -1;
     }
   }
 
   /** 统计各类型格子数量，返回 Uint32Array(按类型 id 索引) */
   countByType() {
-    const counts = new Uint32Array(16);
+    const counts = new Uint32Array(32);
     for (let i = 0; i < this.length; i++) counts[this.types[i]]++;
     return counts;
   }
@@ -2098,6 +2238,315 @@ class GridMap {
 }
 
   return { GridMap };
+});
+
+__define("src/life/BodyCell.js", function () {
+const { CellType, cellDef, isDirectional, cellAttr } = __req('src/life/CellType.js');
+
+/**
+ * 身体细胞：记录它在母体蓝图里的相对位置，并定义它的被动行为。
+ *
+ * 注意「被动」二字——细胞不思考。它们只要存在就会持续起作用：
+ * 嘴碰到食物就吃，杀手碰到别人就伤。大脑（阶段 4）只决定"去哪儿"。
+ *
+ * 行为本身不写死在 switch 里：注册表的定义对象带一个 `behavior` 名，
+ * 这里用一张表把它映射到函数。加新细胞类型时，只需要在这张表里补一项
+ * （复用已有行为的话，连这一项都不用加）。
+ */
+
+/** 四邻域：上 右 下 左 */
+const NEIGHBORS_4 = Object.freeze([[0, -1], [1, 0], [0, 1], [-1, 0]]);
+
+/** 八邻域 */
+const NEIGHBORS_8 = Object.freeze([
+  [0, -1], [1, 0], [0, 1], [-1, 0],
+  [-1, -1], [1, 1], [-1, 1], [1, -1],
+]);
+
+class BodyCell {
+  constructor(type, dx, dy, dir = 0) {
+    this.type = type;
+    this.dx = dx;
+    this.dy = dy;
+    this.dir = dir;      // 局部朝向 0-3，仅带朝向的细胞（眼睛）使用
+  }
+
+  clone() {
+    return new BodyCell(this.type, this.dx, this.dy, this.dir);
+  }
+
+  /** 用于物种指纹：类型 + 位置（朝向参与，因为眼睛朝向是结构的一部分） */
+  signature() {
+    return isDirectional(this.type)
+      ? `${this.type}:${this.dx},${this.dy},${this.dir}`
+      : `${this.type}:${this.dx},${this.dy}`;
+  }
+}
+
+// ────────────────────────────── 旋转 ──────────────────────────────
+//
+// 局部坐标 (dx, dy) 绕中心枢轴顺时针旋转 rotation × 90°。
+// 屏幕坐标 y 轴向下，所以顺时针 90° 的变换是 (x, y) → (-y, x)。
+//
+//   rotation 0 (上)  → ( dx,  dy)
+//   rotation 1 (右)  → (-dy,  dx)
+//   rotation 2 (下)  → (-dx, -dy)
+//   rotation 3 (左)  → ( dy, -dx)
+
+function rotateCol(dx, dy, rotation) {
+  switch (rotation & 3) {
+    case 0: return dx;
+    case 1: return -dy;
+    case 2: return -dx;
+    default: return dy;
+  }
+}
+
+function rotateRow(dx, dy, rotation) {
+  switch (rotation & 3) {
+    case 0: return dy;
+    case 1: return dx;
+    case 2: return -dy;
+    default: return -dx;
+  }
+}
+
+// ────────────────────────────── 行为 ──────────────────────────────
+
+/** 行为名 → 函数。注册表的 `behavior` 字段指向这里的键。 */
+const CELL_BEHAVIORS = {
+  mouth: mouthFunction,
+  producer: producerFunction,
+  killer: killerFunction,
+  eye: eyeFunction,
+};
+
+/**
+ * 执行一个细胞的被动行为。
+ * 没有 `behavior` 的类型（移动器、装甲）什么都不做——
+ * 移动器只是"允许移动"的标记，装甲只是"打不动"的格子。
+ */
+function performCellFunction(organism, cell) {
+  const d = cellDef(cell.type);
+  if (!d || !d.behavior) return;
+  const fn = CELL_BEHAVIORS[d.behavior];
+  if (fn) fn(organism, cell);
+}
+
+/** 嘴：吃掉四邻域里的所有食物 */
+function mouthFunction(organism, cell) {
+  const world = organism.world;
+  const grid = world.grid;
+  const col = organism.realCol(cell);
+  const row = organism.realRow(cell);
+
+  // 一份食物能提供的能量由全局「食物量倍率」决定（默认 1）。
+  // 这个数影响的是"吃进来多少"，不是"长出来多少"——所以它只在这里出现，
+  // 生产者造食、死亡掉落都不受影响。
+  const gain = foodEnergyGain(world.config);
+
+  for (let i = 0; i < 4; i++) {
+    const index = grid.index(col + NEIGHBORS_4[i][0], row + NEIGHBORS_4[i][1]);
+    if (index < 0) continue;
+    if (grid.types[index] === CellType.FOOD) {
+      world.revealFloor(index);     // 吃掉的只是食物；底下有地形就露出来
+      organism.energy += gain;
+    }
+  }
+}
+
+/**
+ * 读「食物量倍率」。
+ *
+ * 兜底成 1：传进来的可能是没有这段的旧配置（存档迁移），
+ * 也可能是被面板写成空值——任何一种都不该让进食变成 0 能量。
+ */
+function foodEnergyGain(config) {
+  const v = config && config.life ? config.life.foodEnergyScale : 1;
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+/** 生产者：以一定概率在某个相邻空格生成食物 */
+function producerFunction(organism, cell) {
+  const world = organism.world;
+  const cfg = world.config.life;
+
+  // 会动的生物默认不能用生产者细胞——这是"移动"要付的代价，
+  // 也是生态系统里"生产者 vs 掠食者"分化的来源。
+  if (organism.anatomy.hasMover && !cfg.moversCanProduce) return;
+
+  const prob = cfg.foodProdProb;
+  if (prob <= 0) return;
+  if (!world.rng.chance(prob)) return;
+
+  const grid = world.grid;
+  const col = organism.realCol(cell);
+  const row = organism.realRow(cell);
+  const n = NEIGHBORS_4[world.rng.int(4)];
+  const index = grid.index(col + n[0], row + n[1]);
+  if (index < 0) return;
+  if (grid.types[index] === CellType.EMPTY) {
+    world.setCellAt(index, CellType.FOOD, -1);
+  }
+}
+
+/**
+ * 杀手：伤害四邻域里属于其他生物的身体细胞（装甲格免疫）。
+ *
+ * 伤害值来自该细胞类型的 `damage` 属性（可在参数面板里实时调），
+ * 而不是写死的 1。
+ */
+function killerFunction(organism, cell) {
+  const world = organism.world;
+  const grid = world.grid;
+  const damage = cellAttr(world.config, cell.type, 'damage');
+  if (damage <= 0) return;
+
+  const col = organism.realCol(cell);
+  const row = organism.realRow(cell);
+
+  for (let i = 0; i < 4; i++) {
+    const index = grid.index(col + NEIGHBORS_4[i][0], row + NEIGHBORS_4[i][1]);
+    if (index < 0) continue;
+
+    const ownerId = grid.owners[index];
+    if (ownerId < 0 || ownerId === organism.id) continue;
+    if (grid.types[index] === CellType.ARMOR) continue;   // 装甲格本身打不动
+
+    const target = world.organismById(ownerId);
+    if (!target || !target.alive) continue;
+    target.harm(damage);
+  }
+}
+
+/**
+ * 眼睛：感知能力在 Sensors 里实现（阶段 A 的 think() 统一采样），
+ * 这里不需要做任何事——眼睛是**结构性能力**，不是"每 tick 的动作"。
+ *
+ * 保留这个分发分支，是为了让"眼睛也是一种身体细胞"这件事在代码里显式可见，
+ * 而不是让它悄悄消失在 default 里。
+ */
+function eyeFunction(organism, cell) {
+  // 感知在 Sensors.sense() 里做
+}
+
+  return { NEIGHBORS_4, NEIGHBORS_8, BodyCell, rotateCol, rotateRow, CELL_BEHAVIORS, performCellFunction, foodEnergyGain };
+});
+
+__define("src/life/Terrain.js", function () {
+const { CellType, cellDef } = __req('src/life/CellType.js');
+const { NEIGHBORS_4 } = __req('src/life/BodyCell.js');
+
+/**
+ * 地形效果表 —— "生物踩到地形上会发生什么"。
+ *
+ * 注册表里的定义对象用三个字段指向这里的函数：
+ *
+ *   `enter`  踏入瞬间（移动成功的那一下）—— 岩浆烫一下、沼泽拖一下
+ *   `stand`  驻留每 tick                    —— 辐射带持续照射
+ *   `tick`   世界级每 tick（和生物无关）      —— 腐殖质自己往外冒食物
+ *
+ * 前两个由 **Organism** 调用（作用对象是"生物"），第三个由 **World** 调用
+ * （作用对象是"格子"）。分开是因为腐殖质不需要有生物在场也会造食。
+ *
+ * 数值全部走 `Config.terrain`，可以在参数面板里实时调——和细胞属性同一套思路：
+ * 效果写在这里，数值写在配置里。
+ *
+ * ── 为什么 enter 和 stand 要分开 ──
+ *
+ * 只做 enter 的话，"待在辐射带里持续掉血"就没法表达——它不是"进入时发生一次"，
+ * 而是"待在里面每 tick 都发生"。反过来只做 stand 的话，"踏进岩浆被烫一下"
+ * 的瞬时冲击感也会丢掉。两个都需要，所以拆开。
+ */
+
+// ────────────────────────────── 数值读取 ──────────────────────────────
+
+/** 读一个地形数值，缺失/非法时回退到默认值 */
+function num(config, key, fallback) {
+  const t = config && config.terrain;
+  const v = t ? t[key] : undefined;
+  return Number.isFinite(v) ? v : fallback;
+}
+
+// ────────────────────────────── 踏入 ──────────────────────────────
+
+const TERRAIN_ENTER = {
+  /** 岩浆：踏进去先挨一记冲击伤害 */
+  burn(organism) {
+    const dmg = num(organism.world.config, 'lavaEnterDamage', 2);
+    if (dmg > 0) organism.harm(dmg);
+  },
+
+  /** 沼泽：移动本身要额外耗能（能量不够就落到 0，进入饥饿计时） */
+  bog(organism) {
+    const cost = num(organism.world.config, 'swampMoveCost', 0.5);
+    if (cost <= 0) return;
+    organism.energy -= cost;
+    if (organism.energy < 0) organism.energy = 0;
+  },
+};
+
+// ────────────────────────────── 驻留 ──────────────────────────────
+
+const TERRAIN_STAND = {
+  /** 岩浆：待在里面每 tick 继续烧 */
+  burn(organism) {
+    const dmg = num(organism.world.config, 'lavaStandDamage', 1);
+    if (dmg > 0) organism.harm(dmg);
+  },
+
+  /**
+   * 辐射带：每 tick 扣一点血，同时**大幅提高变异率**。
+   *
+   * 变异率不是直接改 `organism.mutability`——那会指数爆炸（5% ×3 ×3 ×3… 三 tick 就封顶）。
+   * 而是打一个"这一 tick 处于辐射中"的标记，由 Mutation 在**繁殖那一步**
+   * 临时乘上倍率。这样"在辐射里待过的个体，后代更容易突变"才是准确的语义。
+   */
+  irradiate(organism) {
+    const dmg = num(organism.world.config, 'radDamage', 0.25);
+    if (dmg > 0) organism.harm(dmg);
+    if (organism.alive) organism.inRadiation = true;
+  },
+};
+
+// ────────────────────────────── 世界级每 tick ──────────────────────────────
+
+const TERRAIN_TICK = {
+  /** 腐殖质：以一定概率往相邻空格冒一份食物 */
+  fertilize(world, index) {
+    const prob = num(world.config, 'humusFoodProb', 0.5);
+    if (prob <= 0) return;
+    if (!world.rng.chance(prob)) return;
+
+    const grid = world.grid;
+    const [col, row] = grid.coords(index);
+    const n = NEIGHBORS_4[world.rng.int(4)];
+    const target = grid.index(col + n[0], row + n[1]);
+    if (target < 0) return;
+    if (grid.types[target] !== CellType.EMPTY) return;
+    world.setCellAt(target, CellType.FOOD, -1);
+  },
+};
+
+// ────────────────────────────── 分发 ──────────────────────────────
+
+/** 生物踏入 (col,row) 那格地形时触发。`type` 是**进入前**那格的类型 */
+function applyTerrainEnter(organism, type, col, row) {
+  const d = cellDef(type);
+  if (!d || !d.enter) return;
+  const fn = TERRAIN_ENTER[d.enter];
+  if (fn) fn(organism, col, row);
+}
+
+/** 生物驻留在 (col,row) 时每 tick 触发 */
+function applyTerrainStand(organism, type, col, row) {
+  const d = cellDef(type);
+  if (!d || !d.stand) return;
+  const fn = TERRAIN_STAND[d.stand];
+  if (fn) fn(organism, col, row);
+}
+
+  return { TERRAIN_ENTER, TERRAIN_STAND, TERRAIN_TICK, applyTerrainEnter, applyTerrainStand };
 });
 
 __define("src/stats/Species.js", function () {
@@ -2282,7 +2731,8 @@ class SpeciesRegistry {
 
 __define("src/core/World.js", function () {
 const { GridMap } = __req('src/core/GridMap.js');
-const { CellType, CELL_TYPE_COUNT, LIVING_CELL_TYPES } = __req('src/life/CellType.js');
+const { CellType, CELL_TYPE_COUNT, LIVING_CELL_TYPES, TERRAIN_MASK, TICKS_TERRAIN, TICKING_TERRAIN_TYPES, cellDef } = __req('src/life/CellType.js');
+const { TERRAIN_TICK } = __req('src/life/Terrain.js');
 const { SpeciesRegistry } = __req('src/stats/Species.js');
 
 /**
@@ -2303,7 +2753,6 @@ class World {
 
     this.tick = 0;
     this.organisms = [];
-    this.walls = [];
 
     this.nextOrganismId = 1;
     this._organismsById = new Map();
@@ -2316,6 +2765,13 @@ class World {
     this.foodCells = [];
     this.foodPos = new Int32Array(this.grid.length).fill(-1);
     this._initFoodIndex();
+
+    // 需要"每 tick 更新"的地形（腐殖质…）的索引，和食物索引同一套 swap-remove。
+    // 只有带 `tick` 行为的地形才建索引——其它地形一格代价都不付。
+    // 索引跟着 **floor 层** 走，所以被生物踩在脚下的腐殖质照样会造食。
+    this.terrainCells = new Map();   // typeId → number[]
+    this.terrainPos = new Map();     // typeId → Int32Array（index → 在数组里的位置）
+    this._initTerrainIndex();
 
     // 物种注册表：由 world.addOrganism 驱动，繁殖时顺带登记祖先关系
     this.species = new SpeciesRegistry(config);
@@ -2356,6 +2812,54 @@ class World {
     this.foodPos[index] = -1;
   }
 
+  // ────────────────────────────── 地形索引 ──────────────────────────────
+  //
+  // 只有"带 tick 行为"的地形才有索引（目前是腐殖质）。
+  // 索引建在 floor 层上，所以地形被生物盖住时索引不变、照样会 tick。
+
+  _initTerrainIndex() {
+    const n = this.grid.length;
+    this.terrainCells.clear();
+    this.terrainPos.clear();
+    for (const t of TICKING_TERRAIN_TYPES) {
+      this.terrainCells.set(t, []);
+      this.terrainPos.set(t, new Int32Array(n).fill(-1));
+    }
+    const floor = this.grid.floor;
+    for (let i = 0; i < n; i++) {
+      if (TICKS_TERRAIN[floor[i]]) this._addTerrainCell(i, floor[i]);
+    }
+  }
+
+  _addTerrainCell(index, type) {
+    const cells = this.terrainCells.get(type);
+    if (!cells) return;
+    const pos = this.terrainPos.get(type);
+    if (pos[index] >= 0) return;
+    pos[index] = cells.length;
+    cells.push(index);
+  }
+
+  _removeTerrainCell(index, type) {
+    const cells = this.terrainCells.get(type);
+    if (!cells) return;
+    const pos = this.terrainPos.get(type);
+    const p = pos[index];
+    if (p < 0) return;
+    const last = cells.pop();
+    if (p < cells.length) {
+      cells[p] = last;
+      pos[last] = p;
+    }
+    pos[index] = -1;
+  }
+
+  /** 地板类型变了 → 把索引从旧类型挪到新类型 */
+  _retagTerrain(index, oldType, newType) {
+    if (TICKS_TERRAIN[oldType]) this._removeTerrainCell(index, oldType);
+    if (TICKS_TERRAIN[newType]) this._addTerrainCell(index, newType);
+  }
+
   // ────────────────────────────── 事件 ──────────────────────────────
 
   /** 订阅事件：'cellChanged' | 'fullRedraw' | 'reset' | 'stepped' | 'organismAdded' */
@@ -2392,37 +2896,72 @@ class World {
     return index;
   }
 
-  /** 按扁平索引写格子。所有写入都收敛到这一个函数，食物索引才不会有偏差。 */
+  /**
+   * 按扁平索引写格子。所有写入都收敛到这一个函数，食物索引才不会有偏差。
+   *
+   * 它同时维护 **地板层**（GridMap.floor）：
+   *   · 写的是地形类型（墙/岩浆/…）→ 地板跟着更新
+   *   · 写的是"无主的空" → 地板也清掉（这就是玩家画"空"/橡皮擦的语义）
+   * 生物写自己的细胞、或写食物，都不动地板。
+   * 生物**离开**时要调 `revealFloor()`，不能用这个函数写空——那样会把地形一起删掉。
+   */
   setCellAt(index, type, ownerId = -1) {
     if (index < 0 || index >= this.grid.length) return;
     const types = this.grid.types;
     if (types[index] === type && this.grid.owners[index] === ownerId) return;
 
     const wasFood = types[index] === CellType.FOOD;
-    const wasWall = types[index] === CellType.WALL;
 
     this.grid.set(index, type, ownerId);
+
+    const floor = this.grid.floor;
+    if (TERRAIN_MASK[type]) {
+      if (floor[index] !== type) {
+        const old = floor[index];
+        floor[index] = type;
+        this._retagTerrain(index, old, type);
+      }
+    } else if (type === CellType.EMPTY && ownerId < 0 && floor[index] !== CellType.EMPTY) {
+      const old = floor[index];
+      floor[index] = CellType.EMPTY;
+      this._retagTerrain(index, old, CellType.EMPTY);
+    }
 
     if (type === CellType.FOOD) {
       if (!wasFood) this._addFood(index);
     } else if (wasFood) {
       this._removeFood(index);
     }
-    if (type === CellType.WALL && !wasWall) this.walls.push(index);
 
     this.emit('cellChanged', index);
   }
 
   /**
+   * 把地板重新铺回顶层 —— 生物离开 / 食物被吃掉时用。
+   *
+   * 和"写空"的区别是这里**保留地形**：一只生物从岩浆上走过，
+   * 岩浆只是被暂时盖住，它走了就该露出来。
+   */
+  revealFloor(index) {
+    if (index < 0 || index >= this.grid.length) return;
+    this.setCellAt(index, this.grid.floor[index], -1);
+  }
+
+  /** 这一格的地形是什么（不考虑压在上面的生物/食物） */
+  floorAt(col, row) {
+    const i = this.grid.index(col, row);
+    return i < 0 ? CellType.EMPTY : this.grid.floor[i];
+  }
+
+  /**
    * 整张网格填成同一种类型。
    * 绕过 setCellAt 的批量操作必须走这里，否则食物索引会与网格脱节。
+   * `keepTerrain` 为真时保留地板层里的地形（对应参数"重置时保留地形"）。
    */
-  fillGrid(type = CellType.EMPTY, keepWalls = false) {
-    this.grid.fill(type, keepWalls);
-    this.walls = keepWalls
-      ? this.walls.filter((i) => this.grid.types[i] === CellType.WALL)
-      : [];
+  fillGrid(type = CellType.EMPTY, keepTerrain = false) {
+    this.grid.fill(type, keepTerrain);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.emit('fullRedraw');
   }
 
@@ -2531,7 +3070,25 @@ class World {
 
     for (let i = 0; i < n && cells.length > 0; i++) {
       const index = cells[this.rng.int(cells.length)];
-      this.setCellAt(index, CellType.EMPTY, -1);
+      this.revealFloor(index);          // 食物烂掉 → 露出底下的地形（如果本来有）
+    }
+  }
+
+  /**
+   * 地形自身的每 tick 行为（腐殖质造食）。
+   *
+   * 只遍历"带 tick 行为"的地形格，不扫全网格——代价与地形格数成正比。
+   * 注意：这里的处理器**不应该改地形**（会打乱正在遍历的 swap-remove 索引）；
+   * 目前的处理器（造食）只写食物，安全。
+   */
+  applyTerrainTick() {
+    for (const type of TICKING_TERRAIN_TYPES) {
+      const cells = this.terrainCells.get(type);
+      if (!cells || cells.length === 0) continue;
+      const d = cellDef(type);
+      const fn = d && d.tick ? TERRAIN_TICK[d.tick] : null;
+      if (!fn) continue;
+      for (let i = 0; i < cells.length; i++) fn(this, cells[i]);
     }
   }
 
@@ -2579,6 +3136,7 @@ class World {
     this._compactOrganisms();
 
     // ── 环境更新 ──
+    this.applyTerrainTick();     // 腐殖质等自己会"长"东西的地形
     this.applyFoodDecay();
     this.applyFoodDrop();
 
@@ -2587,14 +3145,12 @@ class World {
 
   // ────────────────────────────── 重置 ──────────────────────────────
 
-  reset(keepWalls = false) {
+  reset(keepTerrain = false) {
     this.clearOrganisms();
     this.grid.wrap = this.config.world.wrapEdges;
-    this.grid.fill(CellType.EMPTY, keepWalls);
-    this.walls = keepWalls
-      ? this.walls.filter((i) => this.grid.types[i] === CellType.WALL)
-      : [];
+    this.grid.fill(CellType.EMPTY, keepTerrain);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.species = new SpeciesRegistry(this.config);
     this.nextOrganismId = 1;
     this.tick = 0;
@@ -2608,9 +3164,9 @@ class World {
     this.organisms.length = 0;
     this._organismsById.clear();
     this.grid.resize(cols, rows, this.config.world.wrapEdges);
-    this.walls = [];
     this.foodPos = new Int32Array(this.grid.length);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.species = new SpeciesRegistry(this.config);
     this.nextOrganismId = 1;
     this.tick = 0;
@@ -2975,199 +3531,6 @@ function generateEmptyWorld(world) {
 }
 
   return { generateDemoWorld, generateEmptyWorld };
-});
-
-__define("src/life/BodyCell.js", function () {
-const { CellType, cellDef, isDirectional, cellAttr } = __req('src/life/CellType.js');
-
-/**
- * 身体细胞：记录它在母体蓝图里的相对位置，并定义它的被动行为。
- *
- * 注意「被动」二字——细胞不思考。它们只要存在就会持续起作用：
- * 嘴碰到食物就吃，杀手碰到别人就伤。大脑（阶段 4）只决定"去哪儿"。
- *
- * 行为本身不写死在 switch 里：注册表的定义对象带一个 `behavior` 名，
- * 这里用一张表把它映射到函数。加新细胞类型时，只需要在这张表里补一项
- * （复用已有行为的话，连这一项都不用加）。
- */
-
-/** 四邻域：上 右 下 左 */
-const NEIGHBORS_4 = Object.freeze([[0, -1], [1, 0], [0, 1], [-1, 0]]);
-
-/** 八邻域 */
-const NEIGHBORS_8 = Object.freeze([
-  [0, -1], [1, 0], [0, 1], [-1, 0],
-  [-1, -1], [1, 1], [-1, 1], [1, -1],
-]);
-
-class BodyCell {
-  constructor(type, dx, dy, dir = 0) {
-    this.type = type;
-    this.dx = dx;
-    this.dy = dy;
-    this.dir = dir;      // 局部朝向 0-3，仅带朝向的细胞（眼睛）使用
-  }
-
-  clone() {
-    return new BodyCell(this.type, this.dx, this.dy, this.dir);
-  }
-
-  /** 用于物种指纹：类型 + 位置（朝向参与，因为眼睛朝向是结构的一部分） */
-  signature() {
-    return isDirectional(this.type)
-      ? `${this.type}:${this.dx},${this.dy},${this.dir}`
-      : `${this.type}:${this.dx},${this.dy}`;
-  }
-}
-
-// ────────────────────────────── 旋转 ──────────────────────────────
-//
-// 局部坐标 (dx, dy) 绕中心枢轴顺时针旋转 rotation × 90°。
-// 屏幕坐标 y 轴向下，所以顺时针 90° 的变换是 (x, y) → (-y, x)。
-//
-//   rotation 0 (上)  → ( dx,  dy)
-//   rotation 1 (右)  → (-dy,  dx)
-//   rotation 2 (下)  → (-dx, -dy)
-//   rotation 3 (左)  → ( dy, -dx)
-
-function rotateCol(dx, dy, rotation) {
-  switch (rotation & 3) {
-    case 0: return dx;
-    case 1: return -dy;
-    case 2: return -dx;
-    default: return dy;
-  }
-}
-
-function rotateRow(dx, dy, rotation) {
-  switch (rotation & 3) {
-    case 0: return dy;
-    case 1: return dx;
-    case 2: return -dy;
-    default: return -dx;
-  }
-}
-
-// ────────────────────────────── 行为 ──────────────────────────────
-
-/** 行为名 → 函数。注册表的 `behavior` 字段指向这里的键。 */
-const CELL_BEHAVIORS = {
-  mouth: mouthFunction,
-  producer: producerFunction,
-  killer: killerFunction,
-  eye: eyeFunction,
-};
-
-/**
- * 执行一个细胞的被动行为。
- * 没有 `behavior` 的类型（移动器、装甲）什么都不做——
- * 移动器只是"允许移动"的标记，装甲只是"打不动"的格子。
- */
-function performCellFunction(organism, cell) {
-  const d = cellDef(cell.type);
-  if (!d || !d.behavior) return;
-  const fn = CELL_BEHAVIORS[d.behavior];
-  if (fn) fn(organism, cell);
-}
-
-/** 嘴：吃掉四邻域里的所有食物 */
-function mouthFunction(organism, cell) {
-  const world = organism.world;
-  const grid = world.grid;
-  const col = organism.realCol(cell);
-  const row = organism.realRow(cell);
-
-  // 一份食物能提供的能量由全局「食物量倍率」决定（默认 1）。
-  // 这个数影响的是"吃进来多少"，不是"长出来多少"——所以它只在这里出现，
-  // 生产者造食、死亡掉落都不受影响。
-  const gain = foodEnergyGain(world.config);
-
-  for (let i = 0; i < 4; i++) {
-    const index = grid.index(col + NEIGHBORS_4[i][0], row + NEIGHBORS_4[i][1]);
-    if (index < 0) continue;
-    if (grid.types[index] === CellType.FOOD) {
-      world.setCellAt(index, CellType.EMPTY, -1);
-      organism.energy += gain;
-    }
-  }
-}
-
-/**
- * 读「食物量倍率」。
- *
- * 兜底成 1：传进来的可能是没有这段的旧配置（存档迁移），
- * 也可能是被面板写成空值——任何一种都不该让进食变成 0 能量。
- */
-function foodEnergyGain(config) {
-  const v = config && config.life ? config.life.foodEnergyScale : 1;
-  return Number.isFinite(v) && v > 0 ? v : 1;
-}
-
-/** 生产者：以一定概率在某个相邻空格生成食物 */
-function producerFunction(organism, cell) {
-  const world = organism.world;
-  const cfg = world.config.life;
-
-  // 会动的生物默认不能用生产者细胞——这是"移动"要付的代价，
-  // 也是生态系统里"生产者 vs 掠食者"分化的来源。
-  if (organism.anatomy.hasMover && !cfg.moversCanProduce) return;
-
-  const prob = cfg.foodProdProb;
-  if (prob <= 0) return;
-  if (!world.rng.chance(prob)) return;
-
-  const grid = world.grid;
-  const col = organism.realCol(cell);
-  const row = organism.realRow(cell);
-  const n = NEIGHBORS_4[world.rng.int(4)];
-  const index = grid.index(col + n[0], row + n[1]);
-  if (index < 0) return;
-  if (grid.types[index] === CellType.EMPTY) {
-    world.setCellAt(index, CellType.FOOD, -1);
-  }
-}
-
-/**
- * 杀手：伤害四邻域里属于其他生物的身体细胞（装甲格免疫）。
- *
- * 伤害值来自该细胞类型的 `damage` 属性（可在参数面板里实时调），
- * 而不是写死的 1。
- */
-function killerFunction(organism, cell) {
-  const world = organism.world;
-  const grid = world.grid;
-  const damage = cellAttr(world.config, cell.type, 'damage');
-  if (damage <= 0) return;
-
-  const col = organism.realCol(cell);
-  const row = organism.realRow(cell);
-
-  for (let i = 0; i < 4; i++) {
-    const index = grid.index(col + NEIGHBORS_4[i][0], row + NEIGHBORS_4[i][1]);
-    if (index < 0) continue;
-
-    const ownerId = grid.owners[index];
-    if (ownerId < 0 || ownerId === organism.id) continue;
-    if (grid.types[index] === CellType.ARMOR) continue;   // 装甲格本身打不动
-
-    const target = world.organismById(ownerId);
-    if (!target || !target.alive) continue;
-    target.harm(damage);
-  }
-}
-
-/**
- * 眼睛：感知能力在 Sensors 里实现（阶段 A 的 think() 统一采样），
- * 这里不需要做任何事——眼睛是**结构性能力**，不是"每 tick 的动作"。
- *
- * 保留这个分发分支，是为了让"眼睛也是一种身体细胞"这件事在代码里显式可见，
- * 而不是让它悄悄消失在 default 里。
- */
-function eyeFunction(organism, cell) {
-  // 感知在 Sensors.sense() 里做
-}
-
-  return { NEIGHBORS_4, NEIGHBORS_8, BodyCell, rotateCol, rotateRow, CELL_BEHAVIORS, performCellFunction, foodEnergyGain };
 });
 
 __define("src/life/Anatomy.js", function () {
@@ -3685,10 +4048,18 @@ function mutateOrganism(child, parent, rng, config) {
   child.mutability = parent.mutability;
 
   // ── 2. 结构变异 ──
-  const rate = mut.useGlobalMutability ? mut.globalMutability : child.mutability;
+  const base = mut.useGlobalMutability ? mut.globalMutability : child.mutability;
+
+  // 辐射带加成：站在辐射带里的个体，**后代**更容易突变。
+  // 只在这一步临时乘，不改 child.mutability——否则会指数爆炸。
+  const radBoost = parent.inRadiation
+    ? Math.max(1, numOr(config.terrain && config.terrain.radMutationBoost, 3))
+    : 1;
+  const rate = base * radBoost;
+
   let changed = false;
 
-  if (rate > 0 && rng.chance(rate)) {
+  if (rate > 0 && rng.chance(Math.min(100, rate))) {
     changed = mutateAnatomy(child.anatomy, rng, mut);
 
     // 变异真的发生了，变异率本身也漂移一点。
@@ -3789,15 +4160,21 @@ function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** 读一个可能不存在的配置数值，非法时回退（旧存档没有 terrain 段） */
+function numOr(v, fallback) {
+  return Number.isFinite(v) ? v : fallback;
+}
+
   return { mutateOrganism, mutateAnatomy, mutateBrain };
 });
 
 __define("src/life/Organism.js", function () {
-const { CellType, DIR_VECTORS, cellAttr } = __req('src/life/CellType.js');
+const { CellType, DIR_VECTORS, cellAttr, isPassable } = __req('src/life/CellType.js');
 const { Anatomy } = __req('src/life/Anatomy.js');
 const { Brain } = __req('src/life/Brain.js');
 const { Sensors } = __req('src/life/Sensors.js');
 const { rotateCol, rotateRow, performCellFunction } = __req('src/life/BodyCell.js');
+const { applyTerrainEnter, applyTerrainStand } = __req('src/life/Terrain.js');
 const { mutateOrganism } = __req('src/life/Mutation.js');
 
 /**
@@ -3826,6 +4203,7 @@ class Organism {
     this.energy = 0;
     this.damage = 0;
     this.starveTicks = 0;        // 连续能量见底的 tick 数（代谢消耗引入的饿死计时）
+    this.inRadiation = false;    // 这一 tick 是否站在辐射带里（Mutation 用它放大变异率）
 
     this.alive = true;
     this.anatomy = new Anatomy();
@@ -4004,6 +4382,10 @@ class Organism {
       return;
     }
 
+    // 每 tick 重置"这一 tick 是否处于辐射中"——辐射的变异率加成只在
+    // 当 tick 繁殖时生效，不该跨 tick 累积（否则会指数爆炸）
+    this.inRadiation = false;
+
     // 代谢：所有细胞的消耗之和。饿死不是立刻的——能量见底后还能撑
     // `starvationTicks` 个 tick，给新生个体一点找食物的时间。
     const upkeep = this.upkeepCost();
@@ -4022,6 +4404,12 @@ class Organism {
     }
 
     if (this.anatomy.hasMover) this._actMove();
+    if (!this.alive) return;          // 可能踏进岩浆被烫死
+
+    // 驻留效果：站在辐射带/岩浆上每 tick 触发一次。
+    // 放在移动**之后**，所以"这一 tick 走到哪儿"决定了受什么影响。
+    this._applyTerrainStand();
+    if (!this.alive) return;
 
     // 细胞功能：进食 / 造食 / 攻击。杀手可能中途把自己害死（一击必杀模式）
     const cells = this.anatomy.cells;
@@ -4031,6 +4419,21 @@ class Organism {
     }
 
     if (this.energy >= this.foodNeeded()) this.reproduce();
+  }
+
+  /**
+   * 驻留在当前格的地形上，每 tick 一次。
+   *
+   * 读的是 **floor 层**——生物自己的细胞就压在枢轴格上，顶层 `types` 是它自己，
+   * 只有地板层才知道它脚底下踩的是什么。
+   */
+  _applyTerrainStand() {
+    const grid = this.world.grid;
+    const index = grid.index(this.col, this.row);
+    if (index < 0) return;
+    const type = grid.floor[index];
+    if (type === CellType.EMPTY) return;
+    applyTerrainStand(this, type, this.col, this.row);
   }
 
   _actMove() {
@@ -4065,11 +4468,22 @@ class Organism {
     const newRow = this.row + v[1];
     if (!this.isClear(newCol, newRow, this.rotation)) return false;
 
+    // 目的地的**地形**要在 writeGrid 之前读——writeGrid 会用自己的细胞盖住顶层。
+    // 读的是 floor 层而不是 types：万一那格上压着食物，地形仍然算数
+    // （生物走过去会把食物顶掉，所以该烫还是得烫）。
+    const destIndex = this.world.grid.index(newCol, newRow);
+    const destType = destIndex < 0 ? CellType.EMPTY : this.world.grid.floor[destIndex];
+
     this.clearGrid();
     this.col = newCol;
     this.row = newRow;
     this.writeGrid();
     this.normalizePosition();
+
+    // 踏入效果（岩浆烫、沼泽拖）。可能直接把这只生物弄死，调用方要复查 alive。
+    if (destType !== CellType.EMPTY) {
+      applyTerrainEnter(this, destType, this.col, this.row);
+    }
     return true;
   }
 
@@ -4108,6 +4522,7 @@ class Organism {
       if (type === CellType.EMPTY) continue;
       if (grid.owners[index] === this.id) continue;
       if (type === CellType.FOOD && !blocksFood) continue;
+      if (isPassable(type)) continue;           // 岩浆/沼泽/辐射带/腐殖质等可以走进去
       return false;
     }
     return true;
@@ -4140,6 +4555,7 @@ class Organism {
       const type = grid.types[index];
       if (type === CellType.EMPTY) continue;
       if (type === CellType.FOOD && !blocksFood) continue;
+      if (isPassable(type)) continue;           // 地形（岩浆/沼泽/…）可以落在上面
       return false;
     }
     return true;
@@ -4169,6 +4585,7 @@ class Organism {
     const grid = this.world.grid;
     const type = grid.types[index];
     if (type === CellType.EMPTY || type === CellType.FOOD) return true;
+    if (isPassable(type)) return true;          // 地形不挡住"出生路径"
     const ownerId = grid.owners[index];
     return ownerId === this.id || ownerId === parentId;
   }
@@ -4193,7 +4610,9 @@ class Organism {
     for (let i = 0; i < cells.length; i++) {
       const cell = cells[i];
       const index = grid.index(this.realCol(cell), this.realRow(cell));
-      if (index >= 0) world.setCellAt(index, CellType.EMPTY, -1);
+      // 用 revealFloor 而不是写空：地形（岩浆/腐殖质…）只是被身体暂时盖住，
+      // 生物离开后要露出来。写空会把地形一起删掉。
+      if (index >= 0) world.revealFloor(index);
     }
   }
 
@@ -4624,7 +5043,7 @@ class FossilRecord {
 });
 
 __define("src/io/SaveLoad.js", function () {
-const { CellType } = __req('src/life/CellType.js');
+const { CellType, CELL_DEF_BY_KEY, cellDef } = __req('src/life/CellType.js');
 const { Organism } = __req('src/life/Organism.js');
 const { Species } = __req('src/stats/Species.js');
 const { restoreConfig } = __req('src/core/config.js');
@@ -4634,7 +5053,7 @@ const { restoreConfig } = __req('src/core/config.js');
  *
  * 存档要"完整可继续演化"，所以四样东西都得存：
  *   1. 配置快照    —— 否则读档后物理规则变了，生态立刻跑偏
- *   2. 网格地形    —— 食物与墙（生物的身体会重新写进去）
+ *   2. 网格地形    —— 食物 + **地板层**（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质）
  *   3. 全部个体    —— 位置、朝向、能量、年龄、变异率，以及**完整的大脑权重**
  *   4. RNG 状态    —— 否则读档后随机序列从头开始，"继续跑"和"没存过"结果不同
  *
@@ -4643,7 +5062,12 @@ const { restoreConfig } = __req('src/core/config.js');
  */
 
 const SAVE_FORMAT = 'evosim-world';
-const SAVE_VERSION = 1;
+
+/**
+ * v1 → v2（阶段 8）：地形从"只有墙"改成"地板层 + 任意地形"。
+ * v1 存档仍然能读（把 `grid.walls` 当成只有墙的地板），不会报错。
+ */
+const SAVE_VERSION = 2;
 
 /**
  * 权重用 base64 编码原始字节，而不是 JSON 数字数组。
@@ -4762,14 +5186,21 @@ function serializeSpecies(reg) {
  */
 function serializeWorld(world, rng, extra = {}) {
   const grid = world.grid;
-  const types = grid.types;
-  const walls = [];
+  const floor = grid.floor;
 
   // 食物：直接搬 world.foodCells（顺序有意义）
   const food = Array.from(world.foodCells);
 
-  for (let i = 0; i < types.length; i++) {
-    if (types[i] === CellType.WALL) walls.push(i);
+  // 地形：按**地板层**存，而不是按顶层 `types`。
+  // 区别很关键——生物踩在岩浆上时，顶层是生物细胞、地板才是岩浆；
+  // 只存顶层的话，读档后那块岩浆就没了。
+  const terrain = {};
+  for (let i = 0; i < floor.length; i++) {
+    const t = floor[i];
+    if (!t) continue;
+    const d = cellDef(t);
+    if (!d) continue;
+    (terrain[d.key] || (terrain[d.key] = [])).push(i);
   }
 
   const organisms = new Array(world.organisms.length);
@@ -4787,7 +5218,7 @@ function serializeWorld(world, rng, extra = {}) {
       rows: grid.rows,
       wrap: grid.wrap,
       food,
-      walls,
+      terrain,
     },
     config: extra.config ?? null,
     rng: rng ? rng.getState() : null,
@@ -4873,7 +5304,7 @@ function restoreSpeciesRegistry(world, raw) {
  * 顺序有讲究：**先恢复配置和网格尺寸，再建生物**——Organism 的构造函数
  * 会按 config.brain.inSize 建感知器缓冲，配置没恢复就构造个体会得到错的维度。
  *
- * @returns {{ organisms: number, food: number, walls: number, species: number, brainSkipped: number }}
+ * @returns {{ organisms: number, food: number, terrain: number, species: number, brainSkipped: number }}
  */
 function deserializeWorld(world, rng, rawData) {
   const data = validateSave(rawData);
@@ -4892,24 +5323,49 @@ function deserializeWorld(world, rng, rawData) {
   world.config.world.rows = rows;
   world.config.world.wrapEdges = wrap;
 
-  // ── 3. 地形：直接写 TypedArray，最后统一重建食物索引 ──
+  // ── 3. 地形：直接写 TypedArray，最后统一重建索引 ──
   // （逐个走 setCellAt 会触发几万次 cellChanged 事件，纯属浪费）
   const grid = world.grid;
   grid.types.fill(CellType.EMPTY);
   grid.owners.fill(-1);
+  grid.floor.fill(CellType.EMPTY);
 
-  const wallList = data.grid.walls || [];
   const foodList = data.grid.food || [];
-  for (let i = 0; i < wallList.length; i++) grid.types[wallList[i]] = CellType.WALL;
-  for (let i = 0; i < foodList.length; i++) grid.types[foodList[i]] = CellType.FOOD;
 
-  world.walls = wallList.slice();
+  if (data.grid.terrain) {
+    // v2：地板层按类型 key 分组
+    for (const key of Object.keys(data.grid.terrain)) {
+      const d = CELL_DEF_BY_KEY[key];
+      if (!d) continue;                       // 未知类型（比如新版本删掉的）直接跳过
+      const list = data.grid.terrain[key];
+      for (let i = 0; i < list.length; i++) {
+        grid.floor[list[i]] = d.id;
+        grid.types[list[i]] = d.id;
+      }
+    }
+  } else {
+    // v1 兼容：只有墙
+    const wallList = data.grid.walls || [];
+    for (let i = 0; i < wallList.length; i++) {
+      grid.floor[wallList[i]] = CellType.WALL;
+      grid.types[wallList[i]] = CellType.WALL;
+    }
+  }
+
+  // 食物压在地形之上
+  for (let i = 0; i < foodList.length; i++) grid.types[foodList[i]] = CellType.FOOD;
 
   // 食物索引按存档里的**原始顺序**重建，而不是走 _initFoodIndex() 的升序扫描。
   // 腐败抽样依赖数组位置，顺序错了读档后就会分叉（见 serializeWorld 注释）。
   world.foodCells = foodList.slice();
   world.foodPos = new Int32Array(grid.length).fill(-1);
   for (let p = 0; p < world.foodCells.length; p++) world.foodPos[world.foodCells[p]] = p;
+
+  // 地形索引（腐殖质）重建——必须在 floor 写完之后
+  world._initTerrainIndex();
+
+  let terrainCount = 0;
+  for (let i = 0; i < grid.floor.length; i++) if (grid.floor[i]) terrainCount++;
 
   // ── 4. 物种表（必须在建生物之前，这样物种 id 与祖先链原样保留）──
   restoreSpeciesRegistry(world, data.species);
@@ -4956,7 +5412,7 @@ function deserializeWorld(world, rng, rawData) {
   return {
     organisms: world.organisms.length,
     food: foodList.length,
-    walls: wallList.length,
+    terrain: terrainCount,
     species: world.species.list.length,
     brainSkipped,
   };
@@ -6131,7 +6587,7 @@ class Renderer {
 });
 
 __define("src/ui/Editor.js", function () {
-const { CellType } = __req('src/life/CellType.js');
+const { CellType, isTerrain } = __req('src/life/CellType.js');
 const { spawnRandomOrganism, spawnFromBlueprint } = __req('src/life/OrganismFactory.js');
 
 /** 特殊笔刷：投放一个随机小生物（不是细胞类型，所以单独用字符串标识） */
@@ -6395,20 +6851,22 @@ class Editor {
   }
 
   /**
-   * 橡皮擦的单格操作：只清"地形"，生物细胞一律跳过。
+   * 橡皮擦的单格操作：**只清地形，生物和食物一律不动**。
    *
-   * 判据是 `owners[index] < 0`——生物写格子时会登记 owner，地形不会。
-   * 用 owner 而不是"类型是不是 EMPTY/FOOD/WALL"，是因为前者不依赖类型的
-   * 枚举顺序，将来加新的地形类型（岩石/水/岩浆…）也不用改这里。
+   * 判据是 `grid.types[index]` 在不在"地形"名单里（`isTerrain`）：
+   *   · 生物身体 → owners >= 0，类型也不在地形名单里 → 跳过
+   *   · 食物     → 不是地形 → 跳过（这是用户明确要的："留下食物"）
+   *   · 墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质 → 清成空，**连地板层一起清**
    *
-   * 这也是"橡皮擦"和"空笔刷"的区别：空笔刷是无差别覆盖（会把生物身体抹掉、
-   * 留下一片废墟），橡皮擦只擦地形，正好用来给生物开路/清场而不伤到它们。
+   * 用注册表的 `terrain` 标记而不是"类型是不是 WALL"，将来加新地形不用改这里。
+   * 注意这里走的是 `setCellAt(EMPTY)`（而不是 `revealFloor`）——橡皮擦的语义就是
+   * "把地形删掉"，不是"移走盖在上面的东西"。
    */
   _eraseCell(col, row) {
     const grid = this.world.grid;
     const index = grid.index(col, row);
     if (index < 0) return;
-    if (grid.owners[index] >= 0) return;      // 有主的格子 = 生物身体，跳过
+    if (!isTerrain(grid.types[index])) return;      // 生物 / 食物 / 空地：不动
     this.world.setCellAt(index, CellType.EMPTY, -1);
   }
 
@@ -6450,15 +6908,19 @@ class Editor {
 });
 
 __define("src/ui/Toolbar.js", function () {
-const { CellType, cellTypeLabel } = __req('src/life/CellType.js');
+const { cellTypeLabel, cellDef, TERRAIN_BRUSH_TYPES } = __req('src/life/CellType.js');
 const { BRUSH_ORGANISM, BRUSH_CLONE, BRUSH_ERASER } = __req('src/ui/Editor.js');
 const { seedOriginOfLife, spawnPopulation } = __req('src/life/OrganismFactory.js');
 
-/** 笔刷可选项：三种地形 + 橡皮擦 + 随机生物 + 克隆选中 */
+/**
+ * 笔刷列表 —— **由注册表派生**，不再手写。
+ *
+ * 顺序：所有"能直接画在世界上的地形"（空 / 食物 / 墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质，
+ * 由 `TERRAIN_BRUSH_TYPES` 决定，加一种新地形这里自动多一格）
+ * → 橡皮擦（特殊笔刷，清地形）→ 随机生物 → 克隆。
+ */
 const BRUSHES = [
-  { id: CellType.EMPTY, label: '空' },
-  { id: CellType.FOOD, label: '食物' },
-  { id: CellType.WALL, label: '墙' },
+  ...TERRAIN_BRUSH_TYPES.map((id) => ({ id, label: cellDef(id).label })),
   { id: BRUSH_ERASER, label: '橡皮擦' },
   { id: BRUSH_ORGANISM, label: '随机生物' },
   { id: BRUSH_CLONE, label: '克隆', needsBlueprint: true },
@@ -6742,7 +7204,7 @@ class Toolbar {
 
     if (this.brushHint) {
       if (this.editor.brushType === BRUSH_ERASER) {
-        this.brushHint.textContent = '橡皮擦：只擦地形（墙 / 食物），生物细胞一律不动';
+        this.brushHint.textContent = '橡皮擦：只擦地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），食物与生物不动';
       } else if (!hasBlueprint) {
         this.brushHint.textContent = '克隆笔刷：用"检视"工具点一个个体，再点"克隆选中"';
       } else if (this.editor.brushType === BRUSH_CLONE) {
@@ -6769,7 +7231,7 @@ class Toolbar {
 function brushTitle(brush) {
   if (brush.id === BRUSH_ORGANISM) return '点击投放一个随机小生物';
   if (brush.id === BRUSH_CLONE) return '投放指定蓝图的个体（需要先装入一份蓝图）';
-  if (brush.id === BRUSH_ERASER) return '橡皮擦：只清除地形（墙 / 食物），不会碰到任何生物细胞';
+  if (brush.id === BRUSH_ERASER) return '橡皮擦：只清除地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），食物与生物一律不动';
   return cellTypeLabel(brush.id);
 }
 

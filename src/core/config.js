@@ -27,7 +27,6 @@ export const Config = {
     clearWallsOnReset: false,
     autoReset: false,
   },
-
   life: {
     lifespanMultiplier: 100,
     extraMoverFoodCost: 0,
@@ -38,6 +37,21 @@ export const Config = {
     metabolismScale: 0,        // 全局消耗量倍率（0 = 关闭每 tick 消耗）
     foodEnergyScale: 1,        // 食物量倍率：一份食物能提供多少能量
     starvationTicks: 60,       // 能量见底后还能撑多少个 tick 才饿死
+  },
+
+  /**
+   * 地形效果数值（阶段 8）。
+   *
+   * 效果本身写在 `life/Terrain.js`（哪个地形做什么），
+   * 这里只放"做多少"——和细胞属性同一个思路。
+   */
+  terrain: {
+    lavaEnterDamage: 2,        // 踏进岩浆那一下的冲击伤害
+    lavaStandDamage: 1,        // 待在岩浆里每 tick 的持续伤害
+    swampMoveCost: 0.5,        // 在沼泽里移动一次额外消耗的能量
+    radDamage: 0.25,           // 待在辐射带里每 tick 扣的血
+    radMutationBoost: 3,       // 辐射带对后代变异率的倍率（不是免疫式加成，是乘法）
+    humusFoodProb: 0.5,        // 腐殖质每 tick 往相邻空格冒食物的概率（%）
   },
 
   /**
@@ -93,6 +107,7 @@ export const Config = {
 export const CONFIG_SECTIONS = [
   { key: 'world',    label: '世界' },
   { key: 'life',     label: '生命' },
+  { key: 'terrain',  label: '地形' },
   { key: 'cells',    label: '细胞属性' },
   { key: 'mutation', label: '变异' },
   { key: 'sense',    label: '感知' },
@@ -111,7 +126,7 @@ export const CONFIG_FIELDS = {
     wrapEdges: { label: '边界环绕', type: 'bool', rebuildHint: '立即生效' },
     foodDropProb: { label: '食物掉落率', min: 0, max: 200, step: 1 },
     foodDecayRate: { label: '食物腐败率(%)', min: 0, max: 20, step: 0.1 },
-    clearWallsOnReset: { label: '重置时保留墙', type: 'bool' },
+    clearWallsOnReset: { label: '重置时保留地形', type: 'bool', note: '保留墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质' },
     autoReset: { label: '灭绝后自动重置', type: 'bool' },
   },
   life: {
@@ -124,6 +139,14 @@ export const CONFIG_FIELDS = {
     metabolismScale: { label: '全局消耗量倍率', min: 0, max: 5, step: 0.05, note: '乘在所有细胞的每 tick 消耗上。0 = 关闭。调高会带来真实的选择压力，但当前食物经济撑不住太大值' },
     foodEnergyScale: { label: '食物量倍率', min: 0.1, max: 10, step: 0.1, note: '一份食物能提供多少能量（默认 1）。调高 → 吃一口就攒够繁殖，种群扩张更快' },
     starvationTicks: { label: '饿死延时(tick)', min: 0, max: 600, step: 5, note: '能量见底后还能撑多久' },
+  },
+  terrain: {
+    lavaEnterDamage: { label: '岩浆·踏入伤害', min: 0, max: 20, step: 1, note: '踏进去那一下挨多少' },
+    lavaStandDamage: { label: '岩浆·驻留伤害', min: 0, max: 20, step: 1, note: '待在岩浆里每 tick 挨多少' },
+    swampMoveCost: { label: '沼泽·移动耗能', min: 0, max: 10, step: 0.05 },
+    radDamage: { label: '辐射带·每tick伤害', min: 0, max: 10, step: 0.05 },
+    radMutationBoost: { label: '辐射带·变异率倍率', min: 1, max: 20, step: 0.5, note: '站过辐射带的个体，后代变异率 × 这个数' },
+    humusFoodProb: { label: '腐殖质·造食率(%)', min: 0, max: 20, step: 0.1 },
   },
   // 每种身体细胞的属性（生命值/消耗/伤害/感知/食物值）。
   // 键是 `类型KEY.属性名`，下面按注册表自动填。

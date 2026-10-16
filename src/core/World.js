@@ -1,5 +1,9 @@
 import { GridMap } from './GridMap.js';
-import { CellType, CELL_TYPE_COUNT, LIVING_CELL_TYPES } from '../life/CellType.js';
+import {
+  CellType, CELL_TYPE_COUNT, LIVING_CELL_TYPES,
+  TERRAIN_MASK, TICKS_TERRAIN, TICKING_TERRAIN_TYPES, cellDef,
+} from '../life/CellType.js';
+import { TERRAIN_TICK } from '../life/Terrain.js';
 import { SpeciesRegistry } from '../stats/Species.js';
 
 /**
@@ -20,7 +24,6 @@ export class World {
 
     this.tick = 0;
     this.organisms = [];
-    this.walls = [];
 
     this.nextOrganismId = 1;
     this._organismsById = new Map();
@@ -33,6 +36,13 @@ export class World {
     this.foodCells = [];
     this.foodPos = new Int32Array(this.grid.length).fill(-1);
     this._initFoodIndex();
+
+    // 需要"每 tick 更新"的地形（腐殖质…）的索引，和食物索引同一套 swap-remove。
+    // 只有带 `tick` 行为的地形才建索引——其它地形一格代价都不付。
+    // 索引跟着 **floor 层** 走，所以被生物踩在脚下的腐殖质照样会造食。
+    this.terrainCells = new Map();   // typeId → number[]
+    this.terrainPos = new Map();     // typeId → Int32Array（index → 在数组里的位置）
+    this._initTerrainIndex();
 
     // 物种注册表：由 world.addOrganism 驱动，繁殖时顺带登记祖先关系
     this.species = new SpeciesRegistry(config);
@@ -73,6 +83,54 @@ export class World {
     this.foodPos[index] = -1;
   }
 
+  // ────────────────────────────── 地形索引 ──────────────────────────────
+  //
+  // 只有"带 tick 行为"的地形才有索引（目前是腐殖质）。
+  // 索引建在 floor 层上，所以地形被生物盖住时索引不变、照样会 tick。
+
+  _initTerrainIndex() {
+    const n = this.grid.length;
+    this.terrainCells.clear();
+    this.terrainPos.clear();
+    for (const t of TICKING_TERRAIN_TYPES) {
+      this.terrainCells.set(t, []);
+      this.terrainPos.set(t, new Int32Array(n).fill(-1));
+    }
+    const floor = this.grid.floor;
+    for (let i = 0; i < n; i++) {
+      if (TICKS_TERRAIN[floor[i]]) this._addTerrainCell(i, floor[i]);
+    }
+  }
+
+  _addTerrainCell(index, type) {
+    const cells = this.terrainCells.get(type);
+    if (!cells) return;
+    const pos = this.terrainPos.get(type);
+    if (pos[index] >= 0) return;
+    pos[index] = cells.length;
+    cells.push(index);
+  }
+
+  _removeTerrainCell(index, type) {
+    const cells = this.terrainCells.get(type);
+    if (!cells) return;
+    const pos = this.terrainPos.get(type);
+    const p = pos[index];
+    if (p < 0) return;
+    const last = cells.pop();
+    if (p < cells.length) {
+      cells[p] = last;
+      pos[last] = p;
+    }
+    pos[index] = -1;
+  }
+
+  /** 地板类型变了 → 把索引从旧类型挪到新类型 */
+  _retagTerrain(index, oldType, newType) {
+    if (TICKS_TERRAIN[oldType]) this._removeTerrainCell(index, oldType);
+    if (TICKS_TERRAIN[newType]) this._addTerrainCell(index, newType);
+  }
+
   // ────────────────────────────── 事件 ──────────────────────────────
 
   /** 订阅事件：'cellChanged' | 'fullRedraw' | 'reset' | 'stepped' | 'organismAdded' */
@@ -109,37 +167,72 @@ export class World {
     return index;
   }
 
-  /** 按扁平索引写格子。所有写入都收敛到这一个函数，食物索引才不会有偏差。 */
+  /**
+   * 按扁平索引写格子。所有写入都收敛到这一个函数，食物索引才不会有偏差。
+   *
+   * 它同时维护 **地板层**（GridMap.floor）：
+   *   · 写的是地形类型（墙/岩浆/…）→ 地板跟着更新
+   *   · 写的是"无主的空" → 地板也清掉（这就是玩家画"空"/橡皮擦的语义）
+   * 生物写自己的细胞、或写食物，都不动地板。
+   * 生物**离开**时要调 `revealFloor()`，不能用这个函数写空——那样会把地形一起删掉。
+   */
   setCellAt(index, type, ownerId = -1) {
     if (index < 0 || index >= this.grid.length) return;
     const types = this.grid.types;
     if (types[index] === type && this.grid.owners[index] === ownerId) return;
 
     const wasFood = types[index] === CellType.FOOD;
-    const wasWall = types[index] === CellType.WALL;
 
     this.grid.set(index, type, ownerId);
+
+    const floor = this.grid.floor;
+    if (TERRAIN_MASK[type]) {
+      if (floor[index] !== type) {
+        const old = floor[index];
+        floor[index] = type;
+        this._retagTerrain(index, old, type);
+      }
+    } else if (type === CellType.EMPTY && ownerId < 0 && floor[index] !== CellType.EMPTY) {
+      const old = floor[index];
+      floor[index] = CellType.EMPTY;
+      this._retagTerrain(index, old, CellType.EMPTY);
+    }
 
     if (type === CellType.FOOD) {
       if (!wasFood) this._addFood(index);
     } else if (wasFood) {
       this._removeFood(index);
     }
-    if (type === CellType.WALL && !wasWall) this.walls.push(index);
 
     this.emit('cellChanged', index);
   }
 
   /**
+   * 把地板重新铺回顶层 —— 生物离开 / 食物被吃掉时用。
+   *
+   * 和"写空"的区别是这里**保留地形**：一只生物从岩浆上走过，
+   * 岩浆只是被暂时盖住，它走了就该露出来。
+   */
+  revealFloor(index) {
+    if (index < 0 || index >= this.grid.length) return;
+    this.setCellAt(index, this.grid.floor[index], -1);
+  }
+
+  /** 这一格的地形是什么（不考虑压在上面的生物/食物） */
+  floorAt(col, row) {
+    const i = this.grid.index(col, row);
+    return i < 0 ? CellType.EMPTY : this.grid.floor[i];
+  }
+
+  /**
    * 整张网格填成同一种类型。
    * 绕过 setCellAt 的批量操作必须走这里，否则食物索引会与网格脱节。
+   * `keepTerrain` 为真时保留地板层里的地形（对应参数"重置时保留地形"）。
    */
-  fillGrid(type = CellType.EMPTY, keepWalls = false) {
-    this.grid.fill(type, keepWalls);
-    this.walls = keepWalls
-      ? this.walls.filter((i) => this.grid.types[i] === CellType.WALL)
-      : [];
+  fillGrid(type = CellType.EMPTY, keepTerrain = false) {
+    this.grid.fill(type, keepTerrain);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.emit('fullRedraw');
   }
 
@@ -248,7 +341,25 @@ export class World {
 
     for (let i = 0; i < n && cells.length > 0; i++) {
       const index = cells[this.rng.int(cells.length)];
-      this.setCellAt(index, CellType.EMPTY, -1);
+      this.revealFloor(index);          // 食物烂掉 → 露出底下的地形（如果本来有）
+    }
+  }
+
+  /**
+   * 地形自身的每 tick 行为（腐殖质造食）。
+   *
+   * 只遍历"带 tick 行为"的地形格，不扫全网格——代价与地形格数成正比。
+   * 注意：这里的处理器**不应该改地形**（会打乱正在遍历的 swap-remove 索引）；
+   * 目前的处理器（造食）只写食物，安全。
+   */
+  applyTerrainTick() {
+    for (const type of TICKING_TERRAIN_TYPES) {
+      const cells = this.terrainCells.get(type);
+      if (!cells || cells.length === 0) continue;
+      const d = cellDef(type);
+      const fn = d && d.tick ? TERRAIN_TICK[d.tick] : null;
+      if (!fn) continue;
+      for (let i = 0; i < cells.length; i++) fn(this, cells[i]);
     }
   }
 
@@ -296,6 +407,7 @@ export class World {
     this._compactOrganisms();
 
     // ── 环境更新 ──
+    this.applyTerrainTick();     // 腐殖质等自己会"长"东西的地形
     this.applyFoodDecay();
     this.applyFoodDrop();
 
@@ -304,14 +416,12 @@ export class World {
 
   // ────────────────────────────── 重置 ──────────────────────────────
 
-  reset(keepWalls = false) {
+  reset(keepTerrain = false) {
     this.clearOrganisms();
     this.grid.wrap = this.config.world.wrapEdges;
-    this.grid.fill(CellType.EMPTY, keepWalls);
-    this.walls = keepWalls
-      ? this.walls.filter((i) => this.grid.types[i] === CellType.WALL)
-      : [];
+    this.grid.fill(CellType.EMPTY, keepTerrain);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.species = new SpeciesRegistry(this.config);
     this.nextOrganismId = 1;
     this.tick = 0;
@@ -325,9 +435,9 @@ export class World {
     this.organisms.length = 0;
     this._organismsById.clear();
     this.grid.resize(cols, rows, this.config.world.wrapEdges);
-    this.walls = [];
     this.foodPos = new Int32Array(this.grid.length);
     this._initFoodIndex();
+    this._initTerrainIndex();
     this.species = new SpeciesRegistry(this.config);
     this.nextOrganismId = 1;
     this.tick = 0;

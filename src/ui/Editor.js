@@ -1,4 +1,4 @@
-import { CellType } from '../life/CellType.js';
+import { CellType, isTerrain } from '../life/CellType.js';
 import { spawnRandomOrganism, spawnFromBlueprint } from '../life/OrganismFactory.js';
 
 /** 特殊笔刷：投放一个随机小生物（不是细胞类型，所以单独用字符串标识） */
@@ -262,20 +262,22 @@ export class Editor {
   }
 
   /**
-   * 橡皮擦的单格操作：只清"地形"，生物细胞一律跳过。
+   * 橡皮擦的单格操作：**只清地形，生物和食物一律不动**。
    *
-   * 判据是 `owners[index] < 0`——生物写格子时会登记 owner，地形不会。
-   * 用 owner 而不是"类型是不是 EMPTY/FOOD/WALL"，是因为前者不依赖类型的
-   * 枚举顺序，将来加新的地形类型（岩石/水/岩浆…）也不用改这里。
+   * 判据是 `grid.types[index]` 在不在"地形"名单里（`isTerrain`）：
+   *   · 生物身体 → owners >= 0，类型也不在地形名单里 → 跳过
+   *   · 食物     → 不是地形 → 跳过（这是用户明确要的："留下食物"）
+   *   · 墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质 → 清成空，**连地板层一起清**
    *
-   * 这也是"橡皮擦"和"空笔刷"的区别：空笔刷是无差别覆盖（会把生物身体抹掉、
-   * 留下一片废墟），橡皮擦只擦地形，正好用来给生物开路/清场而不伤到它们。
+   * 用注册表的 `terrain` 标记而不是"类型是不是 WALL"，将来加新地形不用改这里。
+   * 注意这里走的是 `setCellAt(EMPTY)`（而不是 `revealFloor`）——橡皮擦的语义就是
+   * "把地形删掉"，不是"移走盖在上面的东西"。
    */
   _eraseCell(col, row) {
     const grid = this.world.grid;
     const index = grid.index(col, row);
     if (index < 0) return;
-    if (grid.owners[index] >= 0) return;      // 有主的格子 = 生物身体，跳过
+    if (!isTerrain(grid.types[index])) return;      // 生物 / 食物 / 空地：不动
     this.world.setCellAt(index, CellType.EMPTY, -1);
   }
 

@@ -1,4 +1,4 @@
-import { CellType } from '../life/CellType.js';
+import { CellType, CELL_DEF_BY_KEY, cellDef } from '../life/CellType.js';
 import { Organism } from '../life/Organism.js';
 import { Species } from '../stats/Species.js';
 import { restoreConfig } from '../core/config.js';
@@ -8,7 +8,7 @@ import { restoreConfig } from '../core/config.js';
  *
  * 存档要"完整可继续演化"，所以四样东西都得存：
  *   1. 配置快照    —— 否则读档后物理规则变了，生态立刻跑偏
- *   2. 网格地形    —— 食物与墙（生物的身体会重新写进去）
+ *   2. 网格地形    —— 食物 + **地板层**（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质）
  *   3. 全部个体    —— 位置、朝向、能量、年龄、变异率，以及**完整的大脑权重**
  *   4. RNG 状态    —— 否则读档后随机序列从头开始，"继续跑"和"没存过"结果不同
  *
@@ -17,7 +17,12 @@ import { restoreConfig } from '../core/config.js';
  */
 
 export const SAVE_FORMAT = 'evosim-world';
-export const SAVE_VERSION = 1;
+
+/**
+ * v1 → v2（阶段 8）：地形从"只有墙"改成"地板层 + 任意地形"。
+ * v1 存档仍然能读（把 `grid.walls` 当成只有墙的地板），不会报错。
+ */
+export const SAVE_VERSION = 2;
 
 /**
  * 权重用 base64 编码原始字节，而不是 JSON 数字数组。
@@ -136,14 +141,21 @@ function serializeSpecies(reg) {
  */
 export function serializeWorld(world, rng, extra = {}) {
   const grid = world.grid;
-  const types = grid.types;
-  const walls = [];
+  const floor = grid.floor;
 
   // 食物：直接搬 world.foodCells（顺序有意义）
   const food = Array.from(world.foodCells);
 
-  for (let i = 0; i < types.length; i++) {
-    if (types[i] === CellType.WALL) walls.push(i);
+  // 地形：按**地板层**存，而不是按顶层 `types`。
+  // 区别很关键——生物踩在岩浆上时，顶层是生物细胞、地板才是岩浆；
+  // 只存顶层的话，读档后那块岩浆就没了。
+  const terrain = {};
+  for (let i = 0; i < floor.length; i++) {
+    const t = floor[i];
+    if (!t) continue;
+    const d = cellDef(t);
+    if (!d) continue;
+    (terrain[d.key] || (terrain[d.key] = [])).push(i);
   }
 
   const organisms = new Array(world.organisms.length);
@@ -161,7 +173,7 @@ export function serializeWorld(world, rng, extra = {}) {
       rows: grid.rows,
       wrap: grid.wrap,
       food,
-      walls,
+      terrain,
     },
     config: extra.config ?? null,
     rng: rng ? rng.getState() : null,
@@ -247,7 +259,7 @@ function restoreSpeciesRegistry(world, raw) {
  * 顺序有讲究：**先恢复配置和网格尺寸，再建生物**——Organism 的构造函数
  * 会按 config.brain.inSize 建感知器缓冲，配置没恢复就构造个体会得到错的维度。
  *
- * @returns {{ organisms: number, food: number, walls: number, species: number, brainSkipped: number }}
+ * @returns {{ organisms: number, food: number, terrain: number, species: number, brainSkipped: number }}
  */
 export function deserializeWorld(world, rng, rawData) {
   const data = validateSave(rawData);
@@ -266,24 +278,49 @@ export function deserializeWorld(world, rng, rawData) {
   world.config.world.rows = rows;
   world.config.world.wrapEdges = wrap;
 
-  // ── 3. 地形：直接写 TypedArray，最后统一重建食物索引 ──
+  // ── 3. 地形：直接写 TypedArray，最后统一重建索引 ──
   // （逐个走 setCellAt 会触发几万次 cellChanged 事件，纯属浪费）
   const grid = world.grid;
   grid.types.fill(CellType.EMPTY);
   grid.owners.fill(-1);
+  grid.floor.fill(CellType.EMPTY);
 
-  const wallList = data.grid.walls || [];
   const foodList = data.grid.food || [];
-  for (let i = 0; i < wallList.length; i++) grid.types[wallList[i]] = CellType.WALL;
-  for (let i = 0; i < foodList.length; i++) grid.types[foodList[i]] = CellType.FOOD;
 
-  world.walls = wallList.slice();
+  if (data.grid.terrain) {
+    // v2：地板层按类型 key 分组
+    for (const key of Object.keys(data.grid.terrain)) {
+      const d = CELL_DEF_BY_KEY[key];
+      if (!d) continue;                       // 未知类型（比如新版本删掉的）直接跳过
+      const list = data.grid.terrain[key];
+      for (let i = 0; i < list.length; i++) {
+        grid.floor[list[i]] = d.id;
+        grid.types[list[i]] = d.id;
+      }
+    }
+  } else {
+    // v1 兼容：只有墙
+    const wallList = data.grid.walls || [];
+    for (let i = 0; i < wallList.length; i++) {
+      grid.floor[wallList[i]] = CellType.WALL;
+      grid.types[wallList[i]] = CellType.WALL;
+    }
+  }
+
+  // 食物压在地形之上
+  for (let i = 0; i < foodList.length; i++) grid.types[foodList[i]] = CellType.FOOD;
 
   // 食物索引按存档里的**原始顺序**重建，而不是走 _initFoodIndex() 的升序扫描。
   // 腐败抽样依赖数组位置，顺序错了读档后就会分叉（见 serializeWorld 注释）。
   world.foodCells = foodList.slice();
   world.foodPos = new Int32Array(grid.length).fill(-1);
   for (let p = 0; p < world.foodCells.length; p++) world.foodPos[world.foodCells[p]] = p;
+
+  // 地形索引（腐殖质）重建——必须在 floor 写完之后
+  world._initTerrainIndex();
+
+  let terrainCount = 0;
+  for (let i = 0; i < grid.floor.length; i++) if (grid.floor[i]) terrainCount++;
 
   // ── 4. 物种表（必须在建生物之前，这样物种 id 与祖先链原样保留）──
   restoreSpeciesRegistry(world, data.species);
@@ -330,7 +367,7 @@ export function deserializeWorld(world, rng, rawData) {
   return {
     organisms: world.organisms.length,
     food: foodList.length,
-    walls: wallList.length,
+    terrain: terrainCount,
     species: world.species.list.length,
     brainSkipped,
   };

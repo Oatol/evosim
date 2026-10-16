@@ -190,13 +190,17 @@ section('2. 存档序列化结构');
   let nonEmpty = 0;
   const types = world.grid.types;
   for (let i = 0; i < types.length; i++) if (types[i] !== CellType.EMPTY) nonEmpty++;
-  const storedTerrain = data.grid.food.length + data.grid.walls.length;
+  const terrainKeys = Object.keys(data.grid.terrain || {});
+  let storedTerrain = data.grid.food.length;
+  for (const k of terrainKeys) storedTerrain += data.grid.terrain[k].length;
   ok('地形只存非空格（不含生物身体）', storedTerrain <= nonEmpty,
     `存 ${storedTerrain} / 非空 ${nonEmpty}`);
 
   // 扁平索引必须落在网格范围内
   let badIndex = 0;
-  for (const i of data.grid.walls) if (i < 0 || i >= types.length) badIndex++;
+  for (const k of terrainKeys) {
+    for (const i of data.grid.terrain[k]) if (i < 0 || i >= types.length) badIndex++;
+  }
   for (const i of data.grid.food) if (i < 0 || i >= types.length) badIndex++;
   eq('地形索引都在网格范围内', badIndex, 0);
 

@@ -1,14 +1,27 @@
-import { CellType } from '../life/CellType.js';
+import { CellType, TERRAIN_MASK } from '../life/CellType.js';
 
 /**
  * 网格数据结构：结构体数组（SoA）+ TypedArray。
  *
  * 不用对象数组——20 万格的对象开销太大。
- *   types  : Uint8Array   细胞类型枚举
+ *   types  : Uint8Array   细胞类型枚举（**顶层**：可能被生物的身体盖住）
  *   owners : Int32Array   所属生物 id，-1 表示独立格
+ *   floor  : Uint8Array   **地板层**：这一格的地形是什么
  *
  * 索引公式：idx = row * cols + col
  * 越界统一返回 -1 / EMPTY，边界处理全部收在这里。
+ *
+ * ── 为什么要单独一层 floor（阶段 8）──
+ *
+ * 生物写格子时会把 `types` 覆盖成自己的细胞类型。如果地形只存在 `types` 里，
+ * 那么一只生物从岩浆上走过，岩浆就被"抹掉"了——地形会被生物啃光，
+ * 岩浆/辐射带/腐殖质这类需要长期存在的地形根本立不住。
+ *
+ * 所以地形单独记在 `floor` 里：生物盖上去只改 `types`，`floor` 不动；
+ * 生物离开时调用 `World.revealFloor()` 把地板重新铺回顶层。
+ * **只有玩家显式画"空"/用橡皮擦才会真正清掉地板。**
+ *
+ * 食物**不在** floor 里——它是资源不是地形，被生物压过去就该消失（既有行为）。
  */
 export class GridMap {
   constructor(cols, rows, wrap = true) {
@@ -22,6 +35,7 @@ export class GridMap {
     this.length = cols * rows;
     this.types = new Uint8Array(this.length);
     this.owners = new Int32Array(this.length).fill(-1);
+    this.floor = new Uint8Array(this.length);
   }
 
   /** 世界坐标 → 扁平索引；越界且不环绕时返回 -1 */
@@ -67,24 +81,26 @@ export class GridMap {
     return true;
   }
 
-  /** 把整张网格填成同一种类型（保留墙体可选） */
-  fill(type, keepWalls = false) {
-    if (!keepWalls) {
+  /** 把整张网格填成同一种类型。`keepTerrain` 为真时保留 floor 层里的地形 */
+  fill(type, keepTerrain = false) {
+    if (!keepTerrain) {
       this.types.fill(type);
       this.owners.fill(-1);
+      // 填成地形类型时地板跟着走，否则地板清空
+      this.floor.fill(TERRAIN_MASK[type] ? type : CellType.EMPTY);
       return;
     }
+    // 保留地形：地板层是权威，把它铺回顶层（顺便把被生物盖住的格子还原）
     for (let i = 0; i < this.length; i++) {
-      if (this.types[i] !== CellType.WALL) {
-        this.types[i] = type;
-        this.owners[i] = -1;
-      }
+      const f = this.floor[i];
+      this.types[i] = TERRAIN_MASK[f] ? f : type;
+      this.owners[i] = -1;
     }
   }
 
   /** 统计各类型格子数量，返回 Uint32Array(按类型 id 索引) */
   countByType() {
-    const counts = new Uint32Array(16);
+    const counts = new Uint32Array(32);
     for (let i = 0; i < this.length; i++) counts[this.types[i]]++;
     return counts;
   }

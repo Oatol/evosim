@@ -89,7 +89,8 @@ evosim/
     │   └── config.js           # 全局参数表 + 面板元数据（CONFIG_FIELDS）
     │
     ├── life/
-    │   ├── CellType.js         # 细胞类型定义表（9 种）
+    │   ├── CellType.js         # 细胞类型注册表（13 种：3 独立格 + 6 身体细胞 + 4 地形）
+    │   ├── Terrain.js          # 地形效果表（阶段 8）：enter / stand / tick 三个钩子
     │   ├── Anatomy.js          # 身体蓝图 = 基因组 A
     │   ├── BodyCell.js         # 身体细胞及其行为（含旋转数学）
     │   ├── Organism.js         # 生物个体：think()/act() 生命周期
@@ -125,7 +126,7 @@ evosim/
         └── Export.js           # 统计 CSV 导出（阶段 6）
 ```
 
-> **当前进度（阶段 7 结束）**
+> **当前进度（阶段 8 结束）**
 >
 > - `core/` 全部完成（config / RNG / GridMap / World / WorldGen / Engine）
 > - `life/` 全部完成（**CellType 注册表** / Anatomy / BodyCell / Organism / OrganismFactory / Mutation / Brain / Sensors）
@@ -133,7 +134,7 @@ evosim/
 > - `render/` 全部完成（Renderer 支持"按类型/按物种"两种着色 + 单个体/整物种两种高亮；配色由细胞注册表派生）
 > - `ui/` 全部完成（Toolbar / Editor / Stats / Charts / Timeline / Inspector / ControlPanel / SpeciesTree / **SpeciesEditor** / floating）
 > - `io/` 全部完成（**SaveLoad** 存档读档 + **Export** CSV 导出 + **CreatureLibrary** 生物库）
-> - `tools/`：**开发工具，不参与运行时**。逻辑测试（`phase3/4/5/6/7-test.mjs`）、参数扫描（`phase3-sweep.mjs` / `phase7-sweep.mjs`）、生态测量（`phase4-ecology.mjs`）、无头浏览器端到端（`cdp-phase3/4/5/6/7.mjs`）、打包（`bundle.mjs`）、单文件验证（`verify-bundle.mjs`）、exe 构建（`build-exe.mjs`）
+> - `tools/`：**开发工具，不参与运行时**。逻辑测试（`phase3/4/5/6/7/8-test.mjs`）、参数扫描（`phase3-sweep.mjs` / `phase7-sweep.mjs`）、生态测量（`phase4-ecology.mjs`）、无头浏览器端到端（`cdp-phase3/4/5/6/7/8.mjs`）、打包（`bundle.mjs`）、单文件验证（`verify-bundle.mjs`）、exe 构建（`build-exe.mjs`）、exe 写盘端点验证（`verify-exe.mjs`）
 > - `dist/` 是给最终用户的两份产物，`build/` 是 exe 构建中间件（详见 §16）
 
 ---
@@ -147,15 +148,36 @@ evosim/
 ```js
 class GridMap {
   cols; rows;
-  types;    // Uint8Array(cols * rows)   细胞类型枚举
+  types;    // Uint8Array(cols * rows)   顶层：细胞类型枚举（可能被生物身体盖住）
   owners;   // Int32Array(cols * rows)   所属生物 id，-1 表示独立格
+  floor;    // Uint8Array(cols * rows)   地板层：这一格的**地形**（阶段 8）
   idx(col, row) { return row * this.cols + col; }
 }
 ```
 
 - 索引公式：`idx = row * cols + col`
 - 越界访问返回 `null`（边界处理统一在 `GridMap` 内）
-- 内存：200×150 时 `types` 30KB + `owners` 120KB，完全可忽略
+- 内存：200×150 时 `types` 30KB + `owners` 120KB + `floor` 30KB，完全可忽略
+
+#### 为什么需要单独一层 `floor`（阶段 8）
+
+生物写格子时会把 `types` 覆盖成自己的细胞类型。如果地形只存在 `types` 里，
+**一只生物从岩浆上走过，岩浆就被"抹掉"了**——地形会被生物啃光，
+岩浆 / 辐射带 / 腐殖质这类需要长期存在的地形根本立不住。
+
+所以地形单独记在 `floor` 里：
+
+- 生物盖上去只改 `types`，`floor` 不动
+- 生物离开时调 `World.revealFloor(index)` 把地板重新铺回顶层
+- **只有玩家显式画"空"或用橡皮擦才会真正清掉地板**（`setCellAt(index, EMPTY, -1)` 会连地板一起清）
+- 食物被吃掉 / 腐败掉，走的也是 `revealFloor`，所以压在腐殖质上的食物吃完后腐殖质会露回来
+
+食物**不在** `floor` 里——它是资源不是地形，被生物压过去就该消失（既有行为，不变）。
+
+> **踩过的坑**：给 `FOOD` 也标了 `passable: true`，结果把 `combat.foodBlocksReproduction`
+> 直接架空了（食物本该挡路，却变成能走上去）。`isPassable()` 现在**只对 `terrain: true` 的类型生效**，
+> 食物那条特例只由 `isClear` / `canPlaceAt` 一处管。phase5-test 的"读档后继续演化可复现"
+> 立刻抓到了这个 bug（第 48 tick 分叉）。
 
 ### 4.2 细胞类型（CellType）—— 注册表
 
@@ -167,6 +189,9 @@ CELL_DEFS = [
     isBodyCell, independent, paintable, visible, directional,
     flag,            // 身体上"有它就置 true"的能力标志位名，如 hasMover
     behavior,        // BodyCell 行为表里的函数名，如 'killer'
+    terrain,         // 算不算"地形"：写进 floor 层、重置时可保留、橡皮擦的目标（阶段 8）
+    passable,        // 生物能否走进去（阶段 8）
+    enter, stand, tick,  // 地形钩子名，指向 Terrain.js 的三张表（阶段 8）
     hp, cost, damage, senseRange, foodValue,   // 属性**默认值**
     colors: { classic, highContrast, colorblindSafe } },
   ...
@@ -616,6 +641,55 @@ applyFoodDecay() {
 
 ---
 
+### 6.7 地形与三个钩子（阶段 8）
+
+地形是"会持续存在于世界上、并影响踩上去的生物"的格子。它和食物最大的区别是
+**不会被生物啃掉**（靠 `floor` 层，见 §4.1）。
+
+注册表用三个字段声明"这块地形在什么时候做什么"，函数本身写在 `life/Terrain.js`：
+
+| 字段 | 触发时机 | 调用方 | 典型用途 |
+|---|---|---|---|
+| `enter` | 移动成功的那一下 | `Organism.attemptMove()` | 岩浆烫一下、沼泽拖一下 |
+| `stand` | 驻留时每 tick | `Organism.act()`（移动之后） | 辐射带持续照射 |
+| `tick` | 世界级每 tick，与生物无关 | `World.applyTerrainTick()` | 腐殖质自己往外冒食物 |
+
+**为什么 `enter` 和 `stand` 要分开**：只做 `enter` 的话，"待在辐射带里持续掉血"
+没法表达（它不是"进入时发生一次"）；只做 `stand` 的话，"踏进岩浆被烫一下"的瞬时冲击
+又丢了。两个都要，所以拆开。
+
+**读的是 `floor` 层而不是顶层**：生物自己的细胞就压在枢轴格上，顶层 `types` 是它自己，
+只有地板层才知道它脚底下踩的是什么。这条对 `enter`（读目的地的 floor）和
+`stand`（读自己所在格的 floor）都成立。
+
+**数值与效果分离**：效果在 `Terrain.js`（哪块地形做什么），数值在 `Config.terrain`
+（做多少），和细胞属性同一个思路——所以面板里能实时调，也能存档。
+
+#### 四种地形
+
+| 地形 | 钩子 | 行为 |
+|---|---|---|
+| **岩浆 LAVA** | `enter: burn` + `stand: burn` | 踏进去挨 `lavaEnterDamage`（默认 2），待在里面每 tick 再挨 `lavaStandDamage`（默认 1）。默认 3 格生物踏进去活不过一 tick——岩浆就该是致命的 |
+| **沼泽 SWAMP** | `enter: bog` | 移动一次额外耗 `swampMoveCost`（默认 0.5）能量。能量不够就落到 0，进入饥饿计时 |
+| **辐射带 RAD** | `stand: irradiate` | 每 tick 扣 `radDamage`（默认 0.25），并打上 `inRadiation` 标记 |
+| **腐殖质 HUMUS** | `tick: fertilize` | 以 `humusFoodProb`（默认 0.5%）的概率往相邻空格冒一份食物 |
+
+**辐射带怎么放大变异率**：`irradiate` **不直接改** `organism.mutability`——
+那会指数爆炸（5% ×3 ×3 ×3… 三 tick 就封顶）。它只在 `act()` 开头会被重置的
+`inRadiation` 标记上打一个 true，由 `Mutation.mutateOrganism()` 在**繁殖那一步**
+临时把变异率乘上 `radMutationBoost`（默认 3）。语义因此是准确的：
+"在辐射里待过的个体，后代更容易突变"。
+
+**腐殖质用索引而不是每 tick 扫全网格**：`world.terrainCells` / `world.terrainPos`
+是同一套 swap-remove 索引（和食物索引一样），只给带 `tick` 行为的地形建。
+索引建在 **floor** 上，所以被生物踩在脚下的腐殖质照样造食。
+
+> **这一批新地形默认 `visible: false`**——生物"看不见"岩浆。感知扩容
+> （`VISUAL_SLOTS` 9→N）留到最后一批，那时会一并作废旧存档（用户已批准存档断代）。
+> 在那之前，岩浆是纯粹的筛选压力：盲走进去的个体被淘汰，能"记住"路径的留下。
+
+---
+
 ## 7. 物种与化石记录
 
 ### 7.1 身体结构指纹
@@ -780,20 +854,19 @@ class FossilRecord {
 ### 9.1 工具栏
 
 - **工具**：画笔 / 平移 / 检视
-- **笔刷**：空 / 食物 / 墙 / 橡皮擦 / 随机生物 / 克隆（投放指定蓝图）
+- **笔刷**：**由注册表派生**（`TERRAIN_BRUSH_TYPES`）——空 / 食物 / 墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质 / 橡皮擦 / 随机生物 / 克隆（投放指定蓝图）。加一种新地形，这里自动多一格
 - **笔刷大小**：1–12 格（仅地形笔刷显示，橡皮擦也吃这个大小）
 - **生命**：生命起源 / 随机种群 / 清空生物 / 克隆选中
 - **导出**：曲线 CSV / 物种表 CSV
 - **视图**：放大 / 缩小 / 适应窗口
 
-**橡皮擦**（2026-10-16 新增）：**只清地形（墙 / 食物），生物细胞一律不动**。
-判据是 `grid.owners[index] < 0`——生物写格子时会登记 owner，地形不会；用 owner 而不是
-"类型是不是 EMPTY/FOOD/WALL"，将来加新地形类型（岩石/水/岩浆…）也不用改代码。
+**橡皮擦**（阶段 8）：**只清地形（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），食物与生物一律不动**。
+判据是注册表的 `terrain` 标记（`isTerrain(grid.types[index])`）——加一种新地形不用改这里。
 
 它和「空」笔刷的区别值得说清楚：**「空」是无差别覆盖**，刷过生物会把它们的身体抹掉、
-留下一片残骸（生物下次 `writeGrid()` 还会把没被抹掉的部分写回去，状态很别扭）；
-**橡皮擦只擦地形**，正好用来"给生物开路 / 清理场地而不伤到它们"。两者并存：
-想推平一切用「空」，想清障碍用「橡皮擦」。
+留下一片残骸；**橡皮擦只擦地形**，正好用来"给生物开路 / 清理场地而不伤到它们"。
+两者并存：想推平一切用「空」，想清障碍用「橡皮擦」。
+**食物是明确保留的**（用户要求）——它是资源，不是地形。
 
 **克隆笔刷**：先用"检视"点一个个体 → 点"克隆选中"把它的蓝图装进笔刷 → 之后在画布上随手点就能投放这个物种的个体（大脑权重是当时的拷贝，所以是给该物种"加人口"而不是开新分支）。检视器现在是浮窗、不再遮住画布，所以克隆之后**不再需要关掉它**——锁上图钉还能边看边投放。
 
@@ -807,6 +880,7 @@ class FossilRecord {
 | -- | -- |
 | 世界 | 网格尺寸、边界环绕、食物掉落率、食物腐败率、重置时保留墙、灭绝后自动重置 |
 | 生命 | 寿命倍率、移动者额外成本、种群上限、生产者造食率、移动者可造食、转身冷却、**全局消耗量倍率**、**食物量倍率**、饿死延时 |
+| **地形** | **岩浆·踏入伤害 / 岩浆·驻留伤害 / 沼泽·移动耗能 / 辐射带·每tick伤害 / 辐射带·变异率倍率 / 腐殖质·造食率**（阶段 8） |
 | **细胞属性** | **每种身体细胞 × 5 项**（生命值 / 每 tick 消耗 / 伤害 / 感知距离 / 死亡食物值），由细胞注册表自动生成 |
 | 变异 | 加/改/删细胞概率、权重变异率与幅度、权重重置率、全局变异率、初始变异率、变异率漂移幅度 |
 | 感知 | 视野范围、可透视自身 |
@@ -955,6 +1029,14 @@ metabolismScale = 0         // 全局消耗量倍率（0 = 关闭每 tick 消耗
 foodEnergyScale = 1         // 食物量倍率：一份食物能换多少能量（1 = 与旧行为一致）
 starvationTicks = 60        // 能量见底后还能撑多少个 tick 才饿死
 
+// 地形效果（阶段 8，见 §6.7）
+lavaEnterDamage = 2         // 踏进岩浆那一下的冲击伤害
+lavaStandDamage = 1         // 待在岩浆里每 tick 的持续伤害
+swampMoveCost = 0.5         // 在沼泽里移动一次额外消耗的能量
+radDamage = 0.25            // 待在辐射带里每 tick 扣的血
+radMutationBoost = 3        // 辐射带对后代变异率的倍率
+humusFoodProb = 0.5         // 腐殖质每 tick 往相邻空格冒食物的概率（%）
+
 // 细胞属性（每种身体细胞一组，可在参数面板实时调，见 §4.2）
 // 键是 `类型KEY.属性名`，面板的「细胞属性」分组由注册表自动生成
 cells.MOUTH    = { hp: 1, cost: 0.002, damage: 0, senseRange: 0, foodValue: 1 }
@@ -1001,7 +1083,8 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 ```jsonc
 {
   "format": "evosim-world",
-  "version": 1,
+  "version": 2,          // v2（阶段 8）：地形从"只有墙"改成"地板层 + 任意地形"
+
   "savedAt": "2026-10-15T11:34:00.915Z",
   "tick": 12345,
   "config": { /* 完整参数快照 */ },
@@ -1009,7 +1092,11 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
   "grid": {
     "cols": 200, "rows": 150, "wrap": true,
     "food":  [ 3012, 3013, … ],   // 扁平索引，且**保持 world.foodCells 的原样顺序**
-    "walls": [ 88, 89, … ]
+    "terrain": {                  // 地板层，按类型 key 分组（阶段 8）
+      "WALL": [ 88, 89, … ],
+      "LAVA": [ 4021, 4022, … ],
+      "HUMUS": [ 5510 ]
+    }
   },
   "species": {
     "nextId": 58, "aliveCount": 31, "peakAliveCount": 42,
@@ -1035,11 +1122,17 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 **四样东西都得存**，否则"读档后继续跑"会与"从没存过"跑出不同的结果：
 
 1. **配置快照** —— 不存的话物理规则变了，生态立刻跑偏
-2. **网格地形** —— 只存非空格，其余视为空
+2. **网格地形** —— 食物 + **地板层**（墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质），只存非空格
 3. **全部个体** —— 位置、朝向、能量、年龄、变异率，以及**完整的大脑权重**
 4. **RNG 状态** —— 否则读档后随机序列从头开始
 
 外加**物种表**：不存的话读档后物种 id 会重新分配，祖先关系（物种树的骨架）就断了。
+
+**地形存的是 `floor` 层而不是顶层 `types`**：生物踩在岩浆上时，顶层是生物细胞、地板才是岩浆；
+只存顶层的话读档后那块岩浆就没了。这是阶段 8 加 `floor` 层顺带解决的另一个问题。
+
+**v1 存档仍然能读**：没有 `terrain` 段就退回读 `grid.walls`，当成"只有墙的地板"。
+`validateSave` 只拦"版本高于当前支持"，所以旧档不会报错。
 
 ### 11.1 三个"看起来多余、实则必需"的细节
 
@@ -1222,11 +1315,33 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
   （新增橡皮擦 7 项 + 两个倍率 5 项）、verify-bundle **35 项**；回归 phase3–6 与
   cdp-phase3/4/6/7 全绿
 
-### 阶段 8 · 打磨与优化（待办）
+### 阶段 8 · 地形与 onEnter 钩子 ✅ 已完成（2026-10-16）
+
+用户明确排出的顺序：`onEnter` 钩子 → 岩浆/沼泽/辐射/腐殖质 → 储食细胞 → 再生+刺 →
+派生画笔列表 → 最后才是环境场（光/温度）与可见类型扩容。**本阶段完成的是前两批。**
+
+- **`floor` 层**（§4.1）：地形单独一层，生物走过去不会把它啃掉。
+  这是本阶段最关键的架构改动——没有它，岩浆/辐射带/腐殖质这类地形一被生物踩过就消失
+- **三个钩子 `enter` / `stand` / `tick`**（§6.7）：注册表声明、`life/Terrain.js` 实现、
+  `Config.terrain` 调数值
+- **四种地形**：岩浆（灼烧）、沼泽（移动耗能）、辐射带（扣血 + 后代变异率 ×3）、腐殖质（造食）
+- **橡皮擦改成"只清地形"**（保留食物与生物），画笔列表改由 `TERRAIN_BRUSH_TYPES` 派生
+- **存档升到 v2**：地形按 `floor` 层存（含被生物踩住的），v1 存档仍能读
+- 交付物：`life/Terrain.js` 新增、`GridMap` 加 `floor`、`World` 加地形索引与 `revealFloor`、
+  `Organism` 接入 `enter`/`stand` 与 `isPassable`、`Mutation` 接入辐射倍率、
+  `CellType` 加 4 种地形与 5 个字段、`Editor` 橡皮擦语义、`Toolbar` 派生画笔、`SaveLoad` v2
+- 实测：**phase8-test 110 项** + **cdp-phase8 26 项**全通过；回归 phase3–7 与 cdp-phase3–7 全绿；
+  `verify-bundle` 38 项、`verify-exe` 17 项
+- 性能：0.65 ms/tick 未变（地形索引只在有腐殖质时才有开销）；60 fps
+
+> **回归时抓到的一个真 bug**：给 `FOOD` 也标了 `passable: true`，把
+> `combat.foodBlocksReproduction` 架空了。phase5-test 的"读档后继续演化可复现"
+> 在第 48 tick 分叉，定位到 `isPassable`。现在它只对 `terrain: true` 生效。
+
+### 阶段 9 · 打磨与优化（待办）
 
 - 性能剖析、`TypedArray` 调优、脏格渲染验证
-- 预设世界模板
-- ✅ **单文件内联打包已提前在阶段 5 完成**（见 §16）
+- 预设世界模板（含岩浆/沼泽/辐射带/腐殖质的现成地形预设）
 - ⚠️ 待办：眼睛演化出来了但一直稀有（阶段 4 遗留，见 §12 阶段 4）——阶段 7 已把
   感知距离变成每只眼睛的可调属性，可以直接在参数面板里做对照实验；
   彻底解决仍需调整能量收支（眼睛要占一格身体）
@@ -1298,7 +1413,10 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 | **细胞类型 id 被改坏导致存档失效** | ✅ 已落地：id 写进存档与网格 Uint8，注册表里显式标注"一旦定下不能再改"；`VISIBLE_CELL_TYPES` 的顺序同理（顺序即大脑输入槽，重排会让旧大脑语义错位） |
 | **引入代谢消耗把生态搞崩**      | ✅ 已扫描并默认关闭（§6.4）。生物能量长期贴近 0，任何消耗都会让它们立刻进入饥饿；实测消耗×1 就有 1/3 种子灭绝。默认 `metabolismScale = 0`，想要真实压力就用「消耗×1 + 造食率 15%」这套验证过的组合 |
 | **"想让生态更繁荣"没有安全的旋钮** | ✅ 已补：新增**食物量倍率** `foodEnergyScale`（§6.4）。往上推只是让个体更快攒够繁殖阈值，**不会**像推消耗倍率那样把生态推向灭绝 |
-| **橡皮擦误伤生物** | ✅ 已落地：橡皮擦按 `owners < 0` 判定地形，生物细胞一律跳过（§9.1）。CDP 测试实测"对着生物擦，个体数与身体格都不变" |
+| **橡皮擦误伤生物** | ✅ 已落地：橡皮擦按注册表的 `terrain` 标记判定，生物与**食物**一律跳过（§9.1）。CDP 测试实测"对着生物擦，个体数与身体格都不变" |
+| **地形被生物啃光** | ✅ 已落地：地形单独记在 `GridMap.floor` 层，生物盖上去只改顶层，离开时 `revealFloor()` 把地形铺回来（§4.1）。没有这层的话，岩浆一被踩过就消失 |
+| **`isPassable` 架空食物阻挡** | ✅ 已修：一开始给 `FOOD` 也标了 `passable: true`，`combat.foodBlocksReproduction` 直接失效。`isPassable()` 现在只对 `terrain: true` 生效。phase5-test 的"读档后可复现"在第 48 tick 分叉，把它抓了出来 |
+| **辐射倍率把变异率写成指数爆炸** | ✅ 已规避：`irradiate` 不改 `mutability`，只打一个每 tick 重置的 `inRadiation` 标记，由 `Mutation` 在繁殖那一步临时乘倍率（§6.7） |
 | **检视器模态浮层挡住画布**      | ✅ 已修：改成非模态浮窗 + 图钉（§9.3）。它一次造成了三个症状——跟随看不见、克隆永远提示"先选中"、关闭按钮不显眼 |
 | **生物库的蓝图格式两处解析**     | ✅ 已落地：库里存紧凑数组，读回统一走 `CreatureLibrary.blueprintOf()`。`SpeciesEditor._loadEntry` 一开始手写了一遍解析，把 `dx` 读成 `type`，蓝图整个错位（CDP 测试抓到） |
 | 顺序偏差影响公平性            | ✅ 已落地：两阶段更新 + 随机结算顺序（阶段 4 接神经网络时这条边界一行未改） |
@@ -1372,6 +1490,11 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 > **最推荐的三个**：储食、再生、刺。前两个几乎零成本且各自补上一块缺失的玩法
 > （能量缓冲 / 防御的第二种形态），第三个给"杀手"这条独大的路线加制衡。
 > 光合虽然最诱人，但它是唯一一个**必须先把场系统搭起来**的，建议留到"环境场"那一批一起做。
+>
+> **进度（2026-10-16）**：`onEnter` / `onStand` 钩子已经落地（§6.7），
+> 岩浆 / 沼泽 / 辐射带 / 腐殖质四种地形已经实现。下面这张表里剩下的
+> **水 / 冰**（`onEnter: slow` / 滑行惯性）、**储食 / 再生 / 刺 / 毒素 / 粘附**
+> 与**环境场**都还没做。
 
 ### 15.3 值得加的"无机像素"（地形）
 
@@ -1411,9 +1534,9 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 
 开发时用 ES Modules + HTTP 服务最舒服，但交付给最终用户时"先起服务器再开浏览器"是个门槛。所以额外产出两份**双击即玩**的产物，都放在 `dist/`：
 
-### 16.1 `dist/evosim.html` —— 单文件版（317 KB）
+### 16.1 `dist/evosim.html` —— 单文件版（337 KB）
 
-把 33 个模块打成一份自包含 HTML：CSS 内联进 `<style>`，favicon 内联成 data URI，入口脚本替换成内联的普通 `<script>`。
+把 34 个模块打成一份自包含 HTML：CSS 内联进 `<style>`，favicon 内联成 data URI，入口脚本替换成内联的普通 `<script>`。
 
 **为什么不能直接双击原始 `index.html`**：`file://` 下 ES Modules 会被 CORS 拦死（`Origin 'null' has been blocked`），页面直接白屏。把模块内联成一段普通脚本才能摆脱服务器。
 
@@ -1464,6 +1587,7 @@ node tools/build-exe.mjs
 
 ### 16.3 验证
 
-- `tools/verify-bundle.mjs` —— 用 `file://` 打开单文件版，或传入一个 URL 打开 exe 起的服务，验证：页面无控制台错误地启动、无外链脚本请求、世界在演化、画布画出内容、存档读档往返、参数面板与检视器可用、**工具栏有「橡皮擦」且"擦掉地形但不影响生物"**、**参数面板有「全局消耗量倍率」与「食物量倍率」**、物种树能打开并画出内容且**是不挡画布的非模态浮窗（外层 `pointer-events:none` / 面板 `auto` / 无遮罩 / 默认锁定）**、导出接口可用、着色模式可切换、**物种工坊能打开并画出蓝图、投放能进世界、「手动放置」能装入放置笔刷并收起工坊、能存进生物库、参数面板有 30 行细胞属性、导出落点判断正确**、`localStorage` 降级路径正常。单文件版 **35 项**断言；指向 exe 时同样 35 项，但"导出落点"一条会走"桌面版 → 程序目录"分支。
+- `tools/verify-bundle.mjs` —— 用 `file://` 打开单文件版，或传入一个 URL 打开 exe 起的服务，验证：页面无控制台错误地启动、无外链脚本请求、世界在演化、画布画出内容、存档读档往返、参数面板与检视器可用、**工具栏有「橡皮擦」与岩浆/沼泽/辐射带/腐殖质四种地形笔刷，且"擦掉地形但不影响食物与生物"**、
+**参数面板有「全局消耗量倍率」「食物量倍率」与 6 项地形参数**、**网格带 floor 层**、物种树能打开并画出内容且**是不挡画布的非模态浮窗（外层 `pointer-events:none` / 面板 `auto` / 无遮罩 / 默认锁定）**、导出接口可用、着色模式可切换、**物种工坊能打开并画出蓝图、投放能进世界、「手动放置」能装入放置笔刷并收起工坊、能存进生物库、参数面板有 30 行细胞属性、导出落点判断正确**、`localStorage` 降级路径正常。单文件版 **38 项**断言；指向 exe 时同样 38 项，但"导出落点"一条会走"桌面版 → 程序目录"分支。
 - `tools/verify-exe.mjs` —— 起真正的 `dist/evosim.exe`（`EVOSIM_NO_OPEN=1` + `EVOSIM_SAVE_DIR` 指向临时目录），验证：exe 能起来并打印访问地址、页面里注入了 `window.__EVOSIM_HOST__` 且 `dir` 正确、`/__evosim/ping` 返回正确目录、`POST /__evosim/save` **真把文件写进那个目录且内容逐字节一致**、`../../evil.txt` 这类路径穿越被清洗成纯文件名且**写不出目录**、空文件名被拒（400）、未知路径 404。17 项断言。
 

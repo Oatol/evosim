@@ -1,8 +1,9 @@
-import { CellType, DIR_VECTORS, cellAttr } from './CellType.js';
+import { CellType, DIR_VECTORS, cellAttr, isPassable } from './CellType.js';
 import { Anatomy } from './Anatomy.js';
 import { Brain } from './Brain.js';
 import { Sensors } from './Sensors.js';
 import { rotateCol, rotateRow, performCellFunction } from './BodyCell.js';
+import { applyTerrainEnter, applyTerrainStand } from './Terrain.js';
 import { mutateOrganism } from './Mutation.js';
 
 /**
@@ -31,6 +32,7 @@ export class Organism {
     this.energy = 0;
     this.damage = 0;
     this.starveTicks = 0;        // 连续能量见底的 tick 数（代谢消耗引入的饿死计时）
+    this.inRadiation = false;    // 这一 tick 是否站在辐射带里（Mutation 用它放大变异率）
 
     this.alive = true;
     this.anatomy = new Anatomy();
@@ -209,6 +211,10 @@ export class Organism {
       return;
     }
 
+    // 每 tick 重置"这一 tick 是否处于辐射中"——辐射的变异率加成只在
+    // 当 tick 繁殖时生效，不该跨 tick 累积（否则会指数爆炸）
+    this.inRadiation = false;
+
     // 代谢：所有细胞的消耗之和。饿死不是立刻的——能量见底后还能撑
     // `starvationTicks` 个 tick，给新生个体一点找食物的时间。
     const upkeep = this.upkeepCost();
@@ -227,6 +233,12 @@ export class Organism {
     }
 
     if (this.anatomy.hasMover) this._actMove();
+    if (!this.alive) return;          // 可能踏进岩浆被烫死
+
+    // 驻留效果：站在辐射带/岩浆上每 tick 触发一次。
+    // 放在移动**之后**，所以"这一 tick 走到哪儿"决定了受什么影响。
+    this._applyTerrainStand();
+    if (!this.alive) return;
 
     // 细胞功能：进食 / 造食 / 攻击。杀手可能中途把自己害死（一击必杀模式）
     const cells = this.anatomy.cells;
@@ -236,6 +248,21 @@ export class Organism {
     }
 
     if (this.energy >= this.foodNeeded()) this.reproduce();
+  }
+
+  /**
+   * 驻留在当前格的地形上，每 tick 一次。
+   *
+   * 读的是 **floor 层**——生物自己的细胞就压在枢轴格上，顶层 `types` 是它自己，
+   * 只有地板层才知道它脚底下踩的是什么。
+   */
+  _applyTerrainStand() {
+    const grid = this.world.grid;
+    const index = grid.index(this.col, this.row);
+    if (index < 0) return;
+    const type = grid.floor[index];
+    if (type === CellType.EMPTY) return;
+    applyTerrainStand(this, type, this.col, this.row);
   }
 
   _actMove() {
@@ -270,11 +297,22 @@ export class Organism {
     const newRow = this.row + v[1];
     if (!this.isClear(newCol, newRow, this.rotation)) return false;
 
+    // 目的地的**地形**要在 writeGrid 之前读——writeGrid 会用自己的细胞盖住顶层。
+    // 读的是 floor 层而不是 types：万一那格上压着食物，地形仍然算数
+    // （生物走过去会把食物顶掉，所以该烫还是得烫）。
+    const destIndex = this.world.grid.index(newCol, newRow);
+    const destType = destIndex < 0 ? CellType.EMPTY : this.world.grid.floor[destIndex];
+
     this.clearGrid();
     this.col = newCol;
     this.row = newRow;
     this.writeGrid();
     this.normalizePosition();
+
+    // 踏入效果（岩浆烫、沼泽拖）。可能直接把这只生物弄死，调用方要复查 alive。
+    if (destType !== CellType.EMPTY) {
+      applyTerrainEnter(this, destType, this.col, this.row);
+    }
     return true;
   }
 
@@ -313,6 +351,7 @@ export class Organism {
       if (type === CellType.EMPTY) continue;
       if (grid.owners[index] === this.id) continue;
       if (type === CellType.FOOD && !blocksFood) continue;
+      if (isPassable(type)) continue;           // 岩浆/沼泽/辐射带/腐殖质等可以走进去
       return false;
     }
     return true;
@@ -345,6 +384,7 @@ export class Organism {
       const type = grid.types[index];
       if (type === CellType.EMPTY) continue;
       if (type === CellType.FOOD && !blocksFood) continue;
+      if (isPassable(type)) continue;           // 地形（岩浆/沼泽/…）可以落在上面
       return false;
     }
     return true;
@@ -374,6 +414,7 @@ export class Organism {
     const grid = this.world.grid;
     const type = grid.types[index];
     if (type === CellType.EMPTY || type === CellType.FOOD) return true;
+    if (isPassable(type)) return true;          // 地形不挡住"出生路径"
     const ownerId = grid.owners[index];
     return ownerId === this.id || ownerId === parentId;
   }
@@ -398,7 +439,9 @@ export class Organism {
     for (let i = 0; i < cells.length; i++) {
       const cell = cells[i];
       const index = grid.index(this.realCol(cell), this.realRow(cell));
-      if (index >= 0) world.setCellAt(index, CellType.EMPTY, -1);
+      // 用 revealFloor 而不是写空：地形（岩浆/腐殖质…）只是被身体暂时盖住，
+      // 生物离开后要露出来。写空会把地形一起删掉。
+      if (index >= 0) world.revealFloor(index);
     }
   }
 
