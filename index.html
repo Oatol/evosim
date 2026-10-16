@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>evosim · 进化沙盒</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">evosim</span>
+      <span class="brand-sub">进化沙盒</span>
+    </div>
+
+    <div class="topbar-group">
+      <label class="field">
+        <span class="field-label">配色</span>
+        <select id="scheme-select" class="field-input"></select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">着色</span>
+        <select id="color-mode" class="field-input">
+          <option value="type">按类型</option>
+          <option value="species">按物种</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">列</span>
+        <input id="world-cols" class="field-input field-number" type="number" min="40" max="800" step="10">
+      </label>
+
+      <label class="field">
+        <span class="field-label">行</span>
+        <input id="world-rows" class="field-input field-number" type="number" min="30" max="600" step="10">
+      </label>
+
+      <button id="btn-apply-size" class="top-btn">应用尺寸</button>
+    </div>
+
+    <div class="topbar-group topbar-right">
+      <button id="btn-species-editor" class="top-btn">物种工坊</button>
+      <button id="btn-species-tree" class="top-btn">物种树</button>
+      <button id="btn-params" class="top-btn">参数</button>
+      <button id="btn-save" class="top-btn">保存</button>
+      <button id="btn-load" class="top-btn">读取</button>
+      <button id="btn-fit" class="top-btn">适应窗口</button>
+      <button id="btn-regenerate" class="top-btn">重新生成世界</button>
+      <button id="btn-clear" class="top-btn">清空</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <aside class="sidebar sidebar-left" id="sidebar-left"></aside>
+
+    <div id="param-host" class="param-host"></div>
+
+    <div class="canvas-wrap">
+      <canvas id="world-canvas"></canvas>
+      <div class="canvas-badge" id="stage-badge">阶段 7 · 细胞模块化与物种工坊</div>
+      <div class="canvas-toast" id="toast" hidden></div>
+    </div>
+
+    <aside class="sidebar sidebar-right" id="sidebar-right"></aside>
+  </main>
+
+  <footer class="timeline" id="timeline"></footer>
+
+</div>
+
+<input id="save-file" type="file" accept="application/json,.json" hidden>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
