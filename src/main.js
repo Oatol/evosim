@@ -4,6 +4,7 @@ import { World } from './core/World.js';
 import { Engine } from './core/Engine.js';
 import { generateDemoWorld } from './core/WorldGen.js';
 import { seedOriginOfLife, spawnPopulation, makeBlueprint, spawnFromBlueprint } from './life/OrganismFactory.js';
+import { CellType } from './life/CellType.js';
 import { FossilRecord } from './stats/FossilRecord.js';
 import {
   serializeWorld, deserializeWorld, readSaveFile, saveFilename,
@@ -558,7 +559,7 @@ function boot() {
 
   // 方便在控制台里调试
   window.evosim = {
-    Config, world, camera, renderer, editor, engine, colorScheme, rng,
+    Config, CellType, world, camera, renderer, editor, engine, colorScheme, rng,
     record, charts, stats, inspector, toolbar, controlPanel, timeline, speciesTree,
     library, speciesEditor,
     save: () => serializeWorld(world, rng, { config: JSON.parse(JSON.stringify(Config)) }),

@@ -353,6 +353,9 @@ async function main() {
     const cellsGroup = groups.find((g) => g.querySelector('.param-group-head span').textContent === '细胞属性');
     const attrRows = cellsGroup ? cellsGroup.querySelectorAll('.param-row').length : 0;
 
+    // 工坊调色板：应该包含三种新身体细胞
+    const palette = [...speciesEditor.root.querySelectorAll('.se-swatch-label')].map((s) => s.textContent);
+
     // 导出落点：浏览器里没有宿主标记，应回退成下载
     const hostDir = window.evosim.hostSaveDir();
     const marker = window.__EVOSIM_HOST__ || null;
@@ -360,19 +363,21 @@ async function main() {
     speciesEditor.close();
     return { ink, cells, placed, libBefore: before2,
              libAfter: after2, attrRows, attrKinds: Object.keys(Config.cells).length,
-             hasManual, hasCenter, hasLibrary, manualArmed,
+             hasManual, hasCenter, hasLibrary, manualArmed, palette,
              hostDir, markerApp: marker ? marker.app : null,
              closed: speciesEditor.isOpen };
   })()`);
   check('物种工坊能打开并画出蓝图', p7.ink > 500 && p7.cells >= 1,
     `${p7.cells} 细胞 · ${p7.ink} px`);
   check('投放把个体放进了世界', p7.placed === 1, `+${p7.placed}`);
+  check('工坊调色板有 储食 / 再生 / 刺',
+    ['储食', '再生', '刺'].every((l) => p7.palette.includes(l)), p7.palette.join(' / '));
   check('工坊有「手动放置 / 放到视野中心 / 存入生物库」三个按钮',
     p7.hasManual && p7.hasCenter && p7.hasLibrary);
   check('「手动放置」装入放置笔刷并收起工坊', p7.manualArmed === true);
   check('存入生物库生效', p7.libAfter === p7.libBefore + 1,
     `${p7.libBefore} → ${p7.libAfter}`);
-  check('参数面板有 30 行细胞属性', p7.attrRows === 30 && p7.attrKinds === 6,
+  check('参数面板有 45 行细胞属性', p7.attrRows === 45 && p7.attrKinds === 9,
     `${p7.attrKinds} 种 · ${p7.attrRows} 行`);
   if (p7.markerApp === 'evosim') {
     check('桌面版导出去向是程序目录', typeof p7.hostDir === 'string' && p7.hostDir.length > 0, p7.hostDir);

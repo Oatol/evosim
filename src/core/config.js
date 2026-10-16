@@ -37,6 +37,8 @@ export const Config = {
     metabolismScale: 0,        // 全局消耗量倍率（0 = 关闭每 tick 消耗）
     foodEnergyScale: 1,        // 食物量倍率：一份食物能提供多少能量
     starvationTicks: 60,       // 能量见底后还能撑多少个 tick 才饿死
+    storageFoodBonus: 1,       // 每个储食细胞把繁殖阈值抬高多少（× 基础繁殖成本）
+    regenRate: 0.1,            // 每个再生细胞每 tick 抹掉的累积伤害
   },
 
   /**
@@ -139,6 +141,8 @@ export const CONFIG_FIELDS = {
     metabolismScale: { label: '全局消耗量倍率', min: 0, max: 5, step: 0.05, note: '乘在所有细胞的每 tick 消耗上。0 = 关闭。调高会带来真实的选择压力，但当前食物经济撑不住太大值' },
     foodEnergyScale: { label: '食物量倍率', min: 0.1, max: 10, step: 0.1, note: '一份食物能提供多少能量（默认 1）。调高 → 吃一口就攒够繁殖，种群扩张更快' },
     starvationTicks: { label: '饿死延时(tick)', min: 0, max: 600, step: 5, note: '能量见底后还能撑多久' },
+    storageFoodBonus: { label: '储食·储备倍率', min: 0, max: 5, step: 0.1, note: '每个储食细胞把繁殖阈值抬高多少。抬高的是阈值，繁殖时扣的仍是基础成本，差额留在能量里当储备（0 = 储食只是块普通肉）' },
+    regenRate: { label: '再生·每tick回血', min: 0, max: 5, step: 0.05, note: '每个再生细胞每 tick 抹掉多少累积伤害' },
   },
   terrain: {
     lavaEnterDamage: { label: '岩浆·踏入伤害', min: 0, max: 20, step: 1, note: '踏进去那一下挨多少' },

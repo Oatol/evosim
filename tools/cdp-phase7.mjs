@@ -178,7 +178,7 @@ async function main() {
   check('顶栏有"物种工坊"按钮', boot.hasEditorBtn === true);
   check('启动时物种工坊是关的', boot.editorOpen === false);
   check('启动时生物库是空的', boot.libraryCount === 0);
-  check('Config 里有 6 种身体细胞的属性', boot.cellAttrs === 6, `${boot.cellAttrs} 种`);
+  check('Config 里有 9 种身体细胞的属性', boot.cellAttrs === 9, `${boot.cellAttrs} 种`);
 
   // ── 2. 打开物种工坊 ──
   console.log('\n=== 2. 打开物种工坊 ===');
@@ -208,7 +208,7 @@ async function main() {
   check('物种工坊打开了', opened.isOpen === true && opened.hidden === false);
   check('蓝图画布画出了内容', opened.ink > 500, `${opened.ink} px`);
   check('默认蓝图是 3 个细胞', opened.cells === 3, `${opened.cells} 个`);
-  check('细胞类型调色板有 7 项（6 种细胞 + 擦除）', opened.palette === 7, `${opened.palette} 项`);
+  check('细胞类型调色板有 10 项（9 种细胞 + 擦除）', opened.palette === 10, `${opened.palette} 项`);
   check('有名字输入框', opened.hasNameInput === true);
   check('空库显示占位提示', opened.libraryEntries === 0);
   check('信息栏显示描述与指纹', /细胞.*指纹/.test(opened.info), opened.info);
@@ -461,8 +461,8 @@ async function main() {
     return { found: true, rows: labels.length, sliders: sliders.length, sample: labels.slice(0, 5) };
   })()`);
   check('参数面板有"细胞属性"分组', panel.found === true);
-  check('分组里有 6 种 × 5 项 = 30 行', panel.rows === 30, `${panel.rows} 行`);
-  check('每行都有滑块', panel.sliders === 30, `${panel.sliders} 个`);
+  check('分组里有 9 种 × 5 项 = 45 行', panel.rows === 45, `${panel.rows} 行`);
+  check('每行都有滑块', panel.sliders === 45, `${panel.sliders} 个`);
   check('标签带细胞类型前缀', panel.found && /·/.test(panel.sample[0]), panel.sample.join(' / '));
 
   // 真的改一个属性

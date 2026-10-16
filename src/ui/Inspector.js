@@ -211,7 +211,7 @@ export class Inspector {
       ['age', '年龄'],
       ['lifespan', '寿命'],
       ['energy', '能量'],
-      ['foodNeeded', '繁殖所需'],
+      ['foodNeeded', '繁殖阈值'],
       ['mutability', '变异率'],
       ['species', '物种'],
       ['ancestry', '祖先'],
@@ -330,8 +330,8 @@ export class Inspector {
 
     set('age', `${org.age} / ${org.lifespan()}`);
     set('lifespan', String(org.lifespan()));
-    set('energy', `${org.energy} / ${org.foodNeeded()}`);
-    set('foodNeeded', String(org.foodNeeded()));
+    set('energy', `${round1(org.energy)} / ${round1(org.reproduceAt())}`);
+    set('foodNeeded', String(round1(org.reproduceAt())));
     set('mutability', org.mutability.toFixed(2) + '%');
 
     const sp = world.species.byFingerprint(org.speciesFingerprint);
@@ -352,7 +352,10 @@ export class Inspector {
 
     set('position', `${org.col}, ${org.row}`);
     set('facing', `${DIR_LABELS[org.rotation]}（身体）/ ${DIR_LABELS[org.direction]}（移动）`);
-    set('state', org.alive ? (org.anatomy.hasMover ? '存活 · 可移动' : '存活 · 静止') : '已死亡');
+    let state = org.alive ? (org.anatomy.hasMover ? '存活 · 可移动' : '存活 · 静止') : '已死亡';
+    if (org.anatomy.hasStorage) state += ` · 储备 ${round1(org.reproduceAt() - org.foodNeeded())}`;
+    if (org.anatomy.hasSpike) state += ` · 反伤 ${round1(org.spikeDamage())}`;
+    set('state', state);
   }
 
   // ────────────────────────────── 身体蓝图 ──────────────────────────────
@@ -640,4 +643,9 @@ function sectionTitle(text) {
   h.className = 'inspector-section-title';
   h.textContent = text;
   return h;
+}
+
+/** 能量这类量现在可能是小数（代谢/储备都会产生），显示成 1 位小数就够了 */
+function round1(v) {
+  return Math.round(v * 10) / 10;
 }

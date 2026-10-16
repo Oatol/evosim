@@ -76,6 +76,7 @@ export const CELL_BEHAVIORS = {
   producer: producerFunction,
   killer: killerFunction,
   eye: eyeFunction,
+  regen: regenFunction,
 };
 
 /**
@@ -172,8 +173,25 @@ function killerFunction(organism, cell) {
 
     const target = world.organismById(ownerId);
     if (!target || !target.alive) continue;
-    target.harm(damage);
+    target.harm(damage, organism);      // 带上攻击者 → 对方若有刺细胞就会反伤
   }
+}
+
+/**
+ * 再生：每 tick 抹掉一点已经累积的伤害。
+ *
+ * 写成一个**行为函数**（而不是在 act() 里特判 hasRegen）是为了让"每有一个再生细胞
+ * 就多回一份血"这件事自动成立——行为表本来就是按细胞逐个调用的。
+ *
+ * 注意它回的是 `damage`（已累积的伤害），不是"加生命上限"。
+ * 所以再生和装甲是互补的两种防御：装甲让伤害**进不来**，再生让伤害**慢慢退回去**。
+ */
+function regenFunction(organism, cell) {
+  if (organism.damage <= 0) return;
+  const rate = organism.world.config.life.regenRate;
+  if (!(rate > 0)) return;
+  organism.damage -= rate;
+  if (organism.damage < 0) organism.damage = 0;
 }
 
 /**

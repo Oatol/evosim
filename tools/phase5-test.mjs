@@ -210,10 +210,21 @@ section('2. 存档序列化结构');
     typeof b.w1 === 'string' && typeof b.b1 === 'string' && typeof b.w2 === 'string' && typeof b.b2 === 'string');
   eq('w1 编码长度 = 480×4 字节的 base64', b.w1.length, Math.ceil(480 * 4 / 3) * 4);
 
-  // 只有眼睛带 dir
+  // 只有眼睛带 dir。
+  // 用一个**专门装了眼睛**的小世界来验，而不是指望演化出来的种群里有眼睛——
+  // 眼睛在演化里一直很稀有，加/删细胞类型都会改变变异候选池、进而改变演化轨迹，
+  // 把断言绑在"60 tick 内自然长出眼睛"上会随机翻车。
+  const eyeCtx = makeWorld(777);
+  eyeCtx.world.fillGrid(CellType.EMPTY);
+  const eyeOrg = new Organism(eyeCtx.world, 20, 20);
+  eyeOrg.anatomy.addCell(CellType.MOUTH, 0, 0);
+  eyeOrg.anatomy.addCell(CellType.EYE, 0, -1, 2);
+  eyeCtx.world.addOrganism(eyeOrg);
+  const eyeData = serializeWorld(eyeCtx.world, eyeCtx.rng, { config: snapshotConfig() });
+
   let eyeWithDir = 0;
   let nonEyeWithDir = 0;
-  for (const org of data.organisms) {
+  for (const org of eyeData.organisms) {
     for (const c of org.cells) {
       if (c[0] === CellType.EYE) { if (c.length === 4) eyeWithDir++; }
       else if (c.length !== 3) nonEyeWithDir++;

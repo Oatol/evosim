@@ -50,6 +50,11 @@ export const CellType = Object.freeze({
   SWAMP: 10,     // 沼泽：移动要额外耗能
   RAD: 11,       // 辐射带：驻留扣血 + 变异率飙升
   HUMUS: 12,     // 腐殖质：缓慢向周围释放食物
+
+  // 身体细胞（阶段 9）
+  STORAGE: 13,   // 储食：抬高繁殖阈值，多出来的能量变成储备
+  REGEN: 14,     // 再生：每 tick 回一点血
+  SPIKE: 15,     // 刺：被杀手攻击时反伤
 });
 
 /** 所有定义共用的默认值 */
@@ -145,6 +150,36 @@ export const CELL_DEFS = Object.freeze([
     flag: 'hasEye', behavior: 'eye',
     cost: 0.006,
     colors: { classic: '#d8b4fe', highContrast: '#ffffff', colorblindSafe: '#f0e442' },
+  }),
+
+  // ── 身体细胞（阶段 9）──
+  //
+  // 这三种都**不参与视觉**（`visible` 默认 false）：感知扩容要动 VISUAL_SLOTS /
+  // SENSE_DIM，会让旧存档大脑失效，所以留到最后一批统一做。
+  // 在那之前，它们只是"身体的一部分"，别的生物看不见——但照样占格子、照样有成本。
+  def({
+    id: CellType.STORAGE, key: 'STORAGE', name: 'storage', label: '储食',
+    isBodyCell: true, paintable: true,
+    flag: 'hasStorage',
+    cost: 0.004,
+    // 脂肪是热量密度最高的组织：死掉之后尸体格外肥，这也是"养肥了再吃"的由来
+    foodValue: 3,
+    colors: { classic: '#fbbf24', highContrast: '#ffd600', colorblindSafe: '#f0c000' },
+  }),
+  def({
+    id: CellType.REGEN, key: 'REGEN', name: 'regen', label: '再生',
+    isBodyCell: true, paintable: true,
+    flag: 'hasRegen', behavior: 'regen',
+    cost: 0.005,
+    colors: { classic: '#5eead4', highContrast: '#00ffc8', colorblindSafe: '#44d7b6' },
+  }),
+  def({
+    id: CellType.SPIKE, key: 'SPIKE', name: 'spike', label: '刺',
+    isBodyCell: true, paintable: true,
+    flag: 'hasSpike',
+    damage: 1,          // 被攻击时反弹给攻击者的伤害（和杀手共用 damage 属性）
+    cost: 0.004,
+    colors: { classic: '#94a3b8', highContrast: '#e0e6ee', colorblindSafe: '#b8c0cc' },
   }),
 
   // ── 地形（阶段 8）──

@@ -89,7 +89,7 @@ evosim/
     │   └── config.js           # 全局参数表 + 面板元数据（CONFIG_FIELDS）
     │
     ├── life/
-    │   ├── CellType.js         # 细胞类型注册表（13 种：3 独立格 + 6 身体细胞 + 4 地形）
+    │   ├── CellType.js         # 细胞类型注册表（16 种：3 独立格 + 9 身体细胞 + 4 地形）
     │   ├── Terrain.js          # 地形效果表（阶段 8）：enter / stand / tick 三个钩子
     │   ├── Anatomy.js          # 身体蓝图 = 基因组 A
     │   ├── BodyCell.js         # 身体细胞及其行为（含旋转数学）
@@ -126,7 +126,7 @@ evosim/
         └── Export.js           # 统计 CSV 导出（阶段 6）
 ```
 
-> **当前进度（阶段 8 结束）**
+> **当前进度（阶段 9 结束）**
 >
 > - `core/` 全部完成（config / RNG / GridMap / World / WorldGen / Engine）
 > - `life/` 全部完成（**CellType 注册表** / Anatomy / BodyCell / Organism / OrganismFactory / Mutation / Brain / Sensors）
@@ -512,6 +512,10 @@ foodNeeded = cellCount + (hasMover ? extraMoverCost : 0)
 | 寿命   | `cellCount × lifespanMultiplier`                             |
 | 最大生命 | `Σ 细胞.hp`（默认每种 hp=1，于是等于体型）                                  |
 | 每 tick 消耗 | `Σ 细胞.cost × life.metabolismScale`（默认倍率 **0** = 关闭） |
+| **繁殖阈值** | `foodNeeded × (1 + Σ储食细胞 × life.storageFoodBonus)`（无储食细胞时 == `foodNeeded`，逐位不变） |
+| **繁殖实扣** | `foodNeeded`（**基础成本**；阈值高出它的部分留在能量里，就是"储备"） |
+| **每 tick 回血** | `Σ再生细胞 × life.regenRate`（从累积的 `damage` 里抹掉） |
+| **反伤** | `Σ刺细胞.damage`（被杀手攻击时反弹给攻击者，不吃装甲减免） |
 | 每份食物能量 | `life.foodEnergyScale`（默认 **1** = 与旧行为逐位一致） |
 | 死亡食物量 | `Σ 细胞.foodValue`（默认每种 1，于是等于"一格一食物"）             |
 | 死亡触发 | `age > lifespan` 或 `damage >= maxHealth` 或 连续 `starvationTicks` 个 tick 能量见底 或 `instaKill` 开启时受击 |
@@ -687,6 +691,72 @@ applyFoodDecay() {
 > **这一批新地形默认 `visible: false`**——生物"看不见"岩浆。感知扩容
 > （`VISUAL_SLOTS` 9→N）留到最后一批，那时会一并作废旧存档（用户已批准存档断代）。
 > 在那之前，岩浆是纯粹的筛选压力：盲走进去的个体被淘汰，能"记住"路径的留下。
+
+---
+
+### 6.8 三种新身体细胞（阶段 9）
+
+| 细胞 | 标志位 | 行为 | 属性默认 | 作用 |
+|---|---|---|---|---|
+| **储食 STORAGE** | `hasStorage` | 无（纯结构性） | cost 0.004 · foodValue **3** | 抬高繁殖阈值，差额变成能量储备 |
+| **再生 REGEN** | `hasRegen` | `regen` | cost 0.005 | 每 tick 抹掉一点累积伤害 |
+| **刺 SPIKE** | `hasSpike` | 无（在 `harm()` 里触发） | cost 0.004 · damage 1 | 被杀手攻击时反伤 |
+
+三种都**不参与视觉**（`visible: false`）。感知扩容要动 `VISUAL_SLOTS` / `SENSE_DIM`，
+会让旧存档大脑失效，所以留到最后一批统一做——在那之前它们只是"身体的一部分"，
+别的生物看不见，但照样占格子、照样有成本。**代价是：加它们没有造成存档断代。**
+
+#### 储食：为什么"抬高阈值、只扣基础成本"
+
+`reproduceAt()` 返回**触发繁殖的能量阈值**，`foodNeeded()` 返回**实际扣掉的基础成本**：
+
+```js
+reproduceAt() {                       // 无储食时 == foodNeeded()，逐位相同
+  const base = this.foodNeeded();
+  if (!this.anatomy.hasStorage) return base;
+  return base * (1 + this.storageCount() * Config.life.storageFoodBonus);
+}
+// act():   if (energy >= reproduceAt()) reproduce();
+// reproduce():  energy -= foodNeeded();   ← 扣的是基础成本，不是阈值
+```
+
+于是：储食个体要攒到 `2×` 的能量才繁殖，但繁殖只花 `1×`，**剩下的 `1×` 留在身上**。
+这就是"储备"——它让「全局消耗量倍率」终于有了主玩法的可能：生态一开消耗就崩，
+根因正是生物的能量长期贴着 0（一攒够就繁殖掉），没有缓冲。
+
+无储食细胞的个体 `reproduceAt() === foodNeeded()`，所以**基线生态逐位不变**。
+（默认 `storageFoodBonus = 1`；调到 0 就退回"储食只是块普通肉"。）
+
+#### 再生：写成行为函数而不是 `act()` 里的特判
+
+`regen` 挂在 `BodyCell.CELL_BEHAVIORS` 上，所以在"逐个细胞调用行为"的循环里自然执行——
+"每多一个再生细胞就多回一份血"是自动成立的，不需要任何计数逻辑。
+
+它回的是 `damage`（已累积的伤害），不是"加生命上限"。所以再生和装甲互补：
+**装甲让伤害进不来，再生让伤害慢慢退回去**。默认 `regenRate = 0.1`/细胞/tick——
+比杀手的 1 点/tick 慢，所以它只是"减缓死亡"，救不了站在岩浆里的个体。
+
+#### 刺：反伤 + 递归截断
+
+`Organism.harm(amount, attacker)` 多了一个 `attacker` 参数，**只有生物之间的近战会传**
+（目前只有杀手细胞）。传了它才会触发反伤；地形伤害（岩浆/辐射）不传，所以站在岩浆里不会去扎岩浆。
+
+```js
+harm(amount = 1, attacker = null) {
+  this.damage += amount;
+  if (attacker && attacker !== this && attacker.alive) {
+    const back = this.spikeDamage();
+    if (back > 0) attacker.harm(back);      // 不带 attacker → 不再连锁反伤
+  }
+  ...
+}
+```
+
+**必须截断递归**：两只都带刺的生物互相攻击时，如果不截断就会无限互相反伤（直接爆栈）。
+反伤时不再往下传 `attacker`，所以"甲刺乙、乙刺甲"最多各挨一下。
+
+**刺不吃装甲减免**——装甲挡的是"被咬"，挡不住"被扎"（反伤走的是 `harm()`，
+而装甲的判定在 `killerFunction` 里，两条路）。这让刺能对"装甲 + 杀手"这条路线形成制衡。
 
 ---
 
@@ -879,7 +949,7 @@ class FossilRecord {
 | 分组 | 参数 |
 | -- | -- |
 | 世界 | 网格尺寸、边界环绕、食物掉落率、食物腐败率、重置时保留墙、灭绝后自动重置 |
-| 生命 | 寿命倍率、移动者额外成本、种群上限、生产者造食率、移动者可造食、转身冷却、**全局消耗量倍率**、**食物量倍率**、饿死延时 |
+| 生命 | 寿命倍率、移动者额外成本、种群上限、生产者造食率、移动者可造食、转身冷却、**全局消耗量倍率**、**食物量倍率**、饿死延时、**储食·储备倍率**、**再生·每tick回血** |
 | **地形** | **岩浆·踏入伤害 / 岩浆·驻留伤害 / 沼泽·移动耗能 / 辐射带·每tick伤害 / 辐射带·变异率倍率 / 腐殖质·造食率**（阶段 8） |
 | **细胞属性** | **每种身体细胞 × 5 项**（生命值 / 每 tick 消耗 / 伤害 / 感知距离 / 死亡食物值），由细胞注册表自动生成 |
 | 变异 | 加/改/删细胞概率、权重变异率与幅度、权重重置率、全局变异率、初始变异率、变异率漂移幅度 |
@@ -1028,6 +1098,8 @@ turnCooldown = 4            // 转身后的冷却 tick 数（防止原地打转�
 metabolismScale = 0         // 全局消耗量倍率（0 = 关闭每 tick 消耗，见 §6.4）
 foodEnergyScale = 1         // 食物量倍率：一份食物能换多少能量（1 = 与旧行为一致）
 starvationTicks = 60        // 能量见底后还能撑多少个 tick 才饿死
+storageFoodBonus = 1        // 每个储食细胞把繁殖阈值抬高多少（× 基础繁殖成本，见 §6.8）
+regenRate = 0.1             // 每个再生细胞每 tick 抹掉的累积伤害
 
 // 地形效果（阶段 8，见 §6.7）
 lavaEnterDamage = 2         // 踏进岩浆那一下的冲击伤害
@@ -1338,7 +1410,31 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 > `combat.foodBlocksReproduction` 架空了。phase5-test 的"读档后继续演化可复现"
 > 在第 48 tick 分叉，定位到 `isPassable`。现在它只对 `terrain: true` 生效。
 
-### 阶段 9 · 打磨与优化（待办）
+### 阶段 9 · 储食 / 再生 / 刺三种新身体细胞 ✅ 已完成（2026-10-16）
+
+用户排的下一批是"储食细胞 → 再生 + 刺"。三种都是纯身体细胞，不需要场系统，
+所以一次做完（它们的改动面高度重叠：注册表 / 行为表 / 属性表 / 调色板 / 测试）。
+
+- **储食**（§6.8）：`reproduceAt()` 与 `foodNeeded()` 拆开——阈值抬高、成本不变，
+  差额留在能量里当储备。**无储食细胞时两者逐位相同，基线生态不变**。
+  它让「全局消耗量倍率」有了成为主玩法的可能（生态一开消耗就崩的根因是没有能量缓冲）
+- **再生**：写成 `BodyCell.CELL_BEHAVIORS.regen`，靠"逐个细胞调行为"的循环天然实现
+  "多一个细胞多回一份血"，不需要任何计数
+- **刺**：`harm(amount, attacker)` 加了 `attacker`；只有近战（杀手）会传，
+  地形伤害不传。**反伤时不再往下传 attacker**，否则两只带刺的会无限互扎
+- 三种都 `visible: false` → **没有造成存档断代**（视觉扩容留到最后一批）
+- 交付物：`CellType` 加 3 种细胞、`BodyCell` 加 `regen` 行为与杀手传参、
+  `Organism` 加 `reproduceAt()`/`storageCount()`/`spikeDamage()` 与 `harm` 签名、
+  `config` 加 `storageFoodBonus`/`regenRate`、`Inspector` 显示储备与反伤
+- 实测：**phase9-test 77 项** + **cdp-phase9 29 项**全通过；回归 phase3–8 与 cdp-phase3–8 全绿；
+  `verify-bundle` 39 项、`verify-exe` 17 项
+- 性能：60 fps 未变
+
+> **回归时抓到的一处脆弱断言**：phase5-test 有一条"眼睛细胞带朝向"依赖
+> "演化 60 tick 内自然长出眼睛"。加细胞类型会改变变异候选池、进而改变整条演化轨迹，
+> 于是眼睛没出现、断言翻车。改成**用一个专门装了眼睛的小世界**验证序列化，不再赌演化。
+
+### 阶段 10 · 打磨与优化（待办）
 
 - 性能剖析、`TypedArray` 调优、脏格渲染验证
 - 预设世界模板（含岩浆/沼泽/辐射带/腐殖质的现成地形预设）
@@ -1417,6 +1513,9 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 | **地形被生物啃光** | ✅ 已落地：地形单独记在 `GridMap.floor` 层，生物盖上去只改顶层，离开时 `revealFloor()` 把地形铺回来（§4.1）。没有这层的话，岩浆一被踩过就消失 |
 | **`isPassable` 架空食物阻挡** | ✅ 已修：一开始给 `FOOD` 也标了 `passable: true`，`combat.foodBlocksReproduction` 直接失效。`isPassable()` 现在只对 `terrain: true` 生效。phase5-test 的"读档后可复现"在第 48 tick 分叉，把它抓了出来 |
 | **辐射倍率把变异率写成指数爆炸** | ✅ 已规避：`irradiate` 不改 `mutability`，只打一个每 tick 重置的 `inRadiation` 标记，由 `Mutation` 在繁殖那一步临时乘倍率（§6.7） |
+| **刺细胞互相反伤爆栈**         | ✅ 已规避：`harm()` 反伤时**不再往下传 attacker**，递归深度恒为 1（§6.8）。phase9-test 专门断言"两只都带刺各挨一下、不连锁" |
+| **储食细胞悄悄改掉基线生态**   | ✅ 已规避：无储食细胞时 `reproduceAt() === foodNeeded()`（逐位相同），phase9-test 与 cdp-phase9 都锁了这条 |
+| **测试赌"演化会自然长出某种细胞"** | ✅ 已改：phase5-test 的"眼睛带朝向"原本依赖 60 tick 内自然出现眼睛，加细胞类型后演化轨迹改变、断言翻车。改成用专门装了眼睛的小世界验证序列化 |
 | **检视器模态浮层挡住画布**      | ✅ 已修：改成非模态浮窗 + 图钉（§9.3）。它一次造成了三个症状——跟随看不见、克隆永远提示"先选中"、关闭按钮不显眼 |
 | **生物库的蓝图格式两处解析**     | ✅ 已落地：库里存紧凑数组，读回统一走 `CreatureLibrary.blueprintOf()`。`SpeciesEditor._loadEntry` 一开始手写了一遍解析，把 `dx` 读成 `type`，蓝图整个错位（CDP 测试抓到） |
 | 顺序偏差影响公平性            | ✅ 已落地：两阶段更新 + 随机结算顺序（阶段 4 接神经网络时这条边界一行未改） |
@@ -1492,9 +1591,10 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 > 光合虽然最诱人，但它是唯一一个**必须先把场系统搭起来**的，建议留到"环境场"那一批一起做。
 >
 > **进度（2026-10-16）**：`onEnter` / `onStand` 钩子已经落地（§6.7），
-> 岩浆 / 沼泽 / 辐射带 / 腐殖质四种地形已经实现。下面这张表里剩下的
-> **水 / 冰**（`onEnter: slow` / 滑行惯性）、**储食 / 再生 / 刺 / 毒素 / 粘附**
-> 与**环境场**都还没做。
+> 岩浆 / 沼泽 / 辐射带 / 腐殖质四种地形已经实现（阶段 8）；
+> **储食 / 再生 / 刺**三种身体细胞也已经落地（阶段 9，见 §6.8）。
+> 剩下的是 **水 / 冰**（`onEnter: slow` / 滑行惯性）、**毒素 / 粘附**、
+> 以及**环境场（温度 / 辐射）与可见类型扩容**。
 
 ### 15.3 值得加的"无机像素"（地形）
 
@@ -1534,7 +1634,7 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 
 开发时用 ES Modules + HTTP 服务最舒服，但交付给最终用户时"先起服务器再开浏览器"是个门槛。所以额外产出两份**双击即玩**的产物，都放在 `dist/`：
 
-### 16.1 `dist/evosim.html` —— 单文件版（337 KB）
+### 16.1 `dist/evosim.html` —— 单文件版（344 KB）
 
 把 34 个模块打成一份自包含 HTML：CSS 内联进 `<style>`，favicon 内联成 data URI，入口脚本替换成内联的普通 `<script>`。
 
@@ -1588,6 +1688,6 @@ node tools/build-exe.mjs
 ### 16.3 验证
 
 - `tools/verify-bundle.mjs` —— 用 `file://` 打开单文件版，或传入一个 URL 打开 exe 起的服务，验证：页面无控制台错误地启动、无外链脚本请求、世界在演化、画布画出内容、存档读档往返、参数面板与检视器可用、**工具栏有「橡皮擦」与岩浆/沼泽/辐射带/腐殖质四种地形笔刷，且"擦掉地形但不影响食物与生物"**、
-**参数面板有「全局消耗量倍率」「食物量倍率」与 6 项地形参数**、**网格带 floor 层**、物种树能打开并画出内容且**是不挡画布的非模态浮窗（外层 `pointer-events:none` / 面板 `auto` / 无遮罩 / 默认锁定）**、导出接口可用、着色模式可切换、**物种工坊能打开并画出蓝图、投放能进世界、「手动放置」能装入放置笔刷并收起工坊、能存进生物库、参数面板有 30 行细胞属性、导出落点判断正确**、`localStorage` 降级路径正常。单文件版 **38 项**断言；指向 exe 时同样 38 项，但"导出落点"一条会走"桌面版 → 程序目录"分支。
+**参数面板有「全局消耗量倍率」「食物量倍率」「储食·储备倍率」「再生·每tick回血」与 6 项地形参数**、**网格带 floor 层**、**工坊调色板含 储食/再生/刺**、物种树能打开并画出内容且**是不挡画布的非模态浮窗（外层 `pointer-events:none` / 面板 `auto` / 无遮罩 / 默认锁定）**、导出接口可用、着色模式可切换、**物种工坊能打开并画出蓝图、投放能进世界、「手动放置」能装入放置笔刷并收起工坊、能存进生物库、参数面板有 45 行细胞属性、导出落点判断正确**、`localStorage` 降级路径正常。单文件版 **39 项**断言；指向 exe 时同样 39 项，但"导出落点"一条会走"桌面版 → 程序目录"分支。
 - `tools/verify-exe.mjs` —— 起真正的 `dist/evosim.exe`（`EVOSIM_NO_OPEN=1` + `EVOSIM_SAVE_DIR` 指向临时目录），验证：exe 能起来并打印访问地址、页面里注入了 `window.__EVOSIM_HOST__` 且 `dir` 正确、`/__evosim/ping` 返回正确目录、`POST /__evosim/save` **真把文件写进那个目录且内容逐字节一致**、`../../evil.txt` 这类路径穿越被清洗成纯文件名且**写不出目录**、空文件名被拒（400）、未知路径 404。17 项断言。
 

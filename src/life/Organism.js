@@ -56,10 +56,56 @@ export class Organism {
     return this.anatomy.cells.length;
   }
 
-  /** 繁殖所需的能量 */
+  /** 繁殖所需的能量（**基础成本**：真正从能量里扣掉的就是这个数） */
   foodNeeded() {
     const extra = this.anatomy.hasMover ? this.world.config.life.extraMoverFoodCost : 0;
     return this.cellCount + extra;
+  }
+
+  /**
+   * 触发繁殖所需的能量**阈值**。
+   *
+   * 没有储食细胞时它就等于 `foodNeeded()`（逐位相同，基线不受影响）。
+   * 有储食细胞时阈值被抬高，但繁殖时扣掉的仍是**基础成本**——
+   * 多出来的那部分就是"储备"，会留在能量里，供之后消耗/饥饿时烧。
+   *
+   * 这是让「全局消耗量倍率」变成主玩法的钥匙：生态一开消耗就崩，
+   * 根因是生物的能量长期贴着 0（一攒够就繁殖掉），没有缓冲。
+   */
+  reproduceAt() {
+    const base = this.foodNeeded();
+    if (!this.anatomy.hasStorage) return base;
+    const bonus = this.world.config.life.storageFoodBonus;
+    if (!(bonus > 0)) return base;
+    return base * (1 + this.storageCount() * bonus);
+  }
+
+  /** 储食细胞个数 */
+  storageCount() {
+    const cells = this.anatomy.cells;
+    let n = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].type === CellType.STORAGE) n++;
+    }
+    return n;
+  }
+
+  /**
+   * 被攻击时反弹给攻击者的伤害 = 所有刺细胞的 `damage` 之和。
+   *
+   * 复用细胞的 `damage` 属性（杀手用的也是它），所以参数面板里能实时调。
+   * **不吃装甲减免**——装甲挡的是"被咬"，挡不住"被扎"，
+   * 这也是刺能对"装甲+杀手"这条路线形成制衡的原因。
+   */
+  spikeDamage() {
+    if (!this.anatomy.hasSpike) return 0;
+    const cfg = this.world.config;
+    const cells = this.anatomy.cells;
+    let d = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].type === CellType.SPIKE) d += cellAttr(cfg, cells[i].type, 'damage');
+    }
+    return d;
   }
 
   lifespan() {
@@ -102,7 +148,7 @@ export class Organism {
 
   /** 能量进度 0-1，供渲染与检视器使用 */
   get energyRatio() {
-    const need = this.foodNeeded();
+    const need = this.reproduceAt();
     return need <= 0 ? 0 : Math.min(this.energy / need, 1);
   }
 
@@ -247,7 +293,7 @@ export class Organism {
       if (!this.alive) return;
     }
 
-    if (this.energy >= this.foodNeeded()) this.reproduce();
+    if (this.energy >= this.reproduceAt()) this.reproduce();
   }
 
   /**
@@ -450,6 +496,7 @@ export class Organism {
   reproduce() {
     const world = this.world;
     const rng = world.rng;
+    // 扣的是**基础成本**而不是触发阈值：储食细胞抬高的那部分留在能量里当储备
     const need = this.foodNeeded();
 
     // 无论成败都要付出代价——惩罚"盲目繁殖"
@@ -489,9 +536,25 @@ export class Organism {
 
   // ────────────────────────────── 伤害与死亡 ──────────────────────────────
 
-  harm(amount = 1) {
+  /**
+   * 受伤。
+   *
+   * `attacker` 只在**生物之间的近战**里传（目前只有杀手细胞）。
+   * 传了它就会触发刺细胞的反伤；地形伤害（岩浆/辐射）不传，
+   * 所以站在岩浆里不会去扎岩浆。
+   *
+   * 反伤时**不再往下传 attacker**——否则两只都带刺的生物会互相无限反伤。
+   * 这一层截断让"甲刺乙、乙刺甲"最多各挨一下。
+   */
+  harm(amount = 1, attacker = null) {
     if (!this.alive) return;
     this.damage += amount;
+
+    if (attacker && attacker !== this && attacker.alive) {
+      const back = this.spikeDamage();
+      if (back > 0) attacker.harm(back);        // 不带 attacker → 不再连锁反伤
+    }
+
     if (this.world.config.combat.instaKill || this.damage >= this.maxHealth()) {
       this.die();
     }

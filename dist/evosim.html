@@ -1337,7 +1337,7 @@ select.field-input { cursor: pointer; }
 
     <div class="canvas-wrap">
       <canvas id="world-canvas"></canvas>
-      <div class="canvas-badge" id="stage-badge">阶段 8 · 地形与 onEnter 钩子</div>
+      <div class="canvas-badge" id="stage-badge">阶段 9 · 储食 / 再生 / 刺细胞</div>
       <div class="canvas-toast" id="toast" hidden></div>
     </div>
 
@@ -1420,6 +1420,11 @@ const CellType = Object.freeze({
   SWAMP: 10,     // 沼泽：移动要额外耗能
   RAD: 11,       // 辐射带：驻留扣血 + 变异率飙升
   HUMUS: 12,     // 腐殖质：缓慢向周围释放食物
+
+  // 身体细胞（阶段 9）
+  STORAGE: 13,   // 储食：抬高繁殖阈值，多出来的能量变成储备
+  REGEN: 14,     // 再生：每 tick 回一点血
+  SPIKE: 15,     // 刺：被杀手攻击时反伤
 });
 
 /** 所有定义共用的默认值 */
@@ -1515,6 +1520,36 @@ const CELL_DEFS = Object.freeze([
     flag: 'hasEye', behavior: 'eye',
     cost: 0.006,
     colors: { classic: '#d8b4fe', highContrast: '#ffffff', colorblindSafe: '#f0e442' },
+  }),
+
+  // ── 身体细胞（阶段 9）──
+  //
+  // 这三种都**不参与视觉**（`visible` 默认 false）：感知扩容要动 VISUAL_SLOTS /
+  // SENSE_DIM，会让旧存档大脑失效，所以留到最后一批统一做。
+  // 在那之前，它们只是"身体的一部分"，别的生物看不见——但照样占格子、照样有成本。
+  def({
+    id: CellType.STORAGE, key: 'STORAGE', name: 'storage', label: '储食',
+    isBodyCell: true, paintable: true,
+    flag: 'hasStorage',
+    cost: 0.004,
+    // 脂肪是热量密度最高的组织：死掉之后尸体格外肥，这也是"养肥了再吃"的由来
+    foodValue: 3,
+    colors: { classic: '#fbbf24', highContrast: '#ffd600', colorblindSafe: '#f0c000' },
+  }),
+  def({
+    id: CellType.REGEN, key: 'REGEN', name: 'regen', label: '再生',
+    isBodyCell: true, paintable: true,
+    flag: 'hasRegen', behavior: 'regen',
+    cost: 0.005,
+    colors: { classic: '#5eead4', highContrast: '#00ffc8', colorblindSafe: '#44d7b6' },
+  }),
+  def({
+    id: CellType.SPIKE, key: 'SPIKE', name: 'spike', label: '刺',
+    isBodyCell: true, paintable: true,
+    flag: 'hasSpike',
+    damage: 1,          // 被攻击时反弹给攻击者的伤害（和杀手共用 damage 属性）
+    cost: 0.004,
+    colors: { classic: '#94a3b8', highContrast: '#e0e6ee', colorblindSafe: '#b8c0cc' },
   }),
 
   // ── 地形（阶段 8）──
@@ -1784,6 +1819,8 @@ const Config = {
     metabolismScale: 0,        // 全局消耗量倍率（0 = 关闭每 tick 消耗）
     foodEnergyScale: 1,        // 食物量倍率：一份食物能提供多少能量
     starvationTicks: 60,       // 能量见底后还能撑多少个 tick 才饿死
+    storageFoodBonus: 1,       // 每个储食细胞把繁殖阈值抬高多少（× 基础繁殖成本）
+    regenRate: 0.1,            // 每个再生细胞每 tick 抹掉的累积伤害
   },
 
   /**
@@ -1886,6 +1923,8 @@ const CONFIG_FIELDS = {
     metabolismScale: { label: '全局消耗量倍率', min: 0, max: 5, step: 0.05, note: '乘在所有细胞的每 tick 消耗上。0 = 关闭。调高会带来真实的选择压力，但当前食物经济撑不住太大值' },
     foodEnergyScale: { label: '食物量倍率', min: 0.1, max: 10, step: 0.1, note: '一份食物能提供多少能量（默认 1）。调高 → 吃一口就攒够繁殖，种群扩张更快' },
     starvationTicks: { label: '饿死延时(tick)', min: 0, max: 600, step: 5, note: '能量见底后还能撑多久' },
+    storageFoodBonus: { label: '储食·储备倍率', min: 0, max: 5, step: 0.1, note: '每个储食细胞把繁殖阈值抬高多少。抬高的是阈值，繁殖时扣的仍是基础成本，差额留在能量里当储备（0 = 储食只是块普通肉）' },
+    regenRate: { label: '再生·每tick回血', min: 0, max: 5, step: 0.05, note: '每个再生细胞每 tick 抹掉多少累积伤害' },
   },
   terrain: {
     lavaEnterDamage: { label: '岩浆·踏入伤害', min: 0, max: 20, step: 1, note: '踏进去那一下挨多少' },
@@ -2319,6 +2358,7 @@ const CELL_BEHAVIORS = {
   producer: producerFunction,
   killer: killerFunction,
   eye: eyeFunction,
+  regen: regenFunction,
 };
 
 /**
@@ -2415,8 +2455,25 @@ function killerFunction(organism, cell) {
 
     const target = world.organismById(ownerId);
     if (!target || !target.alive) continue;
-    target.harm(damage);
+    target.harm(damage, organism);      // 带上攻击者 → 对方若有刺细胞就会反伤
   }
+}
+
+/**
+ * 再生：每 tick 抹掉一点已经累积的伤害。
+ *
+ * 写成一个**行为函数**（而不是在 act() 里特判 hasRegen）是为了让"每有一个再生细胞
+ * 就多回一份血"这件事自动成立——行为表本来就是按细胞逐个调用的。
+ *
+ * 注意它回的是 `damage`（已累积的伤害），不是"加生命上限"。
+ * 所以再生和装甲是互补的两种防御：装甲让伤害**进不来**，再生让伤害**慢慢退回去**。
+ */
+function regenFunction(organism, cell) {
+  if (organism.damage <= 0) return;
+  const rate = organism.world.config.life.regenRate;
+  if (!(rate > 0)) return;
+  organism.damage -= rate;
+  if (organism.damage < 0) organism.damage = 0;
 }
 
 /**
@@ -4227,10 +4284,56 @@ class Organism {
     return this.anatomy.cells.length;
   }
 
-  /** 繁殖所需的能量 */
+  /** 繁殖所需的能量（**基础成本**：真正从能量里扣掉的就是这个数） */
   foodNeeded() {
     const extra = this.anatomy.hasMover ? this.world.config.life.extraMoverFoodCost : 0;
     return this.cellCount + extra;
+  }
+
+  /**
+   * 触发繁殖所需的能量**阈值**。
+   *
+   * 没有储食细胞时它就等于 `foodNeeded()`（逐位相同，基线不受影响）。
+   * 有储食细胞时阈值被抬高，但繁殖时扣掉的仍是**基础成本**——
+   * 多出来的那部分就是"储备"，会留在能量里，供之后消耗/饥饿时烧。
+   *
+   * 这是让「全局消耗量倍率」变成主玩法的钥匙：生态一开消耗就崩，
+   * 根因是生物的能量长期贴着 0（一攒够就繁殖掉），没有缓冲。
+   */
+  reproduceAt() {
+    const base = this.foodNeeded();
+    if (!this.anatomy.hasStorage) return base;
+    const bonus = this.world.config.life.storageFoodBonus;
+    if (!(bonus > 0)) return base;
+    return base * (1 + this.storageCount() * bonus);
+  }
+
+  /** 储食细胞个数 */
+  storageCount() {
+    const cells = this.anatomy.cells;
+    let n = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].type === CellType.STORAGE) n++;
+    }
+    return n;
+  }
+
+  /**
+   * 被攻击时反弹给攻击者的伤害 = 所有刺细胞的 `damage` 之和。
+   *
+   * 复用细胞的 `damage` 属性（杀手用的也是它），所以参数面板里能实时调。
+   * **不吃装甲减免**——装甲挡的是"被咬"，挡不住"被扎"，
+   * 这也是刺能对"装甲+杀手"这条路线形成制衡的原因。
+   */
+  spikeDamage() {
+    if (!this.anatomy.hasSpike) return 0;
+    const cfg = this.world.config;
+    const cells = this.anatomy.cells;
+    let d = 0;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].type === CellType.SPIKE) d += cellAttr(cfg, cells[i].type, 'damage');
+    }
+    return d;
   }
 
   lifespan() {
@@ -4273,7 +4376,7 @@ class Organism {
 
   /** 能量进度 0-1，供渲染与检视器使用 */
   get energyRatio() {
-    const need = this.foodNeeded();
+    const need = this.reproduceAt();
     return need <= 0 ? 0 : Math.min(this.energy / need, 1);
   }
 
@@ -4418,7 +4521,7 @@ class Organism {
       if (!this.alive) return;
     }
 
-    if (this.energy >= this.foodNeeded()) this.reproduce();
+    if (this.energy >= this.reproduceAt()) this.reproduce();
   }
 
   /**
@@ -4621,6 +4724,7 @@ class Organism {
   reproduce() {
     const world = this.world;
     const rng = world.rng;
+    // 扣的是**基础成本**而不是触发阈值：储食细胞抬高的那部分留在能量里当储备
     const need = this.foodNeeded();
 
     // 无论成败都要付出代价——惩罚"盲目繁殖"
@@ -4660,9 +4764,25 @@ class Organism {
 
   // ────────────────────────────── 伤害与死亡 ──────────────────────────────
 
-  harm(amount = 1) {
+  /**
+   * 受伤。
+   *
+   * `attacker` 只在**生物之间的近战**里传（目前只有杀手细胞）。
+   * 传了它就会触发刺细胞的反伤；地形伤害（岩浆/辐射）不传，
+   * 所以站在岩浆里不会去扎岩浆。
+   *
+   * 反伤时**不再往下传 attacker**——否则两只都带刺的生物会互相无限反伤。
+   * 这一层截断让"甲刺乙、乙刺甲"最多各挨一下。
+   */
+  harm(amount = 1, attacker = null) {
     if (!this.alive) return;
     this.damage += amount;
+
+    if (attacker && attacker !== this && attacker.alive) {
+      const back = this.spikeDamage();
+      if (back > 0) attacker.harm(back);        // 不带 attacker → 不再连锁反伤
+    }
+
     if (this.world.config.combat.instaKill || this.damage >= this.maxHealth()) {
       this.die();
     }
@@ -7871,7 +7991,7 @@ class Inspector {
       ['age', '年龄'],
       ['lifespan', '寿命'],
       ['energy', '能量'],
-      ['foodNeeded', '繁殖所需'],
+      ['foodNeeded', '繁殖阈值'],
       ['mutability', '变异率'],
       ['species', '物种'],
       ['ancestry', '祖先'],
@@ -7990,8 +8110,8 @@ class Inspector {
 
     set('age', `${org.age} / ${org.lifespan()}`);
     set('lifespan', String(org.lifespan()));
-    set('energy', `${org.energy} / ${org.foodNeeded()}`);
-    set('foodNeeded', String(org.foodNeeded()));
+    set('energy', `${round1(org.energy)} / ${round1(org.reproduceAt())}`);
+    set('foodNeeded', String(round1(org.reproduceAt())));
     set('mutability', org.mutability.toFixed(2) + '%');
 
     const sp = world.species.byFingerprint(org.speciesFingerprint);
@@ -8012,7 +8132,10 @@ class Inspector {
 
     set('position', `${org.col}, ${org.row}`);
     set('facing', `${DIR_LABELS[org.rotation]}（身体）/ ${DIR_LABELS[org.direction]}（移动）`);
-    set('state', org.alive ? (org.anatomy.hasMover ? '存活 · 可移动' : '存活 · 静止') : '已死亡');
+    let state = org.alive ? (org.anatomy.hasMover ? '存活 · 可移动' : '存活 · 静止') : '已死亡';
+    if (org.anatomy.hasStorage) state += ` · 储备 ${round1(org.reproduceAt() - org.foodNeeded())}`;
+    if (org.anatomy.hasSpike) state += ` · 反伤 ${round1(org.spikeDamage())}`;
+    set('state', state);
   }
 
   // ────────────────────────────── 身体蓝图 ──────────────────────────────
@@ -8300,6 +8423,11 @@ function sectionTitle(text) {
   h.className = 'inspector-section-title';
   h.textContent = text;
   return h;
+}
+
+/** 能量这类量现在可能是小数（代谢/储备都会产生），显示成 1 位小数就够了 */
+function round1(v) {
+  return Math.round(v * 10) / 10;
 }
 
   return { Inspector };
@@ -9946,6 +10074,7 @@ const { World } = __req('src/core/World.js');
 const { Engine } = __req('src/core/Engine.js');
 const { generateDemoWorld } = __req('src/core/WorldGen.js');
 const { seedOriginOfLife, spawnPopulation, makeBlueprint, spawnFromBlueprint } = __req('src/life/OrganismFactory.js');
+const { CellType } = __req('src/life/CellType.js');
 const { FossilRecord } = __req('src/stats/FossilRecord.js');
 const { serializeWorld, deserializeWorld, readSaveFile, saveFilename, saveToStorage, loadFromStorage, storageInfo, clearStorage, storageAvailable } = __req('src/io/SaveLoad.js');
 const { CreatureLibrary } = __req('src/io/CreatureLibrary.js');
@@ -10495,7 +10624,7 @@ function boot() {
 
   // 方便在控制台里调试
   window.evosim = {
-    Config, world, camera, renderer, editor, engine, colorScheme, rng,
+    Config, CellType, world, camera, renderer, editor, engine, colorScheme, rng,
     record, charts, stats, inspector, toolbar, controlPanel, timeline, speciesTree,
     library, speciesEditor,
     save: () => serializeWorld(world, rng, { config: JSON.parse(JSON.stringify(Config)) }),
