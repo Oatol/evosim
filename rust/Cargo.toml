@@ -12,8 +12,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 
+# 交付用的 release 配置：单 exe 是最终产物，所以优先"快 + 小"，
+# 不在乎编译时间（fat LTO 会把编译时间从 ~20 秒拉到 ~60 秒）。
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 panic = "abort"
+strip = "symbols"

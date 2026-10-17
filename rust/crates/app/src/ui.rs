@@ -98,32 +98,61 @@ pub fn highlight_layer() -> egui::LayerId {
     egui::LayerId::new(egui::Order::Background, egui::Id::new("world-highlight"))
 }
 
-/// 加载中文字体（优先微软雅黑，退回黑体）。找不到就用 egui 内置字体（中文会缺字）。
+/// 内嵌的中文子集 —— 由 `tools/subset-font.py` 从系统字体里裁出来，
+/// 只含界面真正用到的那些字（当前 984 个，197 KB）。
+///
+/// 为什么要嵌：exe 要能"拷到任何一台机器上双击就用"，不能依赖对方装了微软雅黑。
+/// 为什么不嵌整字体：微软雅黑 18.8 MB，黑体 9.7 MB —— 太肥了。
+const EMBEDDED_CJK: &[u8] = include_bytes!("../assets/ui-cjk-subset.ttf");
+
+/// 加载中文字体。
+///
+/// 两层：
+///   1. **内嵌子集**（保证 exe 自带、任何机器都不是方块）
+///   2. **系统字体**挂在它后面当后备 —— 子集里没有的字（比如玩家自己起的名字）交给它
 pub fn configure(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    let candidates = [
+    fonts.font_data.insert(
+        "cjk".to_owned(),
+        Arc::new(egui::FontData::from_static(EMBEDDED_CJK)),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .insert(0, "cjk".to_owned());
+    }
+
+    let mut sys_note = "（无系统后备）".to_string();
+    for path in [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/Deng.ttf",
-    ];
-    for path in candidates {
+    ] {
         if let Ok(bytes) = std::fs::read(path) {
-            let bytes_len = bytes.len();
+            let kb = bytes.len() / 1024;
             let mut data = egui::FontData::from_owned(bytes);
             data.index = 0;
-            fonts.font_data.insert("cjk".to_owned(), Arc::new(data));
+            fonts.font_data.insert("cjk-sys".to_owned(), Arc::new(data));
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
                 fonts
                     .families
                     .entry(family)
                     .or_default()
-                    .insert(0, "cjk".to_owned());
+                    .insert(1, "cjk-sys".to_owned());
             }
-            println!("界面字体：{}（{} KB）", path, bytes_len / 1024);
+            sys_note = format!("+ 系统后备 {}（{} KB）", path, kb);
             break;
         }
     }
+    println!(
+        "界面字体：内嵌子集 {} KB {}",
+        EMBEDDED_CJK.len() / 1024,
+        sys_note
+    );
+
     ctx.set_fonts(fonts);
 
     let mut style = (*ctx.style()).clone();
@@ -259,11 +288,11 @@ pub fn draw(
                     if ui.button("单步").clicked() {
                         act.step_once = true;
                     }
-                    if ui.button("◀").clicked() {
+                    if ui.button("<").on_hover_text("降速").clicked() {
                         act.speed_delta = -1;
                     }
                     ui.label(format!("{:.0}×", hud.speed));
-                    if ui.button("▶").clicked() {
+                    if ui.button(">").on_hover_text("提速").clicked() {
                         act.speed_delta = 1;
                     }
                     ui.separator();
@@ -705,5 +734,38 @@ mod tests {
             hl,
             win
         );
+    }
+
+    /// 内嵌字体必须覆盖界面上的每一个汉字。
+    ///
+    /// `tools/subset-font.py` 扫源码生成 `assets/ui-chars.txt`（它裁字体时的输入）。
+    /// 这条测试守着"改了 UI 文案却忘了重跑脚本"——漏掉的字在界面上就是方块，
+    /// 而方块在无头测试里看不出来，只有这里能抓住。
+    #[test]
+    fn embedded_font_covers_every_ui_char() {
+        let face = ttf_parser::Face::parse(EMBEDDED_CJK, 0).expect("内嵌字体解析失败");
+        let chars = include_str!("../assets/ui-chars.txt");
+
+        let mut missing: Vec<char> = Vec::new();
+        for ch in chars.chars() {
+            if face.glyph_index(ch).is_none() {
+                missing.push(ch);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "内嵌字体缺 {} 个字：{:?}（请重跑 python tools/subset-font.py）",
+            missing.len(),
+            missing
+        );
+        assert!(chars.chars().count() > 500, "字符清单太小，可能没生成好");
+    }
+
+    /// 子集必须"小"——它是嵌进 exe 的，膨胀了要有人管
+    #[test]
+    fn embedded_font_is_small() {
+        let kb = EMBEDDED_CJK.len() / 1024;
+        assert!(kb < 400, "内嵌字体 {} KB，太大了（关掉 hinting 能砍一半）", kb);
+        assert!(kb > 50, "内嵌字体只有 {} KB，是不是裁错了", kb);
     }
 }

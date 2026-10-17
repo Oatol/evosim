@@ -44,6 +44,10 @@ cargo run --release --bin evosim -- --sim --seed 1001 --ticks 2000   # 无界面
 cargo run --release -p evosim-app                                     # 打开窗口
 cargo run --release -p evosim-app -- --screenshot shots/type.png --ticks 400
 cargo run --release -p evosim-app -- --bench --seconds 4 --speed 50    # 压测
+
+node tools/package.mjs                    # 打包交付用的单 exe → ../dist/evosim2.exe
+python tools/subset-font.py               # 重新生成中文界面字体子集（改过 UI 文案后要跑）
+python tools/subset-font.py --check       # 只检查：有没有子集覆盖不到的字
 ```
 
 窗口快捷键：空格 暂停/继续 · S 单步 · `[` `]` 调速（1/5/10/50×）· **Tab 类型/物种着色**
@@ -113,10 +117,11 @@ FNV-1a 依次混入：
 | 版本 | step 耗时 | 相对 JS |
 |---|---|---|
 | JS 版（Chrome，1517 只） | 2.0 ms/tick | 1× |
-| Rust 单线程（`RAYON_NUM_THREADS=1`） | 0.803 ms/tick | 2.5× |
-| **Rust + rayon（按物理核数，本机 8 线程）** | **0.414 ms/tick** | **4.8×** |
+| Rust 单线程（`RAYON_NUM_THREADS=1`，thin LTO） | 0.803 ms/tick | 2.5× |
+| Rust + rayon（8 线程，thin LTO） | 0.414 ms/tick | 4.8× |
+| **Rust + rayon（8 线程，fat LTO）** | **0.279 ms/tick** | **7.2×** |
 
-对应 50× 倍速（目标 3000 tps）：实测 **~2400 tps（80%）**。
+对应 50× 倍速（目标 3000 tps）：实测 **~3580 tps（119%）** —— 50× 已经能跑满了。
 
 两个容易搞错的点：
 
@@ -147,6 +152,15 @@ FNV-1a 依次混入：
   - [x] **曲线**：种群/食物/物种数三条线（每 20 tick 采样，留 600 点）
   - [x] **物种工坊**：15×15 蓝图画布（点格子放细胞、右键擦、眼睛可设朝向）+ 生物库
         （存/载入/放置/居中/删除，落盘 `creatures.json`）
+- [x] **M5** 字体子集 + 单 exe 打包 + release 调优
+  - **中文界面字体内嵌**：`tools/subset-font.py` 扫全部源码收集用到的字符（当前 1000 个），
+    用 fontTools 从微软雅黑裁出 **201 KB** 子集（关掉 hinting 从 576 KB 砍到 201 KB），
+    `include_bytes!` 进 exe。**系统字体作为后备**挂在后面 —— 玩家自己起的名字里
+    有子集外的字也能显示
+  - 两条守护测试：`embedded_font_covers_every_ui_char`（用 ttf-parser 逐个查 cmap，
+    防止"改了文案忘重新裁字体"→ 界面上出现方块）与 `embedded_font_is_small`（< 400 KB）
+  - `release` profile：`lto = "fat"` + `codegen-units = 1` + `strip = "symbols"`
+  - `node tools/package.mjs` → `dist/evosim2.exe` **6.84 MB**（1.x 的 Node SEA 是 83.6 MB）
 - [x] **M4** 每格温度/辐射场 + 图层滤镜 + 悬停读数
   - `core/src/fields.rs`：**每格一个 u8** 的温度场与辐射场，源 = 岩浆 / 辐射带，
     5 点扩散 + 向本底衰减；实测 **0.154 ms/次**（200×150 两张场），60 Hz 下占 1% 的帧预算
@@ -157,4 +171,3 @@ FNV-1a 依次混入：
     着色器只多一个分支；左下角有渐变图例
   - 悬停读数显示该格的**温度 / 辐射**百分比（每格精确值，不是粗粒度块）
   - `--screenshot --mode temp|rad` 可离屏出热力图
-- [ ] **M5** 打包单 exe（内嵌中文字体子集）

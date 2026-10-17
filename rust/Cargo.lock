@@ -603,6 +603,7 @@ dependencies = [
  "evosim-render",
  "pollster",
  "serde_json",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]
