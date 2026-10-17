@@ -116,6 +116,13 @@
 
 ## 踩过的坑（都是真发生过的）
 
+- **egui 窗口里"立刻关闭自己"不能写 `self.open = false`**：闭包外那个 `open` 变量（供 × 用）
+  会在函数末尾被写回 `self.open = open`，把闭包里的 false **覆盖掉**。要用 `want_close` 标记，
+  末尾 `self.open = open && !want_close`
+- **"一次性显式意图"不该挂在工具上**：手动放置原来藏在 `paint_at_cursor` 里，而那条路径要求
+  工具是「画笔」→ 拿着检视/平移就放不出来。抽成 `left_action(placing, tool)` 纯函数，放置优先
+- **右键统一是"拖动世界画布"**：任何窗口（含工坊）都不吃右键，否则盖在画布上的窗口会抢走平移，
+  还会误触擦除。工坊蓝图格只认左键
 - **egui-winit 对 Tab 无条件 consume**（拿它做焦点轮换）→ 自己的 Tab 快捷键永远不执行，
   且焦点在顶栏按钮间乱跳。必须在 `state.on_window_event()` **之前**拦下来并 return
 - **egui 同一 Order 内的图层按创建顺序绘制**（`GraphicLayers` = `IdMap<PaintList>`）→
