@@ -244,6 +244,8 @@ struct App {
     workshop: workshop::Workshop,
     /// 「手动放置」装进来的蓝图：下一次左键就把它放在那里
     pending_place: Option<evosim_core::blueprint::Blueprint>,
+    /// 放置模式的一次性反馈（成功 / 放不下），显示在提示条上
+    place_msg: String,
     /// egui 是否吃掉了指针（吃掉就不落笔）
     ui_wants_pointer: bool,
 }
@@ -282,6 +284,7 @@ impl App {
             ui: ui::UiState::default(),
             panels: panels::Panels::default(),
             workshop: workshop::Workshop::default(),
+            place_msg: String::new(),
             pending_place: None,
             ui_wants_pointer: false,
         }
@@ -652,20 +655,6 @@ impl App {
             return;
         };
 
-        // 「手动放置」优先：这一次点击是投放蓝图，不是落笔
-        if let Some(bp) = self.pending_place.take() {
-            let mut ok = false;
-            if let Some(world) = self.world.as_mut() {
-                ok = evosim_core::blueprint::spawn_from_blueprint(world, col, row, &bp).is_some();
-            }
-            if ok {
-                self.upload_world();
-            } else {
-                self.pending_place = Some(bp); // 放不下就留着，换个地方再点
-            }
-            return;
-        }
-
         if let Some(world) = self.world.as_mut() {
             paint::apply_brush(
                 world,
@@ -677,6 +666,32 @@ impl App {
             );
         }
         self.upload_world();
+    }
+
+    /// 把待放置的蓝图放到光标处。
+    ///
+    /// **放成功后仍然留在放置模式**（1.x 的行为）：连点几下就能连放几个，
+    /// 直到 Esc 退出。放不下（被占 / 越界）时给一条提示，蓝图不丢。
+    fn place_pending_at_cursor(&mut self) {
+        let Some((col, row)) = self.hover_cell else {
+            return;
+        };
+        let Some(bp) = self.pending_place.clone() else {
+            return;
+        };
+
+        let mut placed = false;
+        if let Some(world) = self.world.as_mut() {
+            placed = evosim_core::blueprint::spawn_from_blueprint(world, col, row, &bp).is_some();
+        }
+
+        if placed {
+            self.upload_world();
+            self.place_msg = format!("已放置「{}」于 ({}, {})", bp.name, col, row);
+            self.pending_place = Some(bp); // 保持放置模式，可以接着放
+        } else {
+            self.place_msg = format!("({}, {}) 放不下——换个空一点的位置", col, row);
+        }
     }
 
     fn draw(&mut self) {
@@ -708,6 +723,25 @@ impl App {
             height: vh,
         };
 
+        // ── 放置模式：提示条 + 落点预览 ──
+        let place_hint = self.pending_place.as_ref().map(|bp| {
+            if self.place_msg.is_empty() {
+                format!("放置模式：「{}」 · 左键放置 · Esc 取消", bp.name)
+            } else {
+                format!("{}　·　左键继续放 · Esc 取消", self.place_msg)
+            }
+        });
+        self.ui.place_hint = place_hint;
+        let preview = match (self.pending_place.as_ref(), self.hover_cell) {
+            (Some(bp), Some((col, row))) => Some((
+                col,
+                row,
+                bp.cells.iter().map(|c| (c.dx, c.dy)).collect::<Vec<_>>(),
+            )),
+            _ => None,
+        };
+        self.ui.place_preview = preview;
+
         let ctx = self.egui_ctx.clone();
         let mut actions = ui::UiActions::default();
         {
@@ -729,6 +763,7 @@ impl App {
             self.apply_ui_actions(std::mem::take(&mut actions));
             if let Some(bp) = shop_act.place.take() {
                 self.pending_place = Some(bp);
+                self.place_msg.clear();
             }
             if let Some(bp) = shop_act.center.take() {
                 self.spawn_blueprint_at_center(&bp);
@@ -888,6 +923,7 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         if self.pending_place.take().is_some() {
                             // 只取消放置，不退出程序
+                            self.place_msg.clear();
                         } else {
                             event_loop.exit();
                         }
@@ -957,13 +993,19 @@ impl ApplicationHandler for App {
                 MouseButton::Left => {
                     if state == ElementState::Pressed {
                         if !self.egui_ctx.wants_pointer_input() {
-                            match self.ui.tool {
-                                ui::Tool::Paint => {
+                            // ── 放置模式优先于一切工具 ──
+                            //
+                            // 用户反馈"手动关闭工坊后点画布放不上去"：原来投放藏在
+                            // `paint_at_cursor` 里，而那条路径要求当前工具是「画笔」。
+                            // 放置是一次性的显式意图，不该被"你手上拿的是什么工具"卡住。
+                            match ui::left_action(self.pending_place.is_some(), self.ui.tool) {
+                                ui::LeftAction::Place => self.place_pending_at_cursor(),
+                                ui::LeftAction::Paint => {
                                     self.painting = true;
                                     self.paint_at_cursor();
                                 }
-                                ui::Tool::Inspect => self.inspect_at_cursor(),
-                                ui::Tool::Pan => {
+                                ui::LeftAction::Inspect => self.inspect_at_cursor(),
+                                ui::LeftAction::Pan => {
                                     // 平移工具：左键拖动即可平移（右键/中键任何时候都能拖）
                                     self.dragging = true;
                                 }

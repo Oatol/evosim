@@ -151,9 +151,9 @@ impl Panels {
 
         if self.show_species {
             let mut open = self.show_species;
-            egui::Window::new("物种")
+            egui::Window::new("物种（时间轴）")
                 .resizable(true)
-                .default_size([320.0, 280.0])
+                .default_size([430.0, 400.0])
                 .open(&mut open)
                 .default_pos([10.0, 420.0])
                 .show(ctx, |ui| {
@@ -301,52 +301,131 @@ fn species_body(
     highlight: &mut Vec<(egui::Rect, Color32)>,
 ) {
     let reg = &world.species;
-    let mut alive: Vec<&evosim_core::species::Species> =
-        reg.list.iter().filter(|s| s.population > 0).collect();
-    alive.sort_by(|a, b| b.population.cmp(&a.population));
+    let now = world.tick.max(1);
 
     ui.label(
         egui::RichText::new(format!(
-            "存活 {} · 累计 {} · 峰值存活 {} · 已灭绝 {}",
-            reg.alive_count, reg.total_created, reg.peak_alive_count, reg.total_extinct
+            "tick {} · 存活 {} · 累计 {} · 峰值存活 {} · 已灭绝 {}",
+            now, reg.alive_count, reg.total_created, reg.peak_alive_count, reg.total_extinct
         ))
         .color(TEXT_DIM)
         .size(11.0),
     );
+    ui.label(
+        egui::RichText::new("每条横条是一个物种的存续区间：左端=出现，右端=灭绝（还活着的顶到最右）")
+            .color(TEXT_DIM)
+            .size(10.0),
+    );
     ui.separator();
 
-    let max_pop = alive.first().map(|s| s.population).unwrap_or(1).max(1);
+    // 排序：还活着的排前面（按当前个体数降序），灭绝的按出现时间排在后面
+    let mut rows: Vec<&evosim_core::species::Species> = reg.list.iter().collect();
+    rows.sort_by(|a, b| {
+        (b.population > 0)
+            .cmp(&(a.population > 0))
+            .then(b.population.cmp(&a.population))
+            .then(a.start_tick.cmp(&b.start_tick))
+    });
+
+    // 时间轴刻度
+    let axis_w = (ui.available_width() - 6.0).max(180.0);
+    let (axis_rect, _) = ui.allocate_exact_size(egui::vec2(axis_w, 12.0), Sense::hover());
+    {
+        let p = ui.painter();
+        p.text(
+            axis_rect.left_top(),
+            Align2::LEFT_TOP,
+            "0",
+            FontId::proportional(9.0),
+            TEXT_DIM,
+        );
+        p.text(
+            axis_rect.right_top(),
+            Align2::RIGHT_TOP,
+            format!("{}", now),
+            FontId::proportional(9.0),
+            TEXT_DIM,
+        );
+        p.line_segment(
+            [
+                egui::pos2(axis_rect.left(), axis_rect.bottom()),
+                egui::pos2(axis_rect.right(), axis_rect.bottom()),
+            ],
+            Stroke::new(1.0, BORDER),
+        );
+    }
+
     let mut clicked: Option<String> = None;
 
     egui::ScrollArea::vertical()
-        .max_height(220.0)
+        .max_height(300.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for sp in alive.iter().take(60) {
+            for sp in rows.iter().take(150) {
                 let selected = panels
                     .selected_species
                     .as_deref()
                     .map(|fp| fp == sp.fingerprint.as_ref())
                     .unwrap_or(false);
 
-                let (rect, resp) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width().min(280.0), 18.0),
-                    Sense::click(),
-                );
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(axis_w, 15.0), Sense::click());
                 let painter = ui.painter();
 
-                // 条形：长度 = 当前个体数 / 最大个体数
-                let frac = sp.population as f32 / max_pop as f32;
-                let bar = egui::Rect::from_min_size(
-                    rect.min,
-                    egui::vec2(rect.width() * frac, rect.height()),
+                // 行底色（悬停时提亮一点，能看出可点）
+                if resp.hovered() || selected {
+                    painter.rect_filled(
+                        rect,
+                        CornerRadius::ZERO,
+                        Color32::from_rgb(26, 33, 45),
+                    );
+                }
+
+                // 左：名字
+                painter.text(
+                    rect.left_center() + egui::vec2(3.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    &sp.name,
+                    FontId::proportional(10.0),
+                    if selected { ACCENT } else { TEXT },
                 );
+
+                // 右：时间条
+                let bar_x0 = rect.left() + 46.0;
+                let bar_x1 = rect.right() - 30.0;
+                let span = (bar_x1 - bar_x0).max(10.0);
+                let end = if sp.end_tick >= 0 {
+                    sp.end_tick as u64
+                } else {
+                    now
+                };
+                let t0 = (sp.start_tick.min(now) as f32 / now as f32).clamp(0.0, 1.0);
+                let t1 = (end.min(now) as f32 / now as f32).clamp(0.0, 1.0);
+                let x0 = bar_x0 + span * t0;
+                let x1 = (bar_x0 + span * t1).max(x0 + 2.0);
+
                 let rgb = species_rgb(sp.fingerprint.as_ref());
+                let alpha = if sp.alive { 210 } else { 90 };
                 painter.rect_filled(
-                    bar,
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, rect.top() + 4.0),
+                        egui::pos2(x1, rect.bottom() - 4.0),
+                    ),
                     CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], 90),
+                    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], alpha),
                 );
+
+                // 右端：当前个体数（条宽表示存续时长，数字表示规模）
+                if sp.population > 0 {
+                    painter.text(
+                        rect.right_center() - egui::vec2(3.0, 0.0),
+                        Align2::RIGHT_CENTER,
+                        format!("{}", sp.population),
+                        FontId::proportional(9.0),
+                        TEXT_DIM,
+                    );
+                }
+
                 if selected {
                     painter.rect_stroke(
                         rect,
@@ -355,31 +434,24 @@ fn species_body(
                         StrokeKind::Inside,
                     );
                 }
-                painter.text(
-                    rect.min + egui::vec2(4.0, rect.height() * 0.5),
-                    Align2::LEFT_CENTER,
-                    format!("{}  {}", sp.name, sp.description),
-                    FontId::proportional(11.0),
-                    if selected { ACCENT } else { TEXT },
-                );
-                painter.text(
-                    rect.min + egui::vec2(rect.width() - 4.0, rect.height() * 0.5),
-                    Align2::RIGHT_CENTER,
-                    format!("{}", sp.population),
-                    FontId::proportional(11.0),
-                    TEXT_DIM,
-                );
 
                 if resp.clicked() {
                     clicked = Some(sp.fingerprint.to_string());
                 }
                 resp.on_hover_text(format!(
-                    "{} · 峰值 {} · 累计 {}\n出现于 tick {}，{}",
-                    sp.description,
-                    sp.peak_population,
-                    sp.cumulative_pop,
+                    "{}（{} 格）\n出现 tick {} → {}\n存续 {} tick · 当前 {} · 峰值 {} · 累计 {}",
+                    sp.name,
+                    sp.cell_count,
                     sp.start_tick,
-                    if sp.alive { "存活中" } else { "已灭绝" }
+                    if sp.alive {
+                        "存活中".to_string()
+                    } else {
+                        format!("灭绝 tick {}", sp.end_tick)
+                    },
+                    sp.lifespan(),
+                    sp.population,
+                    sp.peak_population,
+                    sp.cumulative_pop
                 ));
             }
         });
@@ -486,4 +558,88 @@ fn chart_body(ui: &mut egui::Ui, panels: &Panels) {
         TEXT_DIM,
     );
     let _ = PANEL;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evosim_core::config::Config;
+    use evosim_core::factory::{seed_origin_of_life, spawn_population};
+    use evosim_core::rng::Rng;
+    use evosim_core::world::World;
+    use evosim_core::worldgen::generate_demo_world;
+
+    fn live_world() -> World {
+        let mut w = World::new(Config::default(), Rng::new(1001));
+        generate_demo_world(&mut w, 1.0, 1.0);
+        seed_origin_of_life(&mut w);
+        spawn_population(&mut w, 8, 3);
+        for _ in 0..150 {
+            w.step();
+        }
+        w
+    }
+
+    /// 物种面板要真的画出时间轴（横条），不能只剩一行计数。
+    #[test]
+    fn species_timeline_draws_bars() {
+        let world = live_world();
+        assert!(world.species.size() > 0, "这个种子应该已经出现物种");
+
+        let ctx = egui::Context::default();
+        crate::ui::configure(&ctx);
+        let mut panels = Panels::default();
+        panels.show_inspector = false;
+        panels.show_chart = false;
+        panels.show_species = true;
+
+        let mut hl: Vec<(egui::Rect, Color32)> = Vec::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1600.0, 950.0),
+        ));
+
+        // 两帧：egui 的窗口第一帧是淡入，形状会被剔成 Noop
+        let _ = ctx.run(input.clone(), |ctx| {
+            let _ = panels.draw(ctx, &world, &mut hl);
+        });
+        let out = ctx.run(input, |ctx| {
+            let _ = panels.draw(ctx, &world, &mut hl);
+        });
+
+        fn walk<'a>(shapes: &'a [egui::Shape], rects: &mut Vec<&'a egui::epaint::RectShape>, texts: &mut Vec<&'a egui::epaint::TextShape>) {
+            for s in shapes {
+                match s {
+                    egui::Shape::Rect(r) => rects.push(r),
+                    egui::Shape::Text(t) => texts.push(t),
+                    egui::Shape::Vec(v) => walk(v, rects, texts),
+                    _ => {}
+                }
+            }
+        }
+        let flat: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
+        let (mut rects, mut texts) = (Vec::new(), Vec::new());
+        walk(&flat, &mut rects, &mut texts);
+
+        // 时间轴横条：细长、有填充色（物种指纹色），且不是窗口底色
+        let bars = rects
+            .iter()
+            .filter(|r| {
+                r.rect.height() <= 10.0
+                    && r.rect.width() >= 2.0
+                    && r.fill.a() > 0
+                    && r.fill != crate::ui::BG
+            })
+            .count();
+        assert!(bars > 0, "物种面板没有画出任何时间轴横条（rects={}）", rects.len());
+
+        // 刻度上要有当前 tick 的数字
+        let now = world.tick.to_string();
+        assert!(
+            texts.iter().any(|t| t.galley.text() == now),
+            "时间轴右端应标出当前 tick（{}）",
+            now
+        );
+    }
 }

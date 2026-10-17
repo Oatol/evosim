@@ -85,6 +85,25 @@ impl Workshop {
         self.cells.clear();
     }
 
+    /// 编辑蓝图上的一个格子。
+    ///
+    /// **只接受左键**：右键在 2.0 里统一是"拖动世界画布"，工坊窗口盖在画布上时
+    /// 如果这里也吃右键，用户想平移世界就会误擦掉格子。删格请选调色板里的「擦除」。
+    pub fn edit_cell(&mut self, dx: i32, dy: i32, button: egui::PointerButton) {
+        if button != egui::PointerButton::Primary {
+            return;
+        }
+        if (dx.abs() > RADIUS) || (dy.abs() > RADIUS) {
+            return;
+        }
+        if self.brush == ERASER {
+            self.cells.remove(&(dx, dy));
+        } else if !self.cells.contains_key(&(dx, dy)) {
+            let dir = if is_directional(self.brush) { self.dir } else { 0 };
+            self.cells.insert((dx, dy), (self.brush, dir));
+        }
+    }
+
     pub fn load_blueprint(&mut self, bp: &Blueprint) {
         self.cells.clear();
         for c in &bp.cells {
@@ -123,6 +142,12 @@ impl Workshop {
         }
 
         let mut open = self.open;
+        // 闭包里想"立刻收起工坊"时置 true。
+        //
+        // 不能直接写 `self.open = false`：窗口的 × 用的是闭包外那个 `open` 变量，
+        // 函数末尾还有一句 `self.open = open;` —— 会把闭包里的 false 覆盖掉。
+        // （这就是"点了手动放置，工坊却不关闭"的根因。）
+        let mut want_close = false;
         egui::Window::new("物种工坊")
             .resizable(false)
             .collapsible(false)
@@ -197,17 +222,24 @@ impl Workshop {
                             ui.allocate_exact_size(egui::vec2(side, side), Sense::click_and_drag());
                         self.paint_grid(ui, rect, &resp);
 
-                        if resp.dragged() || resp.clicked() {
+                        // **只有左键**编辑蓝图。
+                        //
+                        // 右键在 2.0 里统一是"拖动世界画布"——工坊窗口盖在画布上，
+                        // 如果这里也吃右键，用户想平移世界时就会误擦掉蓝图格子
+                        // （用户反馈的"右键默认为擦除"）。删格请用调色板里的「擦除」。
+                        let primary = resp.dragged_by(egui::PointerButton::Primary)
+                            || resp.clicked_by(egui::PointerButton::Primary);
+                        let secondary = resp.dragged_by(egui::PointerButton::Secondary)
+                            || resp.clicked_by(egui::PointerButton::Secondary);
+                        if primary || secondary {
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 if let Some((dx, dy)) = self.cell_at(rect, pos) {
-                                    if resp.secondary_clicked() || resp.dragged_by(egui::PointerButton::Secondary) {
-                                        self.cells.remove(&(dx, dy));
-                                    } else if self.brush == ERASER {
-                                        self.cells.remove(&(dx, dy));
-                                    } else if !self.cells.contains_key(&(dx, dy)) {
-                                        let dir = if is_directional(self.brush) { self.dir } else { 0 };
-                                        self.cells.insert((dx, dy), (self.brush, dir));
-                                    }
+                                    let btn = if primary {
+                                        egui::PointerButton::Primary
+                                    } else {
+                                        egui::PointerButton::Secondary
+                                    };
+                                    self.edit_cell(dx, dy, btn);
                                 }
                             }
                         }
@@ -241,7 +273,7 @@ impl Workshop {
                                 && bp.cell_count() > 0
                             {
                                 act.place = Some(bp.clone());
-                                self.open = false;
+                                want_close = true;
                             }
                             if ui
                                 .button("放到视野中心")
@@ -315,7 +347,7 @@ impl Workshop {
                         }
                         if let Some(i) = to_place {
                             act.place = Some(self.library[i].clone());
-                            self.open = false;
+                            want_close = true;
                         }
                         if let Some(i) = to_center {
                             act.center = Some(self.library[i].clone());
@@ -335,7 +367,7 @@ impl Workshop {
                     });
                 });
             });
-        self.open = open;
+        self.open = open && !want_close;
 
         act
     }
@@ -464,6 +496,126 @@ impl Workshop {
 mod tests {
     use super::*;
     use evosim_core::blueprint::CellSpec;
+
+    /// 在一帧的图形里找到某段文字的位置（用来"点"按钮）
+    fn find_text_pos(out: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        fn walk(shapes: &[egui::Shape], needle: &str) -> Option<egui::Pos2> {
+            for s in shapes {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => {
+                        return Some(t.pos + t.galley.size() * 0.5);
+                    }
+                    egui::Shape::Vec(v) => {
+                        if let Some(p) = walk(v, needle) {
+                            return Some(p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        let flat: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
+        walk(&flat, needle)
+    }
+
+    fn screen() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 950.0))
+    }
+
+    fn blank_world() -> World {
+        World::new(
+            evosim_core::config::Config::default(),
+            evosim_core::rng::Rng::new(1),
+        )
+    }
+
+    /// 回归：点「手动放置」必须真的收起工坊。
+    ///
+    /// 曾经的 bug：闭包里写 `self.open = false`，但函数末尾有一句
+    /// `self.open = open;`（`open` 是闭包外那个供 × 用的变量），把 false 覆盖掉了
+    /// —— 表现为"点了手动放置，工坊不关"，然后用户只能手动关，关了又不知道自己在放置模式。
+    #[test]
+    fn manual_place_button_closes_workshop() {
+        let ctx = egui::Context::default();
+        crate::ui::configure(&ctx);
+        let world = blank_world();
+
+        let mut w = Workshop::default();
+        w.open = true;
+        w.cells.clear();
+        w.cells.insert((0, 0), (ct::MOUTH, 0));
+        w.cells.insert((1, 0), (ct::MOVER, 0));
+
+        // 先跑几帧让窗口布局稳定（egui 的窗口第一帧是淡入，形状会被剔掉）
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(screen());
+        let mut out = ctx.run(input.clone(), |ctx| {
+            let _ = w.draw(ctx, &world);
+        });
+        for _ in 0..3 {
+            out = ctx.run(input.clone(), |ctx| {
+                let _ = w.draw(ctx, &world);
+            });
+        }
+
+        let pos = find_text_pos(&out, "手动放置").expect("界面上找不到「手动放置」按钮");
+
+        // 第二帧：在按钮上按下 + 松开（同一帧内完成即算一次点击）
+        let mut click = input.clone();
+        click.events.push(egui::Event::PointerMoved(pos));
+        click.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        click.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+
+        let mut act = WorkshopActions::default();
+        let _ = ctx.run(click, |ctx| {
+            act = w.draw(ctx, &world);
+        });
+
+        assert!(act.place.is_some(), "点击「手动放置」应产出一个待放置蓝图");
+        assert!(!w.open, "点「手动放置」之后工坊必须自己收起");
+    }
+
+    /// 回归：右键不许编辑蓝图（右键在 2.0 里是"拖动世界画布"）
+    #[test]
+    fn right_button_never_edits_blueprint() {
+        let mut w = Workshop::default();
+        w.cells.clear();
+        w.brush = ct::WALL;
+
+        w.edit_cell(0, 0, egui::PointerButton::Primary);
+        assert_eq!(w.cells.len(), 1, "左键应该能放细胞");
+
+        w.edit_cell(1, 0, egui::PointerButton::Secondary);
+        assert_eq!(w.cells.len(), 1, "右键不该放细胞");
+
+        w.brush = ERASER;
+        w.edit_cell(0, 0, egui::PointerButton::Secondary);
+        assert_eq!(w.cells.len(), 1, "右键不该擦格子");
+
+        w.edit_cell(0, 0, egui::PointerButton::Primary);
+        assert_eq!(w.cells.len(), 0, "擦除笔刷 + 左键才擦");
+    }
+
+    /// 越界的格子不许画（蓝图画布是 15×15）
+    #[test]
+    fn edits_outside_radius_are_ignored() {
+        let mut w = Workshop::default();
+        w.cells.clear();
+        w.brush = ct::WALL;
+        w.edit_cell(RADIUS + 1, 0, egui::PointerButton::Primary);
+        assert!(w.cells.is_empty(), "超出 15×15 的格子不该被写入");
+    }
 
     #[test]
     fn to_blueprint_is_stable() {

@@ -14,11 +14,36 @@ use evosim_render::colors::build_palette;
 use crate::paint::{BrushShape, ERASER};
 use crate::panels::Panels;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Paint,
     Pan,
     Inspect,
+}
+
+/// 左键按下时要做什么
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftAction {
+    Place,
+    Paint,
+    Inspect,
+    Pan,
+}
+
+/// **放置模式优先于一切工具**。
+///
+/// 曾经把投放藏在 `paint_at_cursor` 里，而那条路径要求当前工具是「画笔」，
+/// 于是"手动放置后点画布放不上去"——放置是一次性的显式意图，
+/// 不该被"你手上拿的是什么工具"卡住。
+pub fn left_action(placing: bool, tool: Tool) -> LeftAction {
+    if placing {
+        return LeftAction::Place;
+    }
+    match tool {
+        Tool::Paint => LeftAction::Paint,
+        Tool::Inspect => LeftAction::Inspect,
+        Tool::Pan => LeftAction::Pan,
+    }
 }
 
 pub struct UiState {
@@ -32,6 +57,10 @@ pub struct UiState {
     /// 世界坐标下的高亮矩形（1 格大小）+ 各自的颜色。
     /// 由面板填充，这里换算成屏幕像素再描边。
     pub highlights: Vec<(egui::Rect, Color32)>,
+    /// 放置模式的提示文字（None = 不在放置模式）
+    pub place_hint: Option<String>,
+    /// 放置预览：光标格 + 蓝图的相对格偏移（画成半透明轮廓，点之前能看出落点）
+    pub place_preview: Option<(i32, i32, Vec<(i32, i32)>)>,
 }
 
 impl Default for UiState {
@@ -45,6 +74,8 @@ impl Default for UiState {
             show_tools: true,
             show_params: true,
             highlights: Vec::new(),
+            place_hint: None,
+            place_preview: None,
         }
     }
 }
@@ -266,6 +297,13 @@ pub fn draw(
                     {
                         st.show_tools = !st.show_tools;
                     }
+                    if ui
+                        .selectable_label(st.show_params, "参数")
+                        .on_hover_text("右侧关键参数面板")
+                        .clicked()
+                    {
+                        st.show_params = !st.show_params;
+                    }
                     if ui.button("适应窗口").on_hover_text("快捷键 F").clicked() {
                         act.fit = true;
                     }
@@ -432,6 +470,21 @@ pub fn draw(
     st.highlights.clear();
     let panel_act = panels.draw(ctx, world, &mut st.highlights);
 
+    // 放置预览：把蓝图足迹按光标位置推进高亮列表（和别的高亮同一层，画在窗口下面）
+    let preview = st.place_preview.take();
+    if let Some((col, row, cells)) = preview {
+        let tint = Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 170);
+        for (dx, dy) in cells {
+            st.highlights.push((
+                egui::Rect::from_min_size(
+                    egui::pos2((col + dx) as f32, (row + dy) as f32),
+                    egui::vec2(1.0, 1.0),
+                ),
+                tint,
+            ));
+        }
+    }
+
     // ── 世界坐标 → 屏幕像素，画高亮 ──
     //
     // 用帧首登记好的那一层（`hl_layer`），所以永远画在窗口**下面**。
@@ -510,6 +563,25 @@ pub fn draw(
                             }
                             ui.label(egui::RichText::new("高").size(11.0).color(TEXT_DIM));
                         });
+                    });
+            });
+    }
+
+    // ── 顶部中央：放置模式提示条 ──
+    //
+    // 放置模式以前没有任何可见提示，用户点了「手动放置」之后不知道自己在什么状态
+    // （工坊关了、鼠标点了却没反应）。这条横幅把状态和退出方式都说清楚。
+    if let Some(hint) = st.place_hint.clone() {
+        egui::Area::new("place-hint".into())
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(13, 17, 23, 240))
+                    .stroke(Stroke::new(1.0, ACCENT))
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.label(egui::RichText::new(hint).size(12.0).color(ACCENT));
                     });
             });
     }
@@ -652,6 +724,27 @@ mod tests {
         });
 
         assert!(!out.shapes.is_empty(), "界面没有产出任何图形");
+    }
+
+    /// 回归：放置模式必须压过当前工具。
+    ///
+    /// 曾经的 bug：投放逻辑藏在 `paint_at_cursor` 里，那条路径要求工具是「画笔」，
+    /// 所以用户拿着「检视」或「平移」时，装了蓝图也点不出东西。
+    #[test]
+    fn placement_wins_over_every_tool() {
+        for tool in [Tool::Paint, Tool::Pan, Tool::Inspect] {
+            assert_eq!(
+                left_action(true, tool),
+                LeftAction::Place,
+                "放置模式下左键必须是投放（工具 = {:?}）",
+                tool
+            );
+            // 不在放置模式时照旧按工具走
+            assert_ne!(left_action(false, tool), LeftAction::Place);
+        }
+        assert_eq!(left_action(false, Tool::Paint), LeftAction::Paint);
+        assert_eq!(left_action(false, Tool::Inspect), LeftAction::Inspect);
+        assert_eq!(left_action(false, Tool::Pan), LeftAction::Pan);
     }
 
     #[test]

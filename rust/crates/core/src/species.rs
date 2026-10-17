@@ -187,3 +187,63 @@ impl SpeciesRegistry {
         removed
     }
 }
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+    use crate::cell_type::ct;
+
+    /// 物种时间轴要能画出"存续区间"：活着的 end_tick = -1，灭绝后记下真实的结束 tick。
+    ///
+    /// 物种面板的横条就是靠 `start_tick` / `end_tick` 画的——这两个字段错了，
+    /// 时间轴会变成一堆零宽条或者全顶到最右。
+    #[test]
+    fn extinct_species_get_an_end_tick() {
+        let mut reg = SpeciesRegistry::default();
+        let fp = Arc::<str>::from("fp-a");
+        let mut anatomy = Anatomy::default();
+        anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        anatomy.recompute();
+
+        reg.observe(&fp, None, &anatomy, 10);
+        assert_eq!(reg.list[0].start_tick, 10);
+        assert_eq!(reg.list[0].end_tick, -1, "刚登记的物种还没结束");
+
+        // 有一个个体 → 存活
+        reg.update([&fp].into_iter(), 20);
+        assert_eq!(reg.list[0].population, 1);
+        assert!(reg.list[0].alive);
+        assert_eq!(reg.list[0].end_tick, -1);
+
+        // 一个都没有 → 灭绝，记下 end_tick
+        reg.update(std::iter::empty::<&Arc<str>>(), 30);
+        let sp = &reg.list[0];
+        assert!(!sp.alive, "没有个体了应该标成灭绝");
+        assert_eq!(sp.end_tick, 30, "灭绝 tick 必须记下来，否则时间轴画不出右端");
+        assert!(sp.lifespan() >= 20, "存续时长 = 结束 - 开始，实际 {}", sp.lifespan());
+    }
+
+    /// 峰值存活、累计、已灭绝三个计数要各自独立变化
+    #[test]
+    fn counters_track_separately() {
+        let mut reg = SpeciesRegistry::default();
+        let mut anatomy = Anatomy::default();
+        anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        anatomy.recompute();
+
+        let a = Arc::<str>::from("fp-a");
+        let b = Arc::<str>::from("fp-b");
+        reg.observe(&a, None, &anatomy, 0);
+        reg.observe(&b, Some(&a), &anatomy, 5);
+
+        reg.update([&a, &b].into_iter(), 10);
+        assert_eq!(reg.alive_count, 2);
+        assert_eq!(reg.peak_alive_count, 2);
+
+        reg.update([&a].into_iter(), 20);
+        assert_eq!(reg.alive_count, 1);
+        assert_eq!(reg.total_extinct, 1);
+        assert_eq!(reg.peak_alive_count, 2, "峰值不能被后来下降的存活数覆盖");
+        assert_eq!(reg.total_created, 2);
+    }
+}
