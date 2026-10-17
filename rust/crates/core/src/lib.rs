@@ -3,6 +3,7 @@
 //! 零窗口依赖，可以在 `cargo test` 里直接跑，也可以被 CLI / 渲染层 / 界面层复用。
 
 pub mod anatomy;
+pub mod blueprint;
 pub mod brain;
 pub mod cell_type;
 pub mod config;

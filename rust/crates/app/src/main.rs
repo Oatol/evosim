@@ -11,6 +11,7 @@
 mod paint;
 mod panels;
 mod ui;
+mod workshop;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -210,6 +211,9 @@ struct App {
     egui_renderer: Option<egui_wgpu::Renderer>,
     ui: ui::UiState,
     panels: panels::Panels,
+    workshop: workshop::Workshop,
+    /// 「手动放置」装进来的蓝图：下一次左键就把它放在那里
+    pending_place: Option<evosim_core::blueprint::Blueprint>,
     /// egui 是否吃掉了指针（吃掉就不落笔）
     ui_wants_pointer: bool,
 }
@@ -246,6 +250,8 @@ impl App {
             egui_renderer: None,
             ui: ui::UiState::default(),
             panels: panels::Panels::default(),
+            workshop: workshop::Workshop::default(),
+            pending_place: None,
             ui_wants_pointer: false,
         }
     }
@@ -514,6 +520,20 @@ impl App {
         self.center_on_org(id);
     }
 
+    /// 把蓝图投放到当前视野中心
+    fn spawn_blueprint_at_center(&mut self, bp: &evosim_core::blueprint::Blueprint) {
+        let (w, h) = self.view_size();
+        let (wx, wy) = self.camera.screen_to_world(w * 0.5, h * 0.5);
+        let (col, row) = (wx.floor() as i32, wy.floor() as i32);
+        let mut ok = false;
+        if let Some(world) = self.world.as_mut() {
+            ok = evosim_core::blueprint::spawn_from_blueprint(world, col, row, bp).is_some();
+        }
+        if ok {
+            self.upload_world();
+        }
+    }
+
     /// 检视工具：点谁选谁（点空地取消选中）
     fn inspect_at_cursor(&mut self) {
         let Some((col, row)) = self.hover_cell else {
@@ -539,6 +559,21 @@ impl App {
         let Some((col, row)) = self.hover_cell else {
             return;
         };
+
+        // 「手动放置」优先：这一次点击是投放蓝图，不是落笔
+        if let Some(bp) = self.pending_place.take() {
+            let mut ok = false;
+            if let Some(world) = self.world.as_mut() {
+                ok = evosim_core::blueprint::spawn_from_blueprint(world, col, row, &bp).is_some();
+            }
+            if ok {
+                self.upload_world();
+            } else {
+                self.pending_place = Some(bp); // 放不下就留着，换个地方再点
+            }
+            return;
+        }
+
         if let Some(world) = self.world.as_mut() {
             paint::apply_brush(world, col, row, self.ui.brush, self.ui.brush_size);
         }
@@ -578,17 +613,26 @@ impl App {
         {
             let ui_state = &mut self.ui;
             let panels = &mut self.panels;
+            let wshop = &mut self.workshop;
             let world = match self.world.as_mut() {
                 Some(w) => w,
                 None => return,
             };
+            let mut shop_act = workshop::WorkshopActions::default();
             let full = ctx.run(raw, |ctx| {
                 actions = ui::draw(ctx, ui_state, world, &hud, &view, panels);
+                shop_act = wshop.draw(ctx, world);
             });
             if let Some(state) = self.egui_state.as_mut() {
                 state.handle_platform_output(&window, full.platform_output);
             }
             self.apply_ui_actions(std::mem::take(&mut actions));
+            if let Some(bp) = shop_act.place.take() {
+                self.pending_place = Some(bp);
+            }
+            if let Some(bp) = shop_act.center.take() {
+                self.spawn_blueprint_at_center(&bp);
+            }
             self.ui_wants_pointer = self.egui_ctx.wants_pointer_input();
 
             let tris = ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -722,7 +766,13 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                    PhysicalKey::Code(KeyCode::Escape) => {
+                        if self.pending_place.take().is_some() {
+                            // 只取消放置，不退出程序
+                        } else {
+                            event_loop.exit();
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::Space) => {
                         self.paused = !self.paused;
                         self.last = Instant::now();
@@ -746,6 +796,9 @@ impl ApplicationHandler for App {
                             toggle_mode: true,
                             ..Default::default()
                         });
+                    }
+                    PhysicalKey::Code(KeyCode::KeyG) => {
+                        self.workshop.open = !self.workshop.open;
                     }
                     PhysicalKey::Code(KeyCode::KeyF) => {
                         self.apply_ui_actions(ui::UiActions {
