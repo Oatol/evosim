@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use egui::{Align2, Color32, CornerRadius, FontId, Sense, Stroke, StrokeKind};
 
 use evosim_core::anatomy::Flags;
-use evosim_core::cell_type::{self, ct};
 use evosim_core::world::World;
 use evosim_render::colors::species_rgb;
 
@@ -26,6 +25,10 @@ pub struct Sample {
 pub struct Panels {
     pub selected_org: Option<u32>,
     pub follow: bool,
+    /// 图钉：锁定检视目标。锁上之后用检视工具点画布不会换目标、也不会清空。
+    pub pinned: bool,
+    /// 是否同时高亮"同物种的其他个体"（默认开）
+    pub highlight_species: bool,
     pub selected_species: Option<String>,
     pub history: VecDeque<Sample>,
     last_sample_tick: u64,
@@ -39,6 +42,8 @@ impl Default for Panels {
         Panels {
             selected_org: None,
             follow: false,
+            pinned: false,
+            highlight_species: true,
             selected_species: None,
             history: VecDeque::new(),
             last_sample_tick: 0,
@@ -82,6 +87,7 @@ impl Panels {
                 _ => {
                     self.selected_org = None;
                     self.follow = false;
+                    self.pinned = false;
                 }
             }
         }
@@ -91,7 +97,7 @@ impl Panels {
         &mut self,
         ctx: &egui::Context,
         world: &World,
-        highlight: &mut Vec<egui::Rect>,
+        highlight: &mut Vec<(egui::Rect, Color32)>,
     ) -> PanelActions {
         let mut act = PanelActions::default();
 
@@ -110,6 +116,34 @@ impl Panels {
                         });
                     if !open {
                         act.clear_selection = true;
+                    }
+                }
+            }
+        }
+
+        // ── 选中个体 / 同物种的高亮 ──
+        //
+        // 检视工具选中一个个体后，画布上必须能看出"选的是谁"：
+        // 它自己用强调色描边，同物种的其他个体用该物种的指纹色（暗一档）。
+        if let Some(id) = self.selected_org {
+            if let Some(org) = world.organism(id) {
+                push_cells(highlight, org, ACCENT);
+                if self.highlight_species {
+                    if let Some(fp) = org.species_fingerprint.as_deref() {
+                        let rgb = species_rgb(fp);
+                        let dim = Color32::from_rgb(
+                            (rgb[0] as u16 * 6 / 10) as u8,
+                            (rgb[1] as u16 * 6 / 10) as u8,
+                            (rgb[2] as u16 * 6 / 10) as u8,
+                        );
+                        for other in &world.organisms {
+                            if other.id == org.id {
+                                continue;
+                            }
+                            if other.species_fingerprint.as_deref() == Some(fp) {
+                                push_cells(highlight, other, dim);
+                            }
+                        }
                     }
                 }
             }
@@ -229,6 +263,13 @@ fn inspector_body(
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui
+            .selectable_label(panels.pinned, "图钉")
+            .on_hover_text("锁定检视目标：锁上后用「检视」点画布不会切换、也不会清空当前个体")
+            .clicked()
+        {
+            panels.pinned = !panels.pinned;
+        }
+        if ui
             .selectable_label(panels.follow, "跟随")
             .on_hover_text("相机每帧对准这个个体")
             .clicked()
@@ -242,13 +283,22 @@ fn inspector_body(
             act.clear_selection = true;
         }
     });
+    ui.checkbox(&mut panels.highlight_species, "高亮同物种")
+        .on_hover_text("除了它自己，把它物种的其他个体也用该物种的颜色标出来");
+    if panels.pinned {
+        ui.label(
+            egui::RichText::new("已锁定：点画布不会换目标")
+                .color(ACCENT)
+                .size(11.0),
+        );
+    }
 }
 
 fn species_body(
     ui: &mut egui::Ui,
     world: &World,
     panels: &mut Panels,
-    highlight: &mut Vec<egui::Rect>,
+    highlight: &mut Vec<(egui::Rect, Color32)>,
 ) {
     let reg = &world.species;
     let mut alive: Vec<&evosim_core::species::Species> =
@@ -346,20 +396,28 @@ fn species_body(
     if let Some(fp) = panels.selected_species.clone() {
         let rgb = species_rgb(&fp);
         let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        let _ = color;
         for org in &world.organisms {
             if org.species_fingerprint.as_deref() != Some(fp.as_str()) {
                 continue;
             }
-            for c in &org.anatomy.cells {
-                let col = org.real_col(c);
-                let row = org.real_row(c);
-                highlight.push(egui::Rect::from_min_size(
-                    egui::pos2(col as f32, row as f32),
-                    egui::vec2(1.0, 1.0),
-                ));
-            }
+            push_cells(highlight, org, color);
         }
+    }
+}
+
+/// 把一个个体的所有身体格推进高亮列表
+fn push_cells(
+    out: &mut Vec<(egui::Rect, Color32)>,
+    org: &evosim_core::organism::Organism,
+    color: Color32,
+) {
+    for c in &org.anatomy.cells {
+        let col = org.real_col(c);
+        let row = org.real_row(c);
+        out.push((
+            egui::Rect::from_min_size(egui::pos2(col as f32, row as f32), egui::vec2(1.0, 1.0)),
+            color,
+        ));
     }
 }
 
@@ -391,7 +449,7 @@ fn chart_body(ui: &mut egui::Ui, panels: &Panels) {
     let max_species = h.iter().map(|s| s.species).fold(1.0f32, f32::max);
     let n = h.len();
 
-    let plot = |vals: Vec<f32>, max: f32, color: Color32| -> Vec<egui::Pos2> {
+    let plot = |vals: Vec<f32>, max: f32, _color: Color32| -> Vec<egui::Pos2> {
         vals.iter()
             .enumerate()
             .map(|(i, v)| {

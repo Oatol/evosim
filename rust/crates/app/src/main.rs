@@ -489,6 +489,7 @@ impl App {
         if act.clear_selection {
             self.panels.selected_org = None;
             self.panels.follow = false;
+            self.panels.pinned = false;
         }
         if act.toggle_workshop {
             self.workshop.open = !self.workshop.open;
@@ -550,6 +551,14 @@ impl App {
             return;
         };
         let owner = world.grid.owners[idx];
+
+        // 图钉：锁定当前检视目标——点空地或点别的个体都不会换目标。
+        // （1.x 的图钉语义是"点画布不关闭浮窗"；2.0 的检视器是 egui 窗口，本来就不会
+        //   被点关掉，所以把图钉落到"锁目标"上，功能才实在。）
+        if self.panels.pinned && self.panels.selected_org.is_some() {
+            return;
+        }
+
         self.panels.selected_org = if owner >= 0 { Some(owner as u32) } else { None };
         if self.panels.selected_org.is_none() {
             self.panels.follow = false;
@@ -741,6 +750,25 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // ── Tab 必须在交给 egui 之前截走 ──
+        //
+        // egui-winit 对 Tab 是**无条件 consume** 的（它拿 Tab 做焦点轮换），
+        // 所以只要交给它，我们的快捷键分支就永远不会执行，而且焦点会在顶栏
+        // 按钮之间乱跳。这里抢先处理掉并直接返回，egui 根本收不到这个事件。
+        // 例外：正在输入文字（工坊名字框）时让给 egui。
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            if key.state == ElementState::Pressed
+                && matches!(key.physical_key, PhysicalKey::Code(KeyCode::Tab))
+                && !self.egui_ctx.wants_keyboard_input()
+            {
+                self.apply_ui_actions(ui::UiActions {
+                    toggle_mode: true,
+                    ..Default::default()
+                });
+                return;
+            }
+        }
+
         // 先让 egui 处理（它决定指针/键盘是否被 UI 吃掉）
         let egui_consumed = if let (Some(state), Some(window)) =
             (self.egui_state.as_mut(), self.window.as_ref())
@@ -803,12 +831,7 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::BracketLeft) => {
                         self.speed_idx = self.speed_idx.saturating_sub(1);
                     }
-                    PhysicalKey::Code(KeyCode::Tab) => {
-                        self.apply_ui_actions(ui::UiActions {
-                            toggle_mode: true,
-                            ..Default::default()
-                        });
-                    }
+                    // Tab 已在上面抢先处理（egui-winit 会无条件吞掉它）
                     PhysicalKey::Code(KeyCode::KeyG) => {
                         self.workshop.open = !self.workshop.open;
                     }

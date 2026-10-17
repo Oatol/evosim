@@ -158,6 +158,34 @@ impl Workshop {
                                 }
                             });
                         }
+
+                        // ── 选中细胞的一句话简介（文案来自注册表 desc）──
+                        ui.add_space(3.0);
+                        let (cname, cdesc) = if self.brush == ERASER {
+                            ("擦除", "从蓝图上删掉这一格".to_string())
+                        } else {
+                            (
+                                cell_type::label(self.brush),
+                                cell_type::def(self.brush)
+                                    .map(|d| d.desc.to_string())
+                                    .unwrap_or_default(),
+                            )
+                        };
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        ui.set_max_width(190.0);
+                        ui.label(
+                            egui::RichText::new(cname)
+                                .color(ACCENT)
+                                .size(11.0)
+                                .strong(),
+                        );
+                        if !cdesc.is_empty() {
+                            ui.label(
+                                egui::RichText::new(cdesc)
+                                    .color(Color32::from_rgb(150, 165, 185))
+                                    .size(11.0),
+                            );
+                        }
                     });
 
                     ui.separator();

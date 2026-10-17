@@ -29,9 +29,9 @@ pub struct UiState {
     pub hover: String,
     pub show_tools: bool,
     pub show_params: bool,
-    /// 世界坐标下的高亮矩形（1 格大小），由面板填充、这里换算成屏幕像素再描边
-    pub highlights: Vec<egui::Rect>,
-    pub highlight_color: Color32,
+    /// 世界坐标下的高亮矩形（1 格大小）+ 各自的颜色。
+    /// 由面板填充，这里换算成屏幕像素再描边。
+    pub highlights: Vec<(egui::Rect, Color32)>,
 }
 
 impl Default for UiState {
@@ -45,7 +45,6 @@ impl Default for UiState {
             show_tools: true,
             show_params: true,
             highlights: Vec::new(),
-            highlight_color: ACCENT,
         }
     }
 }
@@ -176,6 +175,14 @@ pub fn draw(
 ) -> UiActions {
     let mut act = UiActions::default();
 
+    // ── 先把"世界高亮"这一层建出来 ──
+    //
+    // egui 同一 Order 内的图层按**创建顺序**绘制。如果等面板（窗口）都画完再建这一层，
+    // 它就会盖在窗口上面（用户看到的就是"高亮浮在 UI 之上"）。
+    // 在帧首先登记一次，顺序就固定在最底层（仍然在 Order::Middle 里，只是排在窗口之前）。
+    let hl_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("world-highlight"));
+    let _ = ctx.layer_painter(hl_layer);
+
     // ── 顶部状态条 ──
     egui::TopBottomPanel::top("hud")
         .frame(
@@ -201,8 +208,8 @@ pub fn draw(
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .selectable_label(hud.workshop_open, "工坊 G")
-                        .on_hover_text("物种工坊：手绘蓝图 + 生物库")
+                        .selectable_label(hud.workshop_open, "物种工坊")
+                        .on_hover_text("手绘蓝图 + 生物库（快捷键 G）")
                         .clicked()
                     {
                         act.toggle_workshop = true;
@@ -298,6 +305,25 @@ pub fn draw(
                     format!("正在画：{}", cell_type::label(st.brush))
                 };
                 ui.label(egui::RichText::new(hint).color(TEXT_DIM).size(11.0));
+
+                // 选中笔刷的简介（文案来自注册表 desc，笔刷/工坊/参数共用一份）
+                let desc = if st.brush == ERASER {
+                    "只擦地形（墙/岩浆/沼泽/辐射带/腐殖质），食物与生物一律不动".to_string()
+                } else {
+                    cell_type::def(st.brush)
+                        .map(|d| d.desc.to_string())
+                        .unwrap_or_default()
+                };
+                if !desc.is_empty() {
+                    ui.add_space(2.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.set_max_width(190.0);
+                    ui.label(
+                        egui::RichText::new(desc)
+                            .color(Color32::from_rgb(150, 165, 185))
+                            .size(11.0),
+                    );
+                }
             });
         st.show_tools = tools_open;
     }
@@ -355,13 +381,16 @@ pub fn draw(
     let panel_act = panels.draw(ctx, world, &mut st.highlights);
 
     // ── 世界坐标 → 屏幕像素，画高亮 ──
+    //
+    // 用帧首登记好的那一层（`hl_layer`），所以永远画在窗口**下面**。
+    // 再按"顶栏以下的区域"裁剪一次，避免溢到顶栏上。
     if !st.highlights.is_empty() {
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new("world-highlight"),
-        ));
+        let canvas = ctx.available_rect();
+        let painter = ctx
+            .layer_painter(hl_layer)
+            .with_clip_rect(canvas.intersect(ctx.screen_rect()));
         let z = view.zoom;
-        for r in &st.highlights {
+        for (r, color) in &st.highlights {
             let sx = (r.min.x - view.cam_x) * z;
             let sy = (r.min.y - view.cam_y) * z;
             let size = (r.width() * z).max(1.0);
@@ -373,19 +402,14 @@ pub fn draw(
                 painter.rect_stroke(
                     rect,
                     CornerRadius::ZERO,
-                    Stroke::new(1.0, st.highlight_color),
+                    Stroke::new(1.0, *color),
                     StrokeKind::Inside,
                 );
             } else {
                 painter.rect_filled(
                     rect,
                     CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(
-                        st.highlight_color.r(),
-                        st.highlight_color.g(),
-                        st.highlight_color.b(),
-                        200,
-                    ),
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 200),
                 );
             }
         }
@@ -496,9 +520,9 @@ mod tests {
         let mut st = UiState::default();
         st.hover = "(12, 34) 嘴 · 个体 #3 · S1".to_string();
         // 造一条高亮，顺便验证世界坐标 → 屏幕像素那段
-        st.highlights.push(egui::Rect::from_min_size(
-            egui::pos2(10.0, 10.0),
-            egui::vec2(1.0, 1.0),
+        st.highlights.push((
+            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(1.0, 1.0)),
+            ACCENT,
         ));
 
         let hud = HudInfo {

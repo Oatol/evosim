@@ -393,10 +393,27 @@ impl World {
                     return;
                 }
                 let (col, row) = self.grid.coords(index);
-                let n = NEIGHBORS_4[self.rng.int(4)];
-                if let Some(target) = self.grid.index(col + n.0, row + n.1) {
-                    if self.grid.types[target] == ct::EMPTY {
-                        self.set_cell_at(target, ct::FOOD, -1);
+                // 5 个候选：0 = 腐殖质**自己那一格**，1..=4 = 四邻域。
+                // 用户要求"也在它自己上生成"——腐殖质自己也是块地，长在自己身上才对。
+                let k = self.rng.int(5);
+                let first = if k == 0 {
+                    Some(index)
+                } else {
+                    let n = NEIGHBORS_4[(k - 1) as usize];
+                    self.grid.index(col + n.0, row + n.1)
+                };
+                // 选中的格子被占（有生物 / 已有食物）就退回自己那格再试一次，
+                // 否则腐殖质被围住时永远不产食。
+                //
+                // 注意：地形格自己的顶层 `types` 存的就是它自己（HUMUS），
+                // 所以"能放食物"的判据是「空格 **或** 裸地形」，不能只判 EMPTY。
+                for cand in [first, Some(index)] {
+                    if let Some(t) = cand {
+                        let ty_here = self.grid.types[t];
+                        if ty_here == ct::EMPTY || ty_here == ty {
+                            self.set_cell_at(t, ct::FOOD, -1);
+                            break;
+                        }
                     }
                 }
             }
@@ -1127,5 +1144,60 @@ mod tests {
         // 每个存活物种的 population 都应该 > 0
         let alive = w.species.list.iter().filter(|s| s.population > 0).count();
         assert_eq!(alive, w.species.alive_count, "存活计数应与实际相符");
+    }
+
+    /// 腐殖质必须能**长在自己那一格**上。
+    ///
+    /// 用户反馈："腐殖质只在自己周围生成食物，能不能也长在它自己上"。
+    /// 这里把四邻域全砌成墙，只剩腐殖质自己那格能放食物——
+    /// 如果实现只考虑邻居，这一步什么都不会发生。
+    #[test]
+    fn humus_can_grow_food_on_itself() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 8;
+        cfg.world.rows = 8;
+        cfg.terrain.humus_food_prob = 100.0; // 每 tick 必成功
+        cfg.world.food_decay_rate = 0.0; // 别让食物刚长出来就腐败
+        let mut w = World::new(cfg, Rng::new(7));
+        w.fill_grid(ct::EMPTY, false);
+
+        for (c, r) in [(3, 4), (5, 4), (4, 3), (4, 5)] {
+            w.set_cell(c, r, ct::WALL, -1);
+        }
+        w.set_cell(4, 4, ct::HUMUS, -1);
+
+        w.step();
+
+        assert_eq!(w.type_at(4, 4), ct::FOOD, "腐殖质自己那格应该长出食物");
+        assert_eq!(w.floor_at(4, 4), ct::HUMUS, "地形本身要留着（食物被吃后露回来）");
+    }
+
+    /// 反向：腐殖质周围的空地也要能长（不能为了"长在自己身上"把邻域弄丢）
+    #[test]
+    fn humus_still_grows_on_neighbors() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 8;
+        cfg.world.rows = 8;
+        cfg.terrain.humus_food_prob = 100.0;
+        cfg.world.food_decay_rate = 0.0;
+        let mut w = World::new(cfg, Rng::new(11));
+        w.fill_grid(ct::EMPTY, false);
+        w.set_cell(4, 4, ct::HUMUS, -1);
+
+        // 跑若干 tick，统计食物出现在邻域的次数
+        let mut on_neighbor = 0;
+        for _ in 0..40 {
+            w.step();
+            for (c, r) in [(3, 4), (5, 4), (4, 3), (4, 5)] {
+                if w.type_at(c, r) == ct::FOOD {
+                    on_neighbor += 1;
+                    w.reveal_floor(w.grid.index(c, r).unwrap());
+                }
+            }
+            if w.type_at(4, 4) == ct::FOOD {
+                w.reveal_floor(w.grid.index(4, 4).unwrap());
+            }
+        }
+        assert!(on_neighbor > 0, "腐殖质应该也会在周围长食物");
     }
 }

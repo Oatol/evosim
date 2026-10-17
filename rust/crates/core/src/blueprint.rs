@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::anatomy::{Anatomy, BodyCell};
+use crate::anatomy::Anatomy;
 use crate::cell_type::is_directional;
 use crate::organism::Organism;
 use crate::world::World;
