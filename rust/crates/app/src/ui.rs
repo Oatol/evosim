@@ -54,6 +54,10 @@ pub struct UiState {
     pub hover: String,
     pub show_tools: bool,
     pub show_params: bool,
+    /// 细胞参数窗口
+    pub cell_params_open: bool,
+    /// 细胞参数里当前选中的细胞 id
+    pub cell_selected: u8,
     /// 世界坐标下的高亮矩形（1 格大小）+ 各自的颜色。
     /// 由面板填充，这里换算成屏幕像素再描边。
     pub highlights: Vec<(egui::Rect, Color32)>,
@@ -73,6 +77,8 @@ impl Default for UiState {
             hover: String::new(),
             show_tools: true,
             show_params: true,
+            cell_params_open: false,
+            cell_selected: 3,
             highlights: Vec::new(),
             place_hint: None,
             place_preview: None,
@@ -212,7 +218,7 @@ pub fn configure(ctx: &egui::Context) {
     v.window_fill = PANEL;
     v.extreme_bg_color = BG;
     v.faint_bg_color = Color32::from_rgb(26, 33, 45);
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.selection.bg_fill = Color32::from_rgb(30, 64, 92);
     v.override_text_color = Some(TEXT);
 
@@ -223,16 +229,22 @@ pub fn configure(ctx: &egui::Context) {
         &mut v.widgets.open,
     ] {
         w.corner_radius = CornerRadius::ZERO;
-        w.bg_stroke = Stroke::new(1.0, BORDER);
+        w.bg_stroke = Stroke::new(1.0_f32, BORDER);
     }
     v.widgets.inactive.weak_bg_fill = Color32::from_rgb(26, 33, 45);
-    v.widgets.inactive.bg_fill = Color32::from_rgb(26, 33, 45);
+    // 滑块轨道在 egui 0.31 里取 `widgets.inactive.bg_fill`（全库只有滑块用它，
+    // 按钮走的是 weak_bg_fill），所以这一行只影响轨道。原来它和面板底色
+    // 只差 6 级灰度，深底上等于隐形——滑块看起来像坏了。
+    v.widgets.inactive.bg_fill = Color32::from_rgb(40, 50, 66);
+    // 已填充段画成蓝色：细胞参数里一半属性的出厂值都在量程 20% 以内，
+    // 光看拖柄位置分不清"0"和"0.002"，有了填充段一眼就能读出来。
+    v.slider_trailing_fill = true;
     v.widgets.hovered.weak_bg_fill = Color32::from_rgb(36, 46, 62);
-    v.widgets.hovered.bg_fill = Color32::from_rgb(36, 46, 62);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(52, 64, 82);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     v.widgets.active.weak_bg_fill = Color32::from_rgb(30, 64, 92);
     v.widgets.active.bg_fill = Color32::from_rgb(30, 64, 92);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
 
     ctx.set_style(style);
 }
@@ -266,7 +278,7 @@ pub fn draw(
         .frame(
             egui::Frame::NONE
                 .fill(BG)
-                .stroke(Stroke::new(1.0, BORDER))
+                .stroke(Stroke::new(1.0_f32, BORDER))
                 .inner_margin(egui::Margin::symmetric(10, 5)),
         )
         .show(ctx, |ui| {
@@ -312,6 +324,13 @@ pub fn draw(
                         .clicked()
                     {
                         st.show_params = !st.show_params;
+                    }
+                    if ui
+                        .selectable_label(st.cell_params_open, "细胞")
+                        .on_hover_text("16 种细胞 × 5 个属性（血量/消耗/伤害/感知/食物值）")
+                        .clicked()
+                    {
+                        st.cell_params_open = !st.cell_params_open;
                     }
                     if ui.button("适应窗口").on_hover_text("快捷键 F").clicked() {
                         act.fit = true;
@@ -477,6 +496,21 @@ pub fn draw(
         st.show_params = params_open;
     }
 
+    if st.cell_params_open {
+        let mut open = st.cell_params_open;
+        egui::Window::new("细胞参数")
+            .resizable(false)
+            .collapsible(false)
+            .min_width(470.0)
+            .max_width(470.0)
+            .open(&mut open)
+            .default_pos([520.0, 380.0])
+            .show(ctx, |ui| {
+                crate::cells::draw(ui, world, &mut st.cell_selected);
+            });
+        st.cell_params_open = open;
+    }
+
     // ── 面板：检视器 / 物种 / 曲线 ──
     st.highlights.clear();
     let panel_act = panels.draw(ctx, world, &mut st.highlights);
@@ -518,7 +552,7 @@ pub fn draw(
                 painter.rect_stroke(
                     rect,
                     CornerRadius::ZERO,
-                    Stroke::new(1.0, *color),
+                    Stroke::new(1.0_f32, *color),
                     StrokeKind::Inside,
                 );
             } else {
@@ -543,7 +577,7 @@ pub fn draw(
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(Color32::from_rgba_unmultiplied(13, 17, 23, 230))
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .stroke(Stroke::new(1.0_f32, BORDER))
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -588,7 +622,7 @@ pub fn draw(
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(Color32::from_rgba_unmultiplied(13, 17, 23, 240))
-                    .stroke(Stroke::new(1.0, ACCENT))
+                    .stroke(Stroke::new(1.0_f32, ACCENT))
                     .inner_margin(egui::Margin::symmetric(10, 5))
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -604,7 +638,7 @@ pub fn draw(
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(Color32::from_rgba_unmultiplied(13, 17, 23, 230))
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .stroke(Stroke::new(1.0_f32, BORDER))
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         // 不让它按窄宽度竖排：强制单行 + 给足最大宽度
@@ -642,7 +676,7 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
     painter.rect_stroke(
         swatch,
         CornerRadius::ZERO,
-        Stroke::new(1.0, Color32::from_rgb(0, 0, 0)),
+        Stroke::new(1.0_f32, Color32::from_rgb(0, 0, 0)),
         StrokeKind::Inside,
     );
 
@@ -663,7 +697,7 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
         rect,
         CornerRadius::ZERO,
         Stroke::new(
-            if selected { 2.0 } else { 1.0 },
+            if selected { 2.0_f32 } else { 1.0_f32 },
             if selected { ACCENT } else { BORDER },
         ),
         StrokeKind::Inside,
@@ -806,7 +840,7 @@ mod tests {
             ctx.layer_painter(highlight_layer()).rect_stroke(
                 egui::Rect::from_min_size(egui::pos2(120.0, 120.0), egui::vec2(8.0, 8.0)),
                 CornerRadius::ZERO,
-                Stroke::new(1.0, ACCENT),
+                Stroke::new(1.0_f32, ACCENT),
                 StrokeKind::Inside,
             );
         });

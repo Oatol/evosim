@@ -10,7 +10,7 @@ use egui::{Align2, Color32, CornerRadius, FontId, Sense, Stroke, StrokeKind};
 use evosim_core::world::World;
 use evosim_render::colors::species_rgb;
 
-use crate::ui::{ACCENT, BORDER, PANEL, TEXT, TEXT_DIM};
+use crate::ui::{ACCENT, BORDER, TEXT, TEXT_DIM};
 
 /// 一条历史采样（曲线用）。
 ///
@@ -28,10 +28,6 @@ pub struct Sample {
     pub mutability: f32,
     /// 平均年龄（tick）
     pub age: f32,
-    /// 会移动的个体占比（0–100）
-    pub movers: f32,
-    /// 带攻击细胞的个体占比（0–100）
-    pub killers: f32,
 }
 
 /// 历史点上限。1200 个点 × 每条 36 字节 ≈ 43 KB，可以忽略；
@@ -120,13 +116,6 @@ impl Panels {
         self.last_sample_tick = world.tick;
         let stats = world.snapshot_stats();
         let org = world.organism_stats();
-        let pct = |n: usize| {
-            if org.count == 0 {
-                0.0
-            } else {
-                n as f32 * 100.0 / org.count as f32
-            }
-        };
         self.history.push_back(Sample {
             tick: world.tick,
             pop: stats.organisms as f32,
@@ -135,8 +124,6 @@ impl Panels {
             body: org.avg_cells as f32,
             mutability: org.avg_mutability as f32,
             age: org.avg_age as f32,
-            movers: pct(org.movers),
-            killers: pct(org.killers),
         });
 
         if self.history.len() > MAX_SAMPLES {
@@ -315,7 +302,7 @@ fn species_body(
                 egui::pos2(axis_rect.left(), axis_rect.bottom()),
                 egui::pos2(axis_rect.right(), axis_rect.bottom()),
             ],
-            Stroke::new(1.0, BORDER),
+            Stroke::new(1.0_f32, BORDER),
         );
     }
 
@@ -394,7 +381,7 @@ fn species_body(
                     painter.rect_stroke(
                         rect,
                         CornerRadius::ZERO,
-                        Stroke::new(1.0, ACCENT),
+                        Stroke::new(1.0_f32, ACCENT),
                         StrokeKind::Inside,
                     );
                 }

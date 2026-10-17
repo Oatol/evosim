@@ -402,7 +402,7 @@ impl Workshop {
             rect,
             CornerRadius::ZERO,
             Stroke::new(
-                if selected { 2.0 } else { 1.0 },
+                if selected { 2.0_f32 } else { 1.0_f32 },
                 if selected { ACCENT } else { BORDER },
             ),
             StrokeKind::Inside,
@@ -436,7 +436,7 @@ impl Workshop {
                 painter.rect_stroke(
                     cell_rect,
                     CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::from_rgb(30, 38, 50)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(30, 38, 50)),
                     StrokeKind::Inside,
                 );
                 if let Some((t, dir)) = self.cells.get(&(dx, dy)) {
@@ -457,7 +457,7 @@ impl Workshop {
                         };
                         painter.line_segment(
                             [c, c + v * (CELL * 0.4)],
-                            Stroke::new(2.0, Color32::from_rgb(20, 20, 30)),
+                            Stroke::new(2.0_f32, Color32::from_rgb(20, 20, 30)),
                         );
                     }
                 }
@@ -472,7 +472,7 @@ impl Workshop {
         painter.rect_stroke(
             pivot,
             CornerRadius::ZERO,
-            Stroke::new(1.0, ACCENT),
+            Stroke::new(1.0_f32, ACCENT),
             StrokeKind::Inside,
         );
     }

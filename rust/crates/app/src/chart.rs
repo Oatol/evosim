@@ -107,7 +107,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     p.rect_stroke(
         rect,
         CornerRadius::ZERO,
-        Stroke::new(1.0, BORDER),
+        Stroke::new(1.0_f32, BORDER),
         StrokeKind::Inside,
     );
 
@@ -133,15 +133,13 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     let last = (n - 1) as f32;
 
     // ── 视图窗口（单位：采样点下标）──
-    let mut span = MIN_SPAN;
-    let mut start = 0.0f32;
-    if let Some((s, l)) = panels.chart_view {
-        span = l.clamp(MIN_SPAN, last.max(MIN_SPAN));
-        start = if panels.chart_follow { last - span } else { s };
-        start = start.clamp(0.0, (last - span).max(0.0));
+    let (span, start) = if let Some((s, l)) = panels.chart_view {
+        let span = l.clamp(MIN_SPAN, last.max(MIN_SPAN));
+        let start = if panels.chart_follow { last - span } else { s };
+        (span, start.clamp(0.0, (last - span).max(0.0)))
     } else {
-        span = last;
-    }
+        (last, 0.0)
+    };
 
     // ── 交互：滚轮缩放（以光标为锚）+ 拖动平移 ──
     if resp.hovered() {
@@ -184,7 +182,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         let y = plot.bottom() - plot.height() * f;
         p.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            Stroke::new(1.0, Color32::from_rgb(22, 28, 38)),
+            Stroke::new(1.0_f32, Color32::from_rgb(22, 28, 38)),
         );
         p.text(
             egui::pos2(plot.left() - 4.0, y),
@@ -228,7 +226,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             })
             .collect();
         if pts.len() >= 2 {
-            p.add(egui::Shape::line(pts, Stroke::new(1.5, m.color)));
+            p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, m.color)));
         }
     }
 
@@ -252,7 +250,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             let x = to_x(i as f32);
             p.line_segment(
                 [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-                Stroke::new(1.0, Color32::from_rgb(90, 105, 125)),
+                Stroke::new(1.0_f32, Color32::from_rgb(90, 105, 125)),
             );
             for (mi, m) in METRICS.iter().enumerate() {
                 if !panels.chart_on[mi] || peaks[mi] <= 0.0 {
@@ -394,8 +392,6 @@ mod tests {
             body: 44.0,
             mutability: 55.0,
             age: 66.0,
-            movers: 77.0,
-            killers: 88.0,
         };
         let vals: Vec<f32> = METRICS.iter().map(|m| (m.get)(&s)).collect();
         let mut uniq = vals.clone();

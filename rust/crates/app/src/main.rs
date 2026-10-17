@@ -11,6 +11,7 @@
 
 mod paint;
 mod panels;
+mod cells;
 mod chart;
 mod inspector;
 mod ui;
@@ -1191,7 +1192,7 @@ fn record_egui_pass(
     tris: &[egui::ClippedPrimitive],
     screen: &egui_wgpu::ScreenDescriptor,
 ) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("egui-pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view,

@@ -167,7 +167,7 @@ fn draw_anatomy(ui: &mut egui::Ui, org: &Organism) {
     p.rect_stroke(
         rect,
         CornerRadius::same(3),
-        Stroke::new(1.0, BORDER),
+        Stroke::new(1.0_f32, BORDER),
         egui::StrokeKind::Inside,
     );
 
@@ -223,7 +223,7 @@ fn draw_anatomy(ui: &mut egui::Ui, org: &Organism) {
             p.rect_stroke(
                 r,
                 CornerRadius::same(1),
-                Stroke::new(1.0, Color32::from_rgb(8, 11, 16)),
+                Stroke::new(1.0_f32, Color32::from_rgb(8, 11, 16)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -250,7 +250,7 @@ fn draw_anatomy(ui: &mut egui::Ui, org: &Organism) {
         p.circle_stroke(
             egui::pos2(px, py),
             (cell * 0.62).max(2.0),
-            Stroke::new(1.0, Color32::from_rgb(255, 255, 255)),
+            Stroke::new(1.0_f32, Color32::from_rgb(255, 255, 255)),
         );
     }
 
@@ -318,7 +318,7 @@ fn behavior_block(ui: &mut egui::Ui, world: &World, org: &Organism) {
                 egui::pos2(x, bar.top() - 1.0),
                 egui::pos2(x, bar.bottom() + 1.0),
             ],
-            Stroke::new(1.0, Color32::from_rgb(251, 191, 36)),
+            Stroke::new(1.0_f32, Color32::from_rgb(251, 191, 36)),
         );
     }
 
@@ -407,7 +407,7 @@ fn draw_brain(ui: &mut egui::Ui, org: &Organism, show_all: bool) -> String {
     p.rect_stroke(
         rect,
         CornerRadius::same(3),
-        Stroke::new(1.0, BORDER),
+        Stroke::new(1.0_f32, BORDER),
         egui::StrokeKind::Inside,
     );
 
@@ -420,7 +420,7 @@ fn draw_brain(ui: &mut egui::Ui, org: &Organism, show_all: bool) -> String {
     // 每块竖排：视觉块 3×3，状态块 2×2；块间留 8
     let step = 7.0;
     let mut y = rect.center().y - 46.0;
-    for d in 0..VISION_DIRS {
+    for _ in 0..VISION_DIRS {
         for s in 0..VISUAL_SLOTS {
             let col = (s % 3) as f32;
             let row = (s / 3) as f32;
@@ -549,14 +549,14 @@ fn draw_brain(ui: &mut egui::Ui, org: &Organism, show_all: bool) -> String {
     for (j, pos) in hidden.iter().enumerate() {
         let v = brain.hidden.get(j).copied().unwrap_or(0.0);
         p.circle_filled(*pos, 4.0, val_col(v));
-        p.circle_stroke(*pos, 4.0, Stroke::new(0.7, Color32::from_rgb(64, 78, 96)));
+        p.circle_stroke(*pos, 4.0, Stroke::new(0.7_f32, Color32::from_rgb(64, 78, 96)));
     }
     for (k, pos) in outputs.iter().enumerate() {
         let v = brain.output.get(k).copied().unwrap_or(0.0);
         // 输出是线性的，用 tanh 压一下再映射颜色
         let t = (v * 0.5).tanh();
         p.circle_filled(*pos, 4.4, val_col(t));
-        p.circle_stroke(*pos, 4.4, Stroke::new(0.8, Color32::from_rgb(70, 84, 104)));
+        p.circle_stroke(*pos, 4.4, Stroke::new(0.8_f32, Color32::from_rgb(70, 84, 104)));
         let name = if k + 1 == out_n {
             "转身"
         } else {
