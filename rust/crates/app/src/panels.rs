@@ -12,14 +12,31 @@ use evosim_render::colors::species_rgb;
 
 use crate::ui::{ACCENT, BORDER, PANEL, TEXT, TEXT_DIM};
 
-/// 一条历史采样（曲线用）
+/// 一条历史采样（曲线用）。
+///
+/// 字段都是 `f32`：曲线只画趋势，不需要 `f64` 的精度，而且几千个点
+/// 每个省 4 字节是白捡的。
 #[derive(Clone, Copy)]
 pub struct Sample {
     pub tick: u64,
     pub pop: f32,
     pub food: f32,
     pub species: f32,
+    /// 平均体型（格）
+    pub body: f32,
+    /// 平均变异率（%）
+    pub mutability: f32,
+    /// 平均年龄（tick）
+    pub age: f32,
+    /// 会移动的个体占比（0–100）
+    pub movers: f32,
+    /// 带攻击细胞的个体占比（0–100）
+    pub killers: f32,
 }
+
+/// 历史点上限。1200 个点 × 每条 36 字节 ≈ 43 KB，可以忽略；
+/// 再多就没意义了——屏幕上横着最多也就 700 个像素列。
+pub const MAX_SAMPLES: usize = 1200;
 
 pub struct Panels {
     pub selected_org: Option<u32>,
@@ -36,6 +53,14 @@ pub struct Panels {
     pub show_chart: bool,
     /// 神经网络图是否画全部权重（默认只画强连接）
     pub brain_show_all: bool,
+    /// 曲线：每个指标是否显示（顺序见 `chart::METRICS`）
+    pub chart_on: [bool; 6],
+    /// 曲线：视图窗口，单位是**采样点下标**（不是 tick）。`None` = 全览
+    pub chart_view: Option<(f32, f32)>,
+    /// 曲线：新采样进来时视图自动跟到最右
+    pub chart_follow: bool,
+    /// 采样间隔（tick）。历史满了会翻倍并抽稀，见 `sample()`
+    pub sample_interval: u64,
 }
 
 impl Default for Panels {
@@ -52,6 +77,10 @@ impl Default for Panels {
             show_species: true,
             show_chart: true,
             brain_show_all: false,
+            chart_on: [true, true, true, false, false, false],
+            chart_view: None,
+            chart_follow: true,
+            sample_interval: 20,
         }
     }
 }
@@ -75,23 +104,52 @@ impl Panels {
         self.selected_species = None;
         self.history.clear();
         self.last_sample_tick = 0;
+        self.sample_interval = 20;
+        self.chart_view = None;
     }
 
-    /// 每 20 tick 采一个点，最多留 600 个（约 12000 tick 的视野）
+    /// 采样一个点。
+    ///
+    /// 间隔会**自适应**：历史满了就把间隔翻倍、隔一个丢一个，而不是丢掉最老的点。
+    /// 这样跑十万 tick 也留着完整的演化史（只是越早越稀），比"只留最近一万 tick"
+    /// 有用得多——灭绝事件往往在很后面才看出意义。
     pub fn sample(&mut self, world: &World) {
-        if world.tick < self.last_sample_tick + 20 {
+        if world.tick < self.last_sample_tick + self.sample_interval {
             return;
         }
         self.last_sample_tick = world.tick;
         let stats = world.snapshot_stats();
+        let org = world.organism_stats();
+        let pct = |n: usize| {
+            if org.count == 0 {
+                0.0
+            } else {
+                n as f32 * 100.0 / org.count as f32
+            }
+        };
         self.history.push_back(Sample {
             tick: world.tick,
             pop: stats.organisms as f32,
             food: stats.food as f32,
             species: world.species.size() as f32,
+            body: org.avg_cells as f32,
+            mutability: org.avg_mutability as f32,
+            age: org.avg_age as f32,
+            movers: pct(org.movers),
+            killers: pct(org.killers),
         });
-        if self.history.len() > 600 {
-            self.history.pop_front();
+
+        if self.history.len() > MAX_SAMPLES {
+            // 抽稀：保留下标为偶数的点（含最后一个），间隔翻倍
+            let mut i = 0usize;
+            self.history.retain(|_| {
+                let keep = i % 2 == 0;
+                i += 1;
+                keep
+            });
+            self.sample_interval = self.sample_interval.saturating_mul(2).min(1 << 20);
+            // 视图是按"采样点下标"记的，抽稀后下标含义变了，直接复位最安全
+            self.chart_view = None;
         }
     }
 
@@ -185,11 +243,13 @@ impl Panels {
             let mut open = self.show_chart;
             egui::Window::new("曲线")
                 .resizable(false)
-                .collapsible(true)
+                .collapsible(false)
+                .min_width(560.0)
+                .max_width(560.0)
                 .open(&mut open)
-                .default_pos([1080.0, 330.0])
+                .default_pos([1000.0, 320.0])
                 .show(ctx, |ui| {
-                    chart_body(ui, self);
+                    crate::chart::draw(ui, self);
                 });
             self.show_chart = open;
         }
@@ -395,73 +455,6 @@ fn push_cells(
             color,
         ));
     }
-}
-
-fn chart_body(ui: &mut egui::Ui, panels: &Panels) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(280.0, 96.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(13, 17, 23));
-    painter.rect_stroke(
-        rect,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, BORDER),
-        StrokeKind::Inside,
-    );
-
-    let h = &panels.history;
-    if h.len() < 2 {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "采样中…",
-            FontId::proportional(11.0),
-            TEXT_DIM,
-        );
-        return;
-    }
-
-    let max_pop = h.iter().map(|s| s.pop).fold(1.0f32, f32::max);
-    let max_food = h.iter().map(|s| s.food).fold(1.0f32, f32::max);
-    let max_species = h.iter().map(|s| s.species).fold(1.0f32, f32::max);
-    let n = h.len();
-
-    let plot = |vals: Vec<f32>, max: f32, _color: Color32| -> Vec<egui::Pos2> {
-        vals.iter()
-            .enumerate()
-            .map(|(i, v)| {
-                let x = rect.left() + rect.width() * (i as f32 / (n - 1) as f32);
-                let y = rect.bottom() - rect.height() * (v / max).clamp(0.0, 1.0);
-                egui::pos2(x, y)
-            })
-            .collect()
-    };
-
-    let pop_pts = plot(h.iter().map(|s| s.pop).collect(), max_pop, ACCENT);
-    let food_pts = plot(h.iter().map(|s| s.food).collect(), max_food, Color32::from_rgb(125, 147, 168));
-    let sp_pts = plot(
-        h.iter().map(|s| s.species).collect(),
-        max_species,
-        Color32::from_rgb(216, 180, 254),
-    );
-
-    painter.add(egui::Shape::line(
-        food_pts,
-        Stroke::new(1.0, Color32::from_rgb(125, 147, 168)),
-    ));
-    painter.add(egui::Shape::line(
-        sp_pts,
-        Stroke::new(1.0, Color32::from_rgb(216, 180, 254)),
-    ));
-    painter.add(egui::Shape::line(pop_pts, Stroke::new(1.5, ACCENT)));
-
-    painter.text(
-        rect.left_top() + egui::vec2(4.0, 3.0),
-        Align2::LEFT_TOP,
-        format!("种群 {} · 食物 {} · 物种 {}", max_pop as i32, max_food as i32, max_species as i32),
-        FontId::proportional(10.0),
-        TEXT_DIM,
-    );
-    let _ = PANEL;
 }
 
 #[cfg(test)]

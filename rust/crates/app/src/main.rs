@@ -11,6 +11,7 @@
 
 mod paint;
 mod panels;
+mod chart;
 mod inspector;
 mod ui;
 mod workshop;
