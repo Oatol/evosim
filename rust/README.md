@@ -25,7 +25,12 @@ rust/
     src/worldgen.rs          示例世界生成
     tests/golden.rs          黄金快照回归（与 JS 逐位对照）
   crates/cli/                无界面 CLI（对照、基准、调试）
+  crates/render/             wgpu 渲染（R8 索引 + 调色板 / 物种色纹理）
+    src/grid.wgsl            全屏三角形着色器：屏幕像素 → 世界坐标 → 查纹理
+    tests/render.rs          像素级回归（精确颜色 / NEAREST / 世界环绕 / 物种色）
+  crates/app/                原生窗口（winit）：相机、着色模式、暂停/调速
   golden/                    JS 版导出的基线数据
+  shots/                     离屏渲染出来的截图（type.png / species.png）
 ```
 
 ## 常用命令
@@ -33,9 +38,16 @@ rust/
 ```bash
 cd rust
 cargo build --release                     # 构建
-cargo test --release                      # 单元测试 + 黄金快照回归
-cargo run --release --bin evosim -- --sim --seed 1001 --ticks 2000
+cargo test --release                      # 单元 + 黄金快照 + 渲染像素回归
+
+cargo run --release --bin evosim -- --sim --seed 1001 --ticks 2000   # 无界面
+cargo run --release -p evosim-app                                     # 打开窗口
+cargo run --release -p evosim-app -- --screenshot shots/type.png --ticks 400
+cargo run --release -p evosim-app -- --bench --seconds 4 --speed 50    # 压测
 ```
+
+窗口快捷键：空格 暂停/继续 · S 单步 · `[` `]` 调速（1/5/10/50×）· Tab 类型/物种着色 ·
+F 适应窗口 · Esc 退出；滚轮以光标为锚缩放，右键/中键拖动平移。
 
 CLI 参数：
 
@@ -77,22 +89,32 @@ FNV-1a 依次混入：
 
 ## 性能
 
-满载 1530 个个体、200×150 世界：
+**稳态**（种群长到 ~1550 只、200×150 世界，用 `--bench` 连续跑 4 秒测的）：
 
-| 版本 | step 耗时 |
-|---|---|
-| JS 版（Chrome） | 2.0 ms/tick |
-| Rust 单线程（release） | 0.453 ms/tick |
-| **Rust + rayon 并行 `think()`** | **0.210 ms/tick（≈9.5×）** |
+| 版本 | step 耗时 | 相对 JS |
+|---|---|---|
+| JS 版（Chrome，1517 只） | 2.0 ms/tick | 1× |
+| Rust 单线程（`RAYON_NUM_THREADS=1`） | 0.803 ms/tick | 2.5× |
+| **Rust + rayon（按物理核数，本机 8 线程）** | **0.414 ms/tick** | **4.8×** |
 
-并行是安全的：`think()` 只读世界、只写个体自己的计划与缓冲，**且完全不碰 RNG**，
-所以 200 个检查点的摘要与串行版逐位相同。
+对应 50× 倍速（目标 3000 tps）：实测 **~2400 tps（80%）**。
+
+两个容易搞错的点：
+
+1. **别用"整轮平均"当性能数字**。种群从 9 只长到 1500 只，前几百 tick 几乎不花时间；
+   平均下来会得到 0.21 ms/tick 这种好看但没意义的值。稳态才是真实负载。
+2. **线程数按物理核数，不要用满逻辑核**。实测 8 线程 0.415 ms/tick，
+   用满全部逻辑核反而退化到 0.483 —— 超线程在这种"每 tick 一小段并行"的负载上
+   只增加调度与缓存竞争。`evosim_core::init_threads()` 已按此配置。
+
+并行安全的前提：`think()` 只读世界、只写个体自己的计划与缓冲，**且完全不碰 RNG**，
+所以所有黄金检查点的摘要与串行版逐位相同。
 
 ## 里程碑
 
 - [x] **M0** 工作区 + 黄金快照导出
 - [x] **M1** 内核移植 + 200 个检查点全一致
-- [ ] **M2** winit 窗口 + wgpu 渲染（R8 索引 + 256 色 LUT，NEAREST 采样）
+- [x] **M2** winit 窗口 + wgpu 渲染（R8 索引 + 调色板 / 物种色纹理，NEAREST 采样 + 世界环绕）
 - [ ] **M3** egui 骨架 + 自绘控件（滑块/笔刷/曲线/物种树/工坊）
 - [ ] **M4** 每格温度/辐射场 + 图层滤镜 + 悬停卡片
 - [ ] **M5** 打包单 exe（内嵌中文字体子集）

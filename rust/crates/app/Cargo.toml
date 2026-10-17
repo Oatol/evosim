@@ -1,0 +1,12 @@
+[package]
+name = "evosim-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+evosim-core = { path = "../core" }
+evosim-render = { path = "../render" }
+pollster = "1.0.1"
+wgpu = "24.0.5"
+winit = "0.30.13"

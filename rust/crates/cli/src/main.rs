@@ -25,6 +25,7 @@ fn arg_flag(args: &[String], key: &str) -> bool {
 }
 
 fn main() {
+    evosim_core::init_threads();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if arg_flag(&args, "--dump-rng") {

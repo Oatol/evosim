@@ -1,0 +1,13 @@
+[package]
+name = "evosim-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytemuck = "1.25.2"
+evosim-core = { path = "../core" }
+png = "0.18.1"
+pollster = "1.0.1"
+wgpu = "24.0.5"
+winit = "0.30.13"
