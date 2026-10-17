@@ -85,6 +85,9 @@
   后续 `crates/render`（wgpu）/ `crates/ui`（egui 骨架 + 自绘控件）/ `crates/app`
 - 界面路线：**egui 只当输入路由/文本/滚动/IME 的底座**，滑块/笔刷/色块/曲线/物种树/工坊网格用 `painter` 自绘
 - 存档：**全新二进制格式，不兼容旧档**（用户明确同意）
+- **环境场（M4）与 tick 解耦**：`World::update_fields()` 由主程序按墙钟 60 Hz 调，**不在 `step()` 里**。
+  每格一个 u8（温度 / 辐射各一张 30 KB），5 点扩散 + 向本底衰减，实测 0.154 ms/次。
+  这样 50× 倍速不会把 CPU 烧在扩散上，且场不影响黄金快照
 - **一致性靠黄金快照**：`tools/export-golden.mjs` 导出 JS 基线，
   `tools/parity-check.mjs` + `cargo test` 双向守门。当前 5 种子 × 2000 tick × 每 50 tick = 200 检查点全一致
 - 三条铁律（都踩过）：① `CELL_DEFS` 下标必须等于 id ② 压缩死亡个体必须稳定（`Vec::retain`）
@@ -113,6 +116,12 @@
 
 ## 踩过的坑（都是真发生过的）
 
+- **egui-winit 对 Tab 无条件 consume**（拿它做焦点轮换）→ 自己的 Tab 快捷键永远不执行，
+  且焦点在顶栏按钮间乱跳。必须在 `state.on_window_event()` **之前**拦下来并 return
+- **egui 同一 Order 内的图层按创建顺序绘制**（`GraphicLayers` = `IdMap<PaintList>`）→
+  想画在窗口下面，就得在**帧首先**登记那一层，否则后建的一律盖在窗口上
+- **地形格的顶层 `types` 存的就是地形自己**（HUMUS/LAVA…），所以"能不能往上放食物"
+  的判据是「`EMPTY` **或裸地形**」，只判 EMPTY 永远放不上去
 - **全屏 backdrop 遮罩**：检视器和物种树都栽过。症状是"跟随看不见""克隆永远提示先选中""关闭按钮不显眼"——
   同一个原因，改成非模态浮窗后一起消失
 - **`pause()` 里 `cancelAnimationFrame`**：暂停后准星/高亮/浮窗全冻住
