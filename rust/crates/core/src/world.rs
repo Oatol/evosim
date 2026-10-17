@@ -539,7 +539,23 @@ impl World {
     }
 
     /// 阶段 B：结算
+    ///
+    /// 外层只负责**记录检视用的两个观测量**，真正的结算在 `act_organism_inner`。
+    /// 这样做是因为 inner 里有 5 处提前 `return`（老死 / 饿死 / 被打死），
+    /// 在每个 return 前手写一遍收支会漏；包一层就只写一次。
     pub fn act_organism(&mut self, i: usize) {
+        if i >= self.organisms.len() {
+            return;
+        }
+        let before = self.organisms[i].energy;
+        self.organisms[i].last_move_ok = false;
+        self.act_organism_inner(i);
+        if let Some(org) = self.organisms.get_mut(i) {
+            org.energy_gained_last = org.energy - before;
+        }
+    }
+
+    fn act_organism_inner(&mut self, i: usize) {
         // 年龄
         self.organisms[i].age += 1;
         let lifespan = self.organisms[i].lifespan(&self.config);
@@ -622,6 +638,7 @@ impl World {
         let d = self.organisms[i].plan_direction;
         self.organisms[i].direction = d & 3;
         if self.attempt_move(i) {
+            self.organisms[i].last_move_ok = true;
             return;
         }
 

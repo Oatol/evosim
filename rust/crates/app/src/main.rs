@@ -11,6 +11,7 @@
 
 mod paint;
 mod panels;
+mod inspector;
 mod ui;
 mod workshop;
 mod world_panel;

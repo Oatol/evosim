@@ -7,7 +7,6 @@ use std::collections::VecDeque;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Sense, Stroke, StrokeKind};
 
-use evosim_core::anatomy::Flags;
 use evosim_core::world::World;
 use evosim_render::colors::species_rgb;
 
@@ -35,6 +34,8 @@ pub struct Panels {
     pub show_inspector: bool,
     pub show_species: bool,
     pub show_chart: bool,
+    /// 神经网络图是否画全部权重（默认只画强连接）
+    pub brain_show_all: bool,
 }
 
 impl Default for Panels {
@@ -50,6 +51,7 @@ impl Default for Panels {
             show_inspector: true,
             show_species: true,
             show_chart: true,
+            brain_show_all: false,
         }
     }
 }
@@ -122,11 +124,14 @@ impl Panels {
                     egui::Window::new("检视器")
                         .resizable(false)
                         .collapsible(false)
+                        // `resizable(false)` 下 default_width 只是建议，必须钉住 min/max
+                        .min_width(452.0)
+                        .max_width(452.0)
                         .open(&mut open)
                         // 放在工具栏右侧，别被工具窗挡住
                         .default_pos([230.0, 42.0])
                         .show(ctx, |ui| {
-                            inspector_body(ui, world, org, self, &mut act);
+                            crate::inspector::draw_body(ui, world, org, self, &mut act);
                         });
                     if !open {
                         act.clear_selection = true;
@@ -190,121 +195,6 @@ impl Panels {
         }
 
         act
-    }
-}
-
-fn inspector_body(
-    ui: &mut egui::Ui,
-    world: &World,
-    org: &evosim_core::organism::Organism,
-    panels: &mut Panels,
-    act: &mut PanelActions,
-) {
-    let cfg = &world.config;
-    let sp_name = org
-        .species_fingerprint
-        .as_deref()
-        .and_then(|fp| world.species.by_fingerprint(fp))
-        .map(|s| s.name.clone())
-        .unwrap_or_else(|| "?".to_string());
-
-    ui.label(
-        egui::RichText::new(format!("个体 #{} · 物种 {}", org.id, sp_name))
-            .strong()
-            .color(TEXT),
-    );
-    ui.label(
-        egui::RichText::new(format!(
-            "位置 ({}, {}) · 朝向 {} · 身体朝向 {}",
-            org.col, org.row, org.direction, org.rotation
-        ))
-        .color(TEXT_DIM),
-    );
-
-    ui.add_space(3.0);
-    egui::Grid::new("org-stats")
-        .num_columns(2)
-        .spacing([10.0, 2.0])
-        .show(ui, |ui| {
-            ui.label("能量");
-            ui.label(format!(
-                "{:.1} / {:.0}",
-                org.energy,
-                org.reproduce_at(cfg)
-            ));
-            ui.end_row();
-            ui.label("年龄");
-            ui.label(format!("{} / {:.0}", org.age, org.lifespan(cfg)));
-            ui.end_row();
-            ui.label("生命");
-            ui.label(format!(
-                "{:.1} / {:.0}",
-                org.max_health(cfg) - org.damage,
-                org.max_health(cfg)
-            ));
-            ui.end_row();
-            ui.label("体型");
-            ui.label(format!("{} 格", org.cell_count()));
-            ui.end_row();
-            ui.label("变异率");
-            ui.label(format!("{:.1}%", org.mutability));
-            ui.end_row();
-        });
-
-    ui.add_space(3.0);
-    ui.label(egui::RichText::new("结构").color(TEXT_DIM));
-    ui.label(org.anatomy.describe());
-
-    // 能力徽章
-    ui.horizontal_wrapped(|ui| {
-        for (bit, name) in [
-            (Flags::MOVER, "移动"),
-            (Flags::EYE, "视觉"),
-            (Flags::MOUTH, "进食"),
-            (Flags::PRODUCER, "造食"),
-            (Flags::KILLER, "攻击"),
-            (Flags::ARMOR, "装甲"),
-            (Flags::STORAGE, "储备"),
-            (Flags::REGEN, "再生"),
-            (Flags::SPIKE, "反伤"),
-        ] {
-            if org.anatomy.has(bit) {
-                ui.label(egui::RichText::new(name).color(ACCENT).size(11.0));
-            }
-        }
-    });
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(panels.pinned, "图钉")
-            .on_hover_text("锁定检视目标：锁上后用「检视」点画布不会切换、也不会清空当前个体")
-            .clicked()
-        {
-            panels.pinned = !panels.pinned;
-        }
-        if ui
-            .selectable_label(panels.follow, "跟随")
-            .on_hover_text("相机每帧对准这个个体")
-            .clicked()
-        {
-            panels.follow = !panels.follow;
-        }
-        if ui.button("居中").clicked() {
-            act.center_on = Some(org.id);
-        }
-        if ui.button("关闭").clicked() {
-            act.clear_selection = true;
-        }
-    });
-    ui.checkbox(&mut panels.highlight_species, "高亮同物种")
-        .on_hover_text("除了它自己，把它物种的其他个体也用该物种的颜色标出来");
-    if panels.pinned {
-        ui.label(
-            egui::RichText::new("已锁定：点画布不会换目标")
-                .color(ACCENT)
-                .size(11.0),
-        );
     }
 }
 

@@ -50,6 +50,16 @@ pub struct Organism {
     pub plan_turn: bool,
     pub plan_direction: u8,
     pub turn_cooldown: i32,
+
+    // ── 仅供检视器显示，不参与模拟 ──
+    //
+    // 这两项**绝不能进 `state_digest`**：摘要要跟 JS 基线逐位对齐，
+    // 而 JS 版没有这两个字段。放在结构体里只是图省事（跟着个体走，
+    // 死亡/压缩自动清理），不影响任何决策路径。
+    /// 上一 tick 是否真的挪动了（被挡住 / 只在转身 → false）
+    pub last_move_ok: bool,
+    /// 上一 tick 的能量净收支（正=赚了，负=亏了）
+    pub energy_gained_last: f64,
 }
 
 impl Organism {
@@ -77,6 +87,8 @@ impl Organism {
             plan_turn: false,
             plan_direction: 0,
             turn_cooldown: 0,
+            last_move_ok: false,
+            energy_gained_last: 0.0,
         };
         org.normalize_position(grid);
         org
