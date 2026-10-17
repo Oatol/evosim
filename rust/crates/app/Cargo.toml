@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
 evosim-core = { path = "../core" }
 evosim-render = { path = "../render" }
 pollster = "1.0.1"

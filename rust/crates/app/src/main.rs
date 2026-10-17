@@ -1,15 +1,20 @@
-//! evosim 2.0 —— 原生窗口（M2：世界渲染 + 相机 + 着色模式 + 暂停/调速）。
+//! evosim 2.0 —— 原生窗口（M2 渲染 + M3 界面）。
 //!
 //! 用法：
 //!   evosim-app                                   打开窗口
 //!   evosim-app --screenshot out.png --ticks 500  离屏渲染一张 PNG（不需要窗口）
+//!   evosim-app --bench --seconds 4 --speed 50    无窗口稳态压测
 //!
 //! 快捷键：空格 暂停/继续 · S 单步 · [ ] 调速 · Tab 类型/物种着色 · F 适应窗口 · Esc 退出
-//! 鼠标：滚轮以光标为锚缩放 · 右键/中键拖动平移
+//! 鼠标：左键落笔（画笔工具）· 滚轮以光标为锚缩放 · 右键/中键拖动平移
+
+mod paint;
+mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
 
+use evosim_core::cell_type::{self, ct};
 use evosim_core::config::Config;
 use evosim_core::factory::{seed_origin_of_life, spawn_population};
 use evosim_core::rng::Rng;
@@ -38,40 +43,6 @@ fn args_have(key: &str) -> bool {
     std::env::args().any(|a| a == key)
 }
 
-/// 无窗口压测：给定倍速跑 N 秒，报告实际 tps 与单 tick 耗时
-fn bench(seed: u32, pop: usize, seconds: f64, speed: f64) {
-    let mut world = build_world(seed, pop);
-    let target = 60.0 * speed;
-
-    // 预热，让种群长到稳态
-    for _ in 0..600 {
-        world.step();
-    }
-
-    let t0 = Instant::now();
-    let mut ticks: u64 = 0;
-    while t0.elapsed().as_secs_f64() < seconds {
-        // 每个 tick 都跑，不做节流 —— 测的是"能不能跟上"，不是"节流后多准"
-        world.step();
-        ticks += 1;
-    }
-    let elapsed = t0.elapsed().as_secs_f64();
-    let tps = ticks as f64 / elapsed;
-    let stats = world.snapshot_stats();
-
-    println!(
-        "压测 {:.1} 秒（目标 {:.0} tps）· 实际 {:.0} tps（{:.0}%）· {:.3} ms/tick · 种群 {} · 食物 {} · 物种 {}",
-        elapsed,
-        target,
-        tps,
-        tps / target * 100.0,
-        elapsed * 1000.0 / ticks as f64,
-        stats.organisms,
-        stats.food,
-        world.species.size()
-    );
-}
-
 fn build_world(seed: u32, pop: usize) -> World {
     let mut world = World::new(Config::default(), Rng::new(seed));
     generate_demo_world(&mut world, 1.0, 1.0);
@@ -82,6 +53,7 @@ fn build_world(seed: u32, pop: usize) -> World {
 
 fn main() {
     evosim_core::init_threads();
+
     let seed: u32 = arg_value("--seed")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20_261_015);
@@ -94,7 +66,9 @@ fn main() {
         let seconds: f64 = arg_value("--seconds")
             .and_then(|v| v.parse().ok())
             .unwrap_or(3.0);
-        let speed: f64 = arg_value("--speed").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let speed: f64 = arg_value("--speed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
         bench(seed, pop, seconds, speed);
         return;
     }
@@ -170,6 +144,38 @@ fn screenshot(path: &str, seed: u32, pop: usize, ticks: u64, width: u32, height:
     );
 }
 
+/// 无窗口压测：给定倍速跑 N 秒，报告实际 tps 与单 tick 耗时
+fn bench(seed: u32, pop: usize, seconds: f64, speed: f64) {
+    let mut world = build_world(seed, pop);
+    let target = 60.0 * speed;
+
+    for _ in 0..600 {
+        world.step();
+    }
+
+    let t0 = Instant::now();
+    let mut ticks: u64 = 0;
+    while t0.elapsed().as_secs_f64() < seconds {
+        world.step();
+        ticks += 1;
+    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    let tps = ticks as f64 / elapsed;
+    let stats = world.snapshot_stats();
+
+    println!(
+        "压测 {:.1} 秒（目标 {:.0} tps）· 实际 {:.0} tps（{:.0}%）· {:.3} ms/tick · 种群 {} · 食物 {} · 物种 {}",
+        elapsed,
+        target,
+        tps,
+        tps / target * 100.0,
+        elapsed * 1000.0 / ticks as f64,
+        stats.organisms,
+        stats.food,
+        world.species.size()
+    );
+}
+
 struct App {
     seed: u32,
     pop: usize,
@@ -184,7 +190,6 @@ struct App {
     camera: Camera,
     paused: bool,
     speed_idx: usize,
-    /// 离散步进累加器
     acc: f64,
     last: Instant,
 
@@ -196,10 +201,21 @@ struct App {
 
     dragging: bool,
     last_cursor: (f64, f64),
+    painting: bool,
+    hover_cell: Option<(i32, i32)>,
+
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    egui_renderer: Option<egui_wgpu::Renderer>,
+    ui: ui::UiState,
+    /// egui 是否吃掉了指针（吃掉就不落笔）
+    ui_wants_pointer: bool,
 }
 
 impl App {
     fn new(seed: u32, pop: usize, pre_ticks: u64) -> Self {
+        let egui_ctx = egui::Context::default();
+        ui::configure(&egui_ctx);
         App {
             seed,
             pop,
@@ -221,6 +237,13 @@ impl App {
             ticks_this_second: 0,
             dragging: false,
             last_cursor: (0.0, 0.0),
+            painting: false,
+            hover_cell: None,
+            egui_ctx,
+            egui_state: None,
+            egui_renderer: None,
+            ui: ui::UiState::default(),
+            ui_wants_pointer: false,
         }
     }
 
@@ -292,6 +315,17 @@ impl App {
             world.step();
         }
         let (cols, rows) = (world.grid.cols as u32, world.grid.rows as u32);
+
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(device.limits().max_texture_dimension_2d as usize),
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
+
         let mut renderer = GridRenderer::new(device, queue, format, cols, rows);
         renderer.upload_types(&world);
         renderer.upload_species(&world);
@@ -311,13 +345,15 @@ impl App {
             cols,
             rows
         );
-        println!("快捷键：空格 暂停 · S 单步 · [ ] 调速 · Tab 着色模式 · F 适应窗口 · Esc 退出");
+        println!("空格 暂停 · S 单步 · [ ] 调速 · Tab 着色 · F 适应 · 左键画 · 右键拖 · 滚轮缩放");
 
         self.window = Some(window);
         self.surface = Some(surface);
         self.config = Some(config);
         self.renderer = Some(renderer);
         self.world = Some(world);
+        self.egui_state = Some(egui_state);
+        self.egui_renderer = Some(egui_renderer);
         self.last = Instant::now();
     }
 
@@ -342,21 +378,164 @@ impl App {
             }
         }
         if steps == 400 {
-            self.acc = 0.0; // 追不上就丢掉积压
+            self.acc = 0.0;
         }
         if steps > 0 {
-            if let (Some(renderer), Some(world)) =
-                (self.renderer.as_mut(), self.world.as_ref())
-            {
-                renderer.upload_types(world);
+            self.upload_world();
+        }
+    }
+
+    fn upload_world(&mut self) {
+        if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
+            renderer.upload_types(world);
+            if renderer.mode == 1 {
+                renderer.upload_species(world);
+            }
+        }
+    }
+
+    /// 悬停读数：光标所在格子的类型 / 归属个体 / 能量
+    fn update_hover(&mut self) {
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let Some((col, row)) = self.hover_cell else {
+            self.ui.hover.clear();
+            return;
+        };
+        let Some(idx) = world.grid.index(col, row) else {
+            self.ui.hover.clear();
+            return;
+        };
+
+        let ty = world.grid.types[idx];
+        let owner = world.grid.owners[idx];
+        let floor = world.grid.floor[idx];
+
+        let mut text = format!("({}, {}) {}", col, row, cell_type::label(ty));
+        if floor != ty && floor != ct::EMPTY {
+            text.push_str(&format!("（地形：{}）", cell_type::label(floor)));
+        }
+        if owner >= 0 {
+            if let Some(org) = world.organism(owner as u32) {
+                let sp = org
+                    .species_fingerprint
+                    .as_deref()
+                    .and_then(|fp| world.species.by_fingerprint(fp))
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "?".to_string());
+                text.push_str(&format!(
+                    " · 个体 #{} · {} · 能量 {:.1}/{:.0} · 体型 {}",
+                    org.id,
+                    sp,
+                    org.energy,
+                    org.reproduce_at(&world.config),
+                    org.cell_count()
+                ));
+            }
+        }
+        self.ui.hover = text;
+    }
+
+    fn apply_ui_actions(&mut self, act: ui::UiActions) {
+        if act.toggle_pause {
+            self.paused = !self.paused;
+            self.last = Instant::now();
+            self.acc = 0.0;
+        }
+        if act.step_once {
+            self.paused = true;
+            if let Some(world) = self.world.as_mut() {
+                world.step();
+            }
+            self.upload_world();
+        }
+        if act.speed_delta != 0 {
+            let i = self.speed_idx as i32 + act.speed_delta;
+            self.speed_idx = i.clamp(0, SPEEDS.len() as i32 - 1) as usize;
+        }
+        if act.toggle_mode {
+            if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
+                renderer.set_mode(if renderer.mode == 0 { 1 } else { 0 });
                 if renderer.mode == 1 {
                     renderer.upload_species(world);
                 }
             }
         }
+        if act.fit {
+            if let (Some(world), Some(config)) = (self.world.as_ref(), self.config.as_ref()) {
+                self.camera.fit_grid(
+                    world.grid.cols,
+                    world.grid.rows,
+                    config.width as f32,
+                    config.height as f32,
+                    20.0,
+                );
+            }
+        }
+    }
+
+    fn paint_at_cursor(&mut self) {
+        if self.ui.tool != ui::Tool::Paint || self.ui_wants_pointer {
+            return;
+        }
+        let Some((col, row)) = self.hover_cell else {
+            return;
+        };
+        if let Some(world) = self.world.as_mut() {
+            paint::apply_brush(world, col, row, self.ui.brush, self.ui.brush_size);
+        }
+        self.upload_world();
     }
 
     fn draw(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        // ── 1) egui：喂输入 → 建 UI → 拿到三角形 ──
+        let raw = match self.egui_state.as_mut() {
+            Some(s) => s.take_egui_input(&window),
+            None => return,
+        };
+
+        let hud = ui::HudInfo {
+            fps: self.fps,
+            tps: self.tps,
+            speed: SPEEDS[self.speed_idx],
+            paused: self.paused,
+            mode: self.renderer.as_ref().map(|r| r.mode).unwrap_or(0),
+        };
+
+        let ctx = self.egui_ctx.clone();
+        let mut actions = ui::UiActions::default();
+        {
+            let ui_state = &mut self.ui;
+            let world = match self.world.as_mut() {
+                Some(w) => w,
+                None => return,
+            };
+            let full = ctx.run(raw, |ctx| {
+                actions = ui::draw(ctx, ui_state, world, &hud);
+            });
+            if let Some(state) = self.egui_state.as_mut() {
+                state.handle_platform_output(&window, full.platform_output);
+            }
+            self.apply_ui_actions(std::mem::take(&mut actions));
+            self.ui_wants_pointer = self.egui_ctx.wants_pointer_input();
+
+            let tris = ctx.tessellate(full.shapes, full.pixels_per_point);
+            self.render_frame(&tris, full.pixels_per_point, &full.textures_delta);
+        }
+    }
+
+    /// 世界 + UI 一帧
+    fn render_frame(
+        &mut self,
+        tris: &[egui::ClippedPrimitive],
+        pixels_per_point: f32,
+        textures: &egui::TexturesDelta,
+    ) {
         let (Some(renderer), Some(surface), Some(config)) = (
             self.renderer.as_mut(),
             self.surface.as_ref(),
@@ -372,7 +551,51 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 世界（清屏）
         renderer.draw(&view, config.width, config.height, &self.camera);
+
+        // UI（叠在上面）
+        if self.egui_renderer.is_some() {
+            // 注意：`egui_wgpu::Renderer::render` 的签名把 render pass 的生命周期
+            // 和渲染器的借用绑在一起，所以"更新资源（&mut）"与"录 pass（&self）"
+            // 必须分成两段借用，否则 encoder 会被误判为活得不够久。
+            if let Some(r) = self.egui_renderer.as_mut() {
+                for (id, delta) in &textures.set {
+                    r.update_texture(&renderer.device, &renderer.queue, *id, delta);
+                }
+            }
+            let screen = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [config.width, config.height],
+                pixels_per_point,
+            };
+            let mut encoder =
+                renderer
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("egui"),
+                    });
+            let cmds = match self.egui_renderer.as_mut() {
+                Some(r) => r.update_buffers(
+                    &renderer.device,
+                    &renderer.queue,
+                    &mut encoder,
+                    tris,
+                    &screen,
+                ),
+                None => Vec::new(),
+            };
+            if let Some(r) = self.egui_renderer.as_mut() {
+                record_egui_pass(r, &mut encoder, &view, tris, &screen);
+            }
+            renderer.queue.submit(cmds.into_iter().chain([encoder.finish()]));
+            if let Some(r) = self.egui_renderer.as_mut() {
+                for id in &textures.free {
+                    r.free_texture(id);
+                }
+            }
+        }
+
         frame.present();
 
         self.frames += 1;
@@ -383,44 +606,6 @@ impl App {
             self.frames = 0;
             self.ticks_this_second = 0;
             self.fps_timer = Instant::now();
-
-            if let Some(world) = self.world.as_ref() {
-                let stats = world.snapshot_stats();
-                if let Some(win) = self.window.as_ref() {
-                    win.set_title(&format!(
-                        "evosim 2.0 · tick {} · {} 只 · 食物 {} · 物种 {} · {:.0} fps · {:.0} tps · {:.0}× {}",
-                        world.tick,
-                        stats.organisms,
-                        stats.food,
-                        world.species.size(),
-                        self.fps,
-                        self.tps,
-                        SPEEDS[self.speed_idx],
-                        if self.paused { "（暂停）" } else { "" },
-                    ));
-                }
-            }
-        }
-    }
-
-    fn toggle_mode(&mut self) {
-        if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
-            renderer.set_mode(if renderer.mode == 0 { 1 } else { 0 });
-            if renderer.mode == 1 {
-                renderer.upload_species(world);
-            }
-        }
-    }
-
-    fn fit_window(&mut self) {
-        if let (Some(world), Some(config)) = (self.world.as_ref(), self.config.as_ref()) {
-            self.camera.fit_grid(
-                world.grid.cols,
-                world.grid.rows,
-                config.width as f32,
-                config.height as f32,
-                20.0,
-            );
         }
     }
 }
@@ -433,6 +618,15 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // 先让 egui 处理（它决定指针/键盘是否被 UI 吃掉）
+        let egui_consumed = if let (Some(state), Some(window)) =
+            (self.egui_state.as_mut(), self.window.as_ref())
+        {
+            state.on_window_event(window, &event).consumed
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -447,11 +641,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.update_hover();
                 self.step_simulation();
                 self.draw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
+                if egui_consumed || event.state != ElementState::Pressed {
                     return;
                 }
                 match event.physical_key {
@@ -466,11 +661,7 @@ impl ApplicationHandler for App {
                         if let Some(world) = self.world.as_mut() {
                             world.step();
                         }
-                        if let (Some(renderer), Some(world)) =
-                            (self.renderer.as_mut(), self.world.as_ref())
-                        {
-                            renderer.upload_types(world);
-                        }
+                        self.upload_world();
                     }
                     PhysicalKey::Code(KeyCode::BracketRight) => {
                         self.speed_idx = (self.speed_idx + 1).min(SPEEDS.len() - 1);
@@ -478,12 +669,25 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::BracketLeft) => {
                         self.speed_idx = self.speed_idx.saturating_sub(1);
                     }
-                    PhysicalKey::Code(KeyCode::Tab) => self.toggle_mode(),
-                    PhysicalKey::Code(KeyCode::KeyF) => self.fit_window(),
+                    PhysicalKey::Code(KeyCode::Tab) => {
+                        self.apply_ui_actions(ui::UiActions {
+                            toggle_mode: true,
+                            ..Default::default()
+                        });
+                    }
+                    PhysicalKey::Code(KeyCode::KeyF) => {
+                        self.apply_ui_actions(ui::UiActions {
+                            fit: true,
+                            ..Default::default()
+                        });
+                    }
                     _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if egui_consumed {
+                    return;
+                }
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 50.0,
@@ -503,13 +707,29 @@ impl ApplicationHandler for App {
                     self.camera.pan_pixels(dx, dy);
                 }
                 self.last_cursor = (x, y);
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                let pan_button = matches!(button, MouseButton::Right | MouseButton::Middle);
-                if pan_button {
-                    self.dragging = state == ElementState::Pressed;
+                let (c, r) = paint::screen_to_cell(&self.camera, x as f32, y as f32);
+                self.hover_cell = Some((c, r));
+
+                if self.painting {
+                    self.paint_at_cursor();
                 }
             }
+            WindowEvent::MouseInput { state, button, .. } => match button {
+                MouseButton::Left => {
+                    if state == ElementState::Pressed {
+                        if !self.egui_ctx.wants_pointer_input() {
+                            self.painting = true;
+                            self.paint_at_cursor();
+                        }
+                    } else {
+                        self.painting = false;
+                    }
+                }
+                MouseButton::Right | MouseButton::Middle => {
+                    self.dragging = state == ElementState::Pressed;
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -519,4 +739,38 @@ impl ApplicationHandler for App {
             win.request_redraw();
         }
     }
+}
+
+/// 录一帧 egui 的渲染 pass。
+///
+/// 单独成函数是因为 `egui_wgpu::Renderer::render` 的签名把 render pass 的
+/// 生命周期与渲染器的借用绑成同一个 `'a`；写在 `render_frame` 里时编译器会把
+/// `'a` 推到整个函数，于是 `encoder` 被判定"活得不够久"。放进函数参数里，
+/// `'a` 就自然收窄成函数体。
+fn record_egui_pass(
+    egui_renderer: &mut egui_wgpu::Renderer,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    tris: &[egui::ClippedPrimitive],
+    screen: &egui_wgpu::ScreenDescriptor,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("egui-pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    // egui-wgpu 的 render 要求 `RenderPass<'static>`，所以这里用 forget_lifetime()
+    // 把 pass 的生命周期抹掉（wgpu 的官方推荐写法，安全性由调用顺序保证：
+    // pass 在 encoder.finish() 之前就 drop 了）。
+    let mut pass_static = pass.forget_lifetime();
+    egui_renderer.render(&mut pass_static, tris, screen);
 }
