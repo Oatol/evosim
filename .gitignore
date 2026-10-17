@@ -22,3 +22,6 @@ desktop.ini
 # 调试截图：tools/shot.ps1 默认落在仓库根，验 UI 时会攒一堆。
 # 只忽略根目录，rust/shots/ 下那几张是文档用的，照常入库。
 /*.png
+
+# 写长 commit message 用的临时文件
+.git-commit-msg.txt
