@@ -354,7 +354,8 @@ impl App {
             cols,
             rows
         );
-        println!("空格 暂停 · S 单步 · [ ] 调速 · Tab 着色 · F 适应 · 左键画 · 右键拖 · 滚轮缩放");
+        println!("空格 暂停 · S 单步 · [ ] 调速 · Tab 着色 · F 适应 · G 工坊 · Esc 退出");
+        println!("左键：画笔落笔 / 平移拖动 / 检视选中 · 滚轮缩放 · 右键或中键随时平移");
 
         self.window = Some(window);
         self.surface = Some(surface);
@@ -489,6 +490,9 @@ impl App {
             self.panels.selected_org = None;
             self.panels.follow = false;
         }
+        if act.toggle_workshop {
+            self.workshop.open = !self.workshop.open;
+        }
     }
 
     fn view_size(&self) -> (f32, f32) {
@@ -575,7 +579,14 @@ impl App {
         }
 
         if let Some(world) = self.world.as_mut() {
-            paint::apply_brush(world, col, row, self.ui.brush, self.ui.brush_size);
+            paint::apply_brush(
+                world,
+                col,
+                row,
+                self.ui.brush,
+                self.ui.brush_size,
+                self.ui.brush_shape,
+            );
         }
         self.upload_world();
     }
@@ -597,6 +608,7 @@ impl App {
             speed: SPEEDS[self.speed_idx],
             paused: self.paused,
             mode: self.renderer.as_ref().map(|r| r.mode).unwrap_or(0),
+            workshop_open: self.workshop.open,
         };
 
         let (vw, vh) = self.view_size();
@@ -849,11 +861,17 @@ impl ApplicationHandler for App {
                                     self.paint_at_cursor();
                                 }
                                 ui::Tool::Inspect => self.inspect_at_cursor(),
-                                ui::Tool::Pan => {}
+                                ui::Tool::Pan => {
+                                    // 平移工具：左键拖动即可平移（右键/中键任何时候都能拖）
+                                    self.dragging = true;
+                                }
                             }
                         }
                     } else {
                         self.painting = false;
+                        if self.ui.tool == ui::Tool::Pan {
+                            self.dragging = false;
+                        }
                     }
                 }
                 MouseButton::Right | MouseButton::Middle => {

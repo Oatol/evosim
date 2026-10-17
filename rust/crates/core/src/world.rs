@@ -455,6 +455,29 @@ impl World {
         self.apply_terrain_tick();
         self.apply_food_decay();
         self.apply_food_drop();
+
+        // ── 物种统计 ──
+        //
+        // 1.x 是在统计采样时调 `species.update()` 的；2.0 漏了这一步，
+        // 结果所有物种的 population 恒为 0 —— 物种面板是空的、存活/峰值/灭绝全是 0。
+        // 这里按 statsInterval 重算一次（不消耗 RNG、不写网格，所以不影响黄金快照）。
+        if self.config.stats.interval > 0 && self.tick % self.config.stats.interval == 0 {
+            let World {
+                organisms,
+                species,
+                tick,
+                config,
+                ..
+            } = self;
+            let fps: Vec<std::sync::Arc<str>> = organisms
+                .iter()
+                .filter_map(|o| o.species_fingerprint.clone())
+                .collect();
+            species.update(fps.iter(), *tick);
+            if species.list.len() > crate::species::MAX_SPECIES {
+                species.prune(crate::species::MAX_SPECIES, config.stats.min_discard);
+            }
+        }
     }
 
     /// 阶段 A：全体感知 + 决策。
@@ -1068,4 +1091,41 @@ pub struct OrgStats {
     pub killers: usize,
     pub avg_age: f64,
     pub avg_mutability: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::factory::{seed_origin_of_life, spawn_population};
+    use crate::worldgen::generate_demo_world;
+
+    /// 回归：物种统计必须被 step 更新
+    ///
+    /// 曾经的 bug：`species.update()` 从来没被调用，于是 population 恒为 0 ——
+    /// 物种面板空、存活/峰值/灭绝全是 0。
+    #[test]
+    fn species_stats_are_updated_by_step() {
+        let mut w = World::new(Config::default(), Rng::new(1001));
+        generate_demo_world(&mut w, 1.0, 1.0);
+        seed_origin_of_life(&mut w);
+        spawn_population(&mut w, 8, 3);
+
+        for _ in 0..100 {
+            w.step();
+        }
+
+        assert!(w.species.alive_count > 0, "存活物种数应大于 0");
+        assert!(w.species.peak_alive_count > 0, "峰值存活应大于 0");
+
+        let total: u32 = w.species.list.iter().map(|s| s.population).sum();
+        assert_eq!(
+            total as usize,
+            w.organisms.len(),
+            "各物种个体数之和应等于种群数"
+        );
+
+        // 每个存活物种的 population 都应该 > 0
+        let alive = w.species.list.iter().filter(|s| s.population > 0).count();
+        assert_eq!(alive, w.species.alive_count, "存活计数应与实际相符");
+    }
 }

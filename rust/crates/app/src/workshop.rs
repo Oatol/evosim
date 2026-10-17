@@ -122,9 +122,11 @@ impl Workshop {
             return act;
         }
 
+        let mut open = self.open;
         egui::Window::new("物种工坊")
             .resizable(false)
             .collapsible(false)
+            .open(&mut open)
             .default_pos([300.0, 60.0])
             .default_size([640.0, 520.0])
             .show(ctx, |ui| {
@@ -305,6 +307,7 @@ impl Workshop {
                     });
                 });
             });
+        self.open = open;
 
         act
     }

@@ -11,7 +11,7 @@ use evosim_core::cell_type::{self, ct, TERRAIN_BRUSH_TYPES};
 use evosim_core::world::World;
 use evosim_render::colors::build_palette;
 
-use crate::paint::ERASER;
+use crate::paint::{BrushShape, ERASER};
 use crate::panels::Panels;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub enum Tool {
 pub struct UiState {
     pub brush: u8,
     pub brush_size: i32,
+    pub brush_shape: BrushShape,
     pub tool: Tool,
     pub hover: String,
     pub show_tools: bool,
@@ -38,6 +39,7 @@ impl Default for UiState {
         UiState {
             brush: ct::WALL,
             brush_size: 1,
+            brush_shape: BrushShape::Square,
             tool: Tool::Paint,
             hover: String::new(),
             show_tools: true,
@@ -64,6 +66,7 @@ pub struct HudInfo {
     pub speed: f32,
     pub paused: bool,
     pub mode: u32,
+    pub workshop_open: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +79,7 @@ pub struct UiActions {
     pub wants_pointer: bool,
     pub center_on: Option<u32>,
     pub clear_selection: bool,
+    pub toggle_workshop: bool,
 }
 
 pub const BG: Color32 = Color32::from_rgb(13, 17, 23);
@@ -196,7 +200,21 @@ pub fn draw(
                 ui.label(format!("{:.0} fps · {:.0} tps", hud.fps, hud.tps));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("适应 F").clicked() {
+                    if ui
+                        .selectable_label(hud.workshop_open, "工坊 G")
+                        .on_hover_text("物种工坊：手绘蓝图 + 生物库")
+                        .clicked()
+                    {
+                        act.toggle_workshop = true;
+                    }
+                    if ui
+                        .selectable_label(st.show_tools, "工具")
+                        .on_hover_text("左侧工具栏与笔刷")
+                        .clicked()
+                    {
+                        st.show_tools = !st.show_tools;
+                    }
+                    if ui.button("适应窗口").on_hover_text("快捷键 F").clicked() {
                         act.fit = true;
                     }
                     if ui
@@ -228,9 +246,11 @@ pub fn draw(
 
     // ── 左侧：工具 + 笔刷 ──
     if st.show_tools {
+        let mut tools_open = st.show_tools;
         egui::Window::new("工具")
             .resizable(false)
             .collapsible(false)
+            .open(&mut tools_open)
             .default_pos([10.0, 42.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -261,6 +281,17 @@ pub fn draw(
 
                 ui.add_space(2.0);
                 ui.add(egui::Slider::new(&mut st.brush_size, 1..=12).text("大小"));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("形状").color(TEXT_DIM));
+                    for shape in BrushShape::all() {
+                        if ui
+                            .selectable_label(st.brush_shape == shape, shape.label())
+                            .clicked()
+                        {
+                            st.brush_shape = shape;
+                        }
+                    }
+                });
                 let hint = if st.brush == ERASER {
                     "正在擦：地形（生物与食物不动）".to_string()
                 } else {
@@ -268,13 +299,16 @@ pub fn draw(
                 };
                 ui.label(egui::RichText::new(hint).color(TEXT_DIM).size(11.0));
             });
+        st.show_tools = tools_open;
     }
 
     // ── 右侧：关键参数 ──
     if st.show_params {
+        let mut params_open = st.show_params;
         egui::Window::new("参数")
             .resizable(false)
             .collapsible(true)
+            .open(&mut params_open)
             .default_pos([1100.0, 42.0])
             .show(ctx, |ui| {
                 let cfg = &mut world.config;
@@ -313,6 +347,7 @@ pub fn draw(
                         .step_by(1.0),
                 );
             });
+        st.show_params = params_open;
     }
 
     // ── 面板：检视器 / 物种 / 曲线 ──
@@ -366,6 +401,9 @@ pub fn draw(
                     .stroke(Stroke::new(1.0, BORDER))
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
+                        // 不让它按窄宽度竖排：强制单行 + 给足最大宽度
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.set_max_width(760.0);
                         ui.label(egui::RichText::new(&st.hover).size(11.0).color(TEXT));
                     });
             });
@@ -469,6 +507,7 @@ mod tests {
             speed: 1.0,
             paused: false,
             mode: 0,
+            workshop_open: false,
         };
         let view = ViewInfo {
             cam_x: 0.0,

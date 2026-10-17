@@ -98,35 +98,47 @@ impl Panels {
         if self.show_inspector {
             if let Some(id) = self.selected_org {
                 if let Some(org) = world.organism(id) {
+                    let mut open = true;
                     egui::Window::new("检视器")
                         .resizable(false)
                         .collapsible(false)
-                        .default_pos([10.0, 300.0])
+                        .open(&mut open)
+                        // 放在工具栏右侧，别被工具窗挡住
+                        .default_pos([230.0, 42.0])
                         .show(ctx, |ui| {
                             inspector_body(ui, world, org, self, &mut act);
                         });
+                    if !open {
+                        act.clear_selection = true;
+                    }
                 }
             }
         }
 
         if self.show_species {
+            let mut open = self.show_species;
             egui::Window::new("物种")
                 .resizable(true)
-                .default_size([300.0, 260.0])
-                .default_pos([10.0, 470.0])
+                .default_size([320.0, 280.0])
+                .open(&mut open)
+                .default_pos([10.0, 420.0])
                 .show(ctx, |ui| {
                     species_body(ui, world, self, highlight);
                 });
+            self.show_species = open;
         }
 
         if self.show_chart {
+            let mut open = self.show_chart;
             egui::Window::new("曲线")
                 .resizable(false)
                 .collapsible(true)
-                .default_pos([1100.0, 300.0])
+                .open(&mut open)
+                .default_pos([1080.0, 330.0])
                 .show(ctx, |ui| {
                     chart_body(ui, self);
                 });
+            self.show_chart = open;
         }
 
         act
