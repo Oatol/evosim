@@ -113,11 +113,39 @@ fn screenshot(path: &str, seed: u32, pop: usize, ticks: u64, width: u32, height:
     renderer.upload_types(&world);
     renderer.upload_species(&world);
 
-    let mode = if arg_value("--mode").as_deref() == Some("species") {
-        1
-    } else {
-        0
+    let mode = match arg_value("--mode").as_deref() {
+        Some("species") => 1,
+        Some("temp") => 2,
+        Some("rad") => 3,
+        _ => 0,
     };
+
+    // 场滤镜截图：铺几摊岩浆 / 辐射带，跑一会儿场再拍，否则拍到的是全黑
+    if mode >= 2 {
+        for (c, r, w, h) in [(30, 30, 8, 5), (120, 90, 10, 6), (60, 120, 6, 4)] {
+            for rr in r..r + h {
+                for cc in c..c + w {
+                    world.set_cell(cc, rr, ct::LAVA, -1);
+                }
+            }
+        }
+        for (c, r, w, h) in [(150, 40, 7, 5), (90, 130, 6, 4)] {
+            for rr in r..r + h {
+                for cc in c..c + w {
+                    world.set_cell(cc, rr, ct::RAD, -1);
+                }
+            }
+        }
+        for _ in 0..120 {
+            world.update_fields();
+        }
+        let data = if mode == 2 {
+            world.fields.temp.clone()
+        } else {
+            world.fields.rad.clone()
+        };
+        renderer.upload_field(&data);
+    }
     renderer.set_mode(mode);
 
     let mut cam = Camera::new(4.0);
@@ -193,6 +221,8 @@ struct App {
     paused: bool,
     speed_idx: usize,
     acc: f64,
+    /// 环境场的独立累加器（墙钟 60 Hz，与 tick 解耦）
+    field_acc: f64,
     last: Instant,
 
     frames: u32,
@@ -235,6 +265,7 @@ impl App {
             paused: false,
             speed_idx: 0,
             acc: 0.0,
+            field_acc: 0.0,
             last: Instant::now(),
             frames: 0,
             fps_timer: Instant::now(),
@@ -354,7 +385,9 @@ impl App {
             cols,
             rows
         );
-        println!("空格 暂停 · S 单步 · [ ] 调速 · Tab 着色 · F 适应 · G 工坊 · Esc 退出");
+        println!(
+            "空格 暂停 · S 单步 · [ ] 调速 · Tab 着色（类型/物种/温度/辐射）· F 适应 · G 工坊 · Esc 退出"
+        );
         println!("左键：画笔落笔 / 平移拖动 / 检视选中 · 滚轮缩放 · 右键或中键随时平移");
 
         self.window = Some(window);
@@ -372,6 +405,25 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f64().min(0.25);
         self.last = now;
+
+        // ── 环境场：按墙钟 60 Hz 推进，**与 tick 解耦** ──
+        //
+        // 50× 倍速下 tick 是 3000/s，如果场也跟着跑 3000 次扩散就是白烧 CPU；
+        // 而且"岩浆烤热周围"是物理时间，1× 和 50× 下应该一样快。
+        // 暂停时也继续跑——它目前只影响显示，不影响模拟。
+        self.field_acc += dt;
+        let step = 1.0 / 60.0;
+        let mut n = 0;
+        if let Some(world) = self.world.as_mut() {
+            while self.field_acc >= step && n < 4 {
+                world.update_fields();
+                self.field_acc -= step;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.upload_field();
+        }
 
         if self.paused {
             return;
@@ -404,6 +456,17 @@ impl App {
         }
     }
 
+    /// 只在场滤镜模式下上传场（类型/物种着色时不需要）
+    fn upload_field(&mut self) {
+        if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
+            match renderer.mode {
+                2 => renderer.upload_field(&world.fields.temp),
+                3 => renderer.upload_field(&world.fields.rad),
+                _ => {}
+            }
+        }
+    }
+
     /// 悬停读数：光标所在格子的类型 / 归属个体 / 能量
     fn update_hover(&mut self) {
         let Some(world) = self.world.as_ref() else {
@@ -425,6 +488,16 @@ impl App {
         let mut text = format!("({}, {}) {}", col, row, cell_type::label(ty));
         if floor != ty && floor != ct::EMPTY {
             text.push_str(&format!("（地形：{}）", cell_type::label(floor)));
+        }
+        // 每格环境属性（M4）：温度 / 辐射，0–255 归一化后按百分比显示
+        let temp = world.fields.temp_at(&world.grid, col, row);
+        let rad = world.fields.rad_at(&world.grid, col, row);
+        if temp > 0 || rad > 0 {
+            text.push_str(&format!(
+                " · 温度 {}% · 辐射 {}%",
+                temp as u32 * 100 / 255,
+                rad as u32 * 100 / 255
+            ));
         }
         if owner >= 0 {
             if let Some(org) = world.organism(owner as u32) {
@@ -465,12 +538,18 @@ impl App {
             self.speed_idx = i.clamp(0, SPEEDS.len() as i32 - 1) as usize;
         }
         if act.toggle_mode {
-            if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
-                renderer.set_mode(if renderer.mode == 0 { 1 } else { 0 });
-                if renderer.mode == 1 {
-                    renderer.upload_species(world);
+            // 四档循环：类型 → 物种 → 温度 → 辐射 → 类型
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_mode((renderer.mode + 1) % 4);
+            }
+            if let Some(world) = self.world.as_ref() {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    if renderer.mode == 1 {
+                        renderer.upload_species(world);
+                    }
                 }
             }
+            self.upload_field();
         }
         if act.fit {
             if let (Some(world), Some(config)) = (self.world.as_ref(), self.config.as_ref()) {

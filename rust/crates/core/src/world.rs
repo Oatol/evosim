@@ -15,6 +15,7 @@ use crate::cell_type::{
 };
 use crate::config::AttrField;
 use crate::config::Config;
+use crate::fields::Fields;
 use crate::grid::Grid;
 use crate::mutation::mutate_organism;
 use crate::organism::Organism;
@@ -49,6 +50,13 @@ pub struct World {
 
     pub species: SpeciesRegistry,
 
+    /// 每格环境场（温度 / 辐射）。
+    ///
+    /// **不参与 `step()`**：主程序按墙钟 60 Hz 调 `update_fields()`，
+    /// 与 tick 解耦——这样 1× 和 50× 下岩浆烤热周围的速度一致，
+    /// 也不会因为倍速把 CPU 吃光。也因此它不影响黄金快照。
+    pub fields: Fields,
+
     /// 阶段 B 的随机结算顺序（复用，避免每 tick 分配）
     order: Vec<usize>,
 }
@@ -56,6 +64,7 @@ pub struct World {
 impl World {
     pub fn new(config: Config, rng: Rng) -> Self {
         let grid = Grid::new(config.world.cols, config.world.rows, config.world.wrap_edges);
+        let len = grid.len;
         let mut w = World {
             grid,
             tick: 0,
@@ -66,6 +75,7 @@ impl World {
             food_pos: Vec::new(),
             terrain: HashMap::new(),
             species: SpeciesRegistry::default(),
+            fields: Fields::new(len),
             order: Vec::new(),
             config,
             rng,
@@ -982,11 +992,21 @@ impl World {
         self.organisms.clear();
         self.id_index.clear();
         self.grid = Grid::new(cols, rows, self.config.world.wrap_edges);
+        self.fields.resize(self.grid.len);
+        self.fields.clear();
         self.init_food_index();
         self.init_terrain_index();
         self.species = SpeciesRegistry::default();
         self.next_organism_id = 1;
         self.tick = 0;
+    }
+
+    // ────────────────────────────── 环境场 ──────────────────────────────
+
+    /// 推进一格环境场（温度 / 辐射）。**由主程序按墙钟 60 Hz 调用**，不在 `step()` 里。
+    pub fn update_fields(&mut self) {
+        let World { grid, fields, .. } = self;
+        fields.update(grid);
     }
 
     // ────────────────────────────── 统计 ──────────────────────────────

@@ -200,3 +200,46 @@ fn no_tiling_when_world_smaller_than_viewport() {
     assert_eq!(px(&rgba, 70, 70), backdrop, "两侧背景应一致");
     assert_eq!(px(&rgba, 5, 70), backdrop, "四角都应是背景");
 }
+
+/// 环境场滤镜：场值 → 256 项色表 → 像素颜色
+#[test]
+fn field_filter_maps_value_through_colormap() {
+    let Some((device, queue)) = evosim_render::create_headless_device() else {
+        return;
+    };
+    let mut world = small_world(8, 8);
+    world.fill_grid(ct::EMPTY, false);
+
+    let mut r = GridRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, 8, 8);
+    r.upload_types(&world);
+
+    // 造一张场：只有 (2,2) 是满值
+    let mut field = vec![0u8; 64];
+    field[2 * 8 + 2] = 255;
+    r.upload_field(&field);
+
+    let cam = Camera {
+        x: 0.0,
+        y: 0.0,
+        zoom: 10.0,
+    };
+
+    r.set_mode(2); // 温度
+    let temp = render_to_rgba(&mut r, W, H, &cam);
+    let hot = evosim_render::colors::temp_colormap()[255];
+    let cold = evosim_render::colors::temp_colormap()[0];
+    assert_eq!(px(&temp, 25, 25), [hot[0], hot[1], hot[2]], "满值格应是色表末端色");
+    assert_eq!(px(&temp, 5, 5), [cold[0], cold[1], cold[2]], "零值格应是色表起始色");
+
+    // 换辐射滤镜：同一张场、不同色表 → 颜色必须变
+    r.set_mode(3);
+    let rad = render_to_rgba(&mut r, W, H, &cam);
+    let rad_hot = evosim_render::colors::rad_colormap()[255];
+    assert_eq!(px(&rad, 25, 25), [rad_hot[0], rad_hot[1], rad_hot[2]], "辐射滤镜应用自己的色表");
+    assert_ne!(px(&temp, 25, 25), px(&rad, 25, 25), "两种滤镜的高值颜色必须不同");
+
+    // 切回类型着色，场不该再影响画面
+    r.set_mode(0);
+    let typed = render_to_rgba(&mut r, W, H, &cam);
+    assert_eq!(px(&typed, 25, 25), palette_rgb(ct::EMPTY), "类型模式不受场影响");
+}

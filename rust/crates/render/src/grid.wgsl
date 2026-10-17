@@ -13,7 +13,7 @@ struct Uniforms {
     cam: vec2<f32>,
     // 每格像素
     zoom: f32,
-    // 0 = 按类型着色，1 = 按物种着色
+    // 0 = 类型，1 = 物种，2 = 温度场，3 = 辐射场
     mode: u32,
     _pad: vec4<f32>,
 };
@@ -25,6 +25,10 @@ struct Uniforms {
 @group(0) @binding(2) var species_tex: texture_2d<f32>;
 // 类型调色板（256 项 RGBA8）
 @group(0) @binding(3) var type_palette: texture_2d<f32>;
+// 环境场（R8）：温度或辐射，由 CPU 决定这次上传的是哪一张
+@group(0) @binding(4) var field_tex: texture_2d<f32>;
+// 场的 256 项色表（RGBA8，切换滤镜时由 CPU 重建）
+@group(0) @binding(5) var field_lut: texture_2d<f32>;
 
 // 世界之外的背景色。刻意比"空格"（#0b1020）更暗一点，
 // 这样缩小时能一眼看出世界的边界在哪。
@@ -80,6 +84,16 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 
     if (u.mode == 1u) {
         return textureLoad(species_tex, uv, 0);
+    }
+
+    // ── 环境场滤镜（温度 / 辐射）──
+    //
+    // 场值是 0–255，这里映射到 256 项色表上。和类型着色一样用 textureLoad，
+    // 保证"一格一个纯色块"的像素风；色表由 CPU 按滤镜种类换，着色器不用改。
+    if (u.mode >= 2u) {
+        let v = clamp(textureLoad(field_tex, uv, 0).r, 0.0, 1.0);
+        let k = u32(v * 255.0 + 0.5);
+        return textureLoad(field_lut, vec2<u32>(k, 0u), 0);
     }
 
     let idx = textureLoad(types_tex, uv, 0).r;

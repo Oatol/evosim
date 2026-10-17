@@ -82,9 +82,13 @@ pub struct GridRenderer {
     types_tex: wgpu::Texture,
     species_tex: wgpu::Texture,
     palette_tex: wgpu::Texture,
+    /// 环境场（温度或辐射，同一张纹理轮换上传）
+    field_tex: wgpu::Texture,
+    /// 场的 256 项色表
+    field_lut_tex: wgpu::Texture,
     cols: u32,
     rows: u32,
-    /// 0 = 类型着色，1 = 物种着色
+    /// 0 = 类型，1 = 物种，2 = 温度场，3 = 辐射场
     pub mode: u32,
 }
 
@@ -136,6 +140,28 @@ impl GridRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 环境场（温度 / 辐射）：R8 单通道
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 场的 256 项色表
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -200,9 +226,18 @@ impl GridRenderer {
         let palette_tex = create_tex(&device, 256, 1, wgpu::TextureFormat::Rgba8Unorm, "grid-palette");
         write_texture(&queue, &palette_tex, 256, 1, 4, &pal_bytes);
 
+        let field_tex = create_tex(&device, cols, rows, wgpu::TextureFormat::R8Unorm, "grid-field");
+        let field_lut_tex =
+            create_tex(&device, 256, 1, wgpu::TextureFormat::Rgba8Unorm, "grid-field-lut");
+        let temp_lut = colors::temp_colormap();
+        let temp_bytes: Vec<u8> = temp_lut.iter().flat_map(|c| c.iter().copied()).collect();
+        write_texture(&queue, &field_lut_tex, 256, 1, 4, &temp_bytes);
+
         let types_view = types_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let species_view = species_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let palette_view = palette_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let field_view = field_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let field_lut_view = field_lut_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("grid-bind-group"),
@@ -224,6 +259,14 @@ impl GridRenderer {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&palette_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&field_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&field_lut_view),
+                },
             ],
         });
 
@@ -236,6 +279,8 @@ impl GridRenderer {
             types_tex,
             species_tex,
             palette_tex,
+            field_tex,
+            field_lut_tex,
             cols,
             rows,
             mode: 0,
@@ -271,6 +316,30 @@ impl GridRenderer {
 
     pub fn set_mode(&mut self, mode: u32) {
         self.mode = mode;
+        // 切到温度/辐射滤镜时把对应色表换上（1 KB，代价可忽略）
+        match mode {
+            2 => self.set_field_colormap(&colors::temp_colormap()),
+            3 => self.set_field_colormap(&colors::rad_colormap()),
+            _ => {}
+        }
+    }
+
+    /// 上传一张环境场（R8，每格一个 0–255 的值）
+    pub fn upload_field(&mut self, data: &[u8]) {
+        write_texture(
+            &self.queue,
+            &self.field_tex,
+            self.cols as usize,
+            self.rows as usize,
+            1,
+            data,
+        );
+    }
+
+    /// 换场的色表（256 项）
+    pub fn set_field_colormap(&mut self, lut: &[[u8; 4]]) {
+        let bytes: Vec<u8> = lut.iter().flat_map(|c| c.iter().copied()).collect();
+        write_texture(&self.queue, &self.field_lut_tex, 256, 1, 4, &bytes);
     }
 
     /// 画一帧到指定视图

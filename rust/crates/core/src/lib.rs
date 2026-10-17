@@ -8,6 +8,7 @@ pub mod brain;
 pub mod cell_type;
 pub mod config;
 pub mod factory;
+pub mod fields;
 pub mod grid;
 pub mod jsmath;
 pub mod mutation;

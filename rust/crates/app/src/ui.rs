@@ -224,8 +224,15 @@ pub fn draw(
                     if ui.button("适应窗口").on_hover_text("快捷键 F").clicked() {
                         act.fit = true;
                     }
+                    let mode_label = match hud.mode {
+                        1 => "着色：物种",
+                        2 => "着色：温度",
+                        3 => "着色：辐射",
+                        _ => "着色：类型",
+                    };
                     if ui
-                        .button(if hud.mode == 1 { "着色：物种" } else { "着色：类型" })
+                        .button(mode_label)
+                        .on_hover_text("Tab 依次切换：类型 → 物种 → 温度 → 辐射")
                         .clicked()
                     {
                         act.toggle_mode = true;
@@ -413,6 +420,53 @@ pub fn draw(
                 );
             }
         }
+    }
+
+    // ── 左下：场滤镜图例 ──
+    if hud.mode >= 2 {
+        let lut = if hud.mode == 2 {
+            evosim_render::colors::temp_colormap()
+        } else {
+            evosim_render::colors::rad_colormap()
+        };
+        egui::Area::new("field-legend".into())
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(10.0, -10.0))
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(13, 17, 23, 230))
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(if hud.mode == 2 { "温度" } else { "辐射" })
+                                    .size(11.0)
+                                    .color(TEXT),
+                            );
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(120.0, 10.0),
+                                Sense::hover(),
+                            );
+                            // 用 24 段近似渐变（每段 5 项色表），比逐像素画便宜得多
+                            let painter = ui.painter();
+                            for k in 0..24 {
+                                let c = lut[(k * 255 / 23).min(255)];
+                                let x = rect.left() + rect.width() * (k as f32 / 24.0);
+                                let w = rect.width() / 24.0 + 1.0;
+                                painter.rect_filled(
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(x, rect.top()),
+                                        egui::vec2(w, rect.height()),
+                                    ),
+                                    CornerRadius::ZERO,
+                                    Color32::from_rgb(c[0], c[1], c[2]),
+                                );
+                            }
+                            ui.label(egui::RichText::new("高").size(11.0).color(TEXT_DIM));
+                        });
+                    });
+            });
     }
 
     // ── 右下：悬停读数 ──

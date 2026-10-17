@@ -103,3 +103,89 @@ pub fn build_species_pixels(world: &World) -> Vec<[u8; 4]> {
     }
     out
 }
+
+// ─────────────────────── 环境场色表（M4）───────────────────────
+//
+// 一张 256 项的 RGBA 色表，着色器直接按场值查表。这样换配色/加新场
+// 都不用动着色器，只换这张 1 KB 的纹理。
+
+/// 色带：给若干 (位置 0-1, 颜色) 停靠点，线性插值出 256 项
+fn ramp(stops: &[(f32, [u8; 3])]) -> Vec<[u8; 4]> {
+    let mut out = Vec::with_capacity(256);
+    for i in 0..256 {
+        let t = i as f32 / 255.0;
+        // 找到 t 落在哪一段
+        let mut a = stops[0];
+        let mut b = stops[stops.len() - 1];
+        for w in stops.windows(2) {
+            if t >= w[0].0 && t <= w[1].0 {
+                a = w[0];
+                b = w[1];
+                break;
+            }
+        }
+        let span = (b.0 - a.0).max(1e-6);
+        let k = ((t - a.0) / span).clamp(0.0, 1.0);
+        let c = [
+            (a.1[0] as f32 + (b.1[0] as f32 - a.1[0] as f32) * k) as u8,
+            (a.1[1] as f32 + (b.1[1] as f32 - a.1[1] as f32) * k) as u8,
+            (a.1[2] as f32 + (b.1[2] as f32 - a.1[2] as f32) * k) as u8,
+        ];
+        out.push([c[0], c[1], c[2], 255]);
+    }
+    out
+}
+
+/// 温度色表：冷 → 紫 → 红 → 橙 → 黄 → 白（和 TPT 的热力图一个路子）
+pub fn temp_colormap() -> Vec<[u8; 4]> {
+    ramp(&[
+        (0.00, [6, 10, 20]),
+        (0.12, [26, 20, 62]),
+        (0.30, [110, 30, 78]),
+        (0.50, [200, 58, 30]),
+        (0.70, [255, 140, 20]),
+        (0.86, [255, 214, 90]),
+        (1.00, [255, 255, 240]),
+    ])
+}
+
+/// 辐射色表：暗 → 深绿 → 亮绿 → 黄绿 → 近白
+pub fn rad_colormap() -> Vec<[u8; 4]> {
+    ramp(&[
+        (0.00, [6, 10, 20]),
+        (0.18, [8, 58, 40]),
+        (0.42, [24, 150, 80]),
+        (0.66, [120, 226, 96]),
+        (0.86, [214, 255, 130]),
+        (1.00, [244, 255, 210]),
+    ])
+}
+
+#[cfg(test)]
+mod colormap_tests {
+    use super::*;
+
+    #[test]
+    fn colormaps_are_monotonic_in_brightness() {
+        for (name, lut) in [("temp", temp_colormap()), ("rad", rad_colormap())] {
+            assert_eq!(lut.len(), 256);
+            let lum = |c: [u8; 4]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+            assert!(
+                lum(lut[0]) < lum(lut[128]),
+                "{} 色表应该从暗到亮（0: {}, 128: {}）",
+                name,
+                lum(lut[0]),
+                lum(lut[128])
+            );
+            assert!(lum(lut[128]) < lum(lut[255]), "{} 色表末端应更亮", name);
+            assert!(lut.iter().all(|c| c[3] == 255), "{} 色表必须不透明", name);
+        }
+    }
+
+    #[test]
+    fn temp_and_rad_differ_at_mid() {
+        let t = temp_colormap()[128];
+        let r = rad_colormap()[128];
+        assert_ne!(t, r, "温度与辐射的中段颜色必须不同，否则分不清滤镜");
+    }
+}
