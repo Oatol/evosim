@@ -2,6 +2,8 @@
 //!
 //! 物种判据是**身体结构指纹**：只有结构变异才产生新物种，权重变异不算。
 
+use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -9,7 +11,7 @@ use crate::anatomy::Anatomy;
 
 pub const MAX_SPECIES: usize = 4000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Species {
     pub id: u32,
     pub fingerprint: Arc<str>,
@@ -37,6 +39,7 @@ impl Species {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SpeciesRegistry {
     pub map: HashMap<Arc<str>, usize>,
     pub list: Vec<Species>,

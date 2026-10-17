@@ -8,9 +8,11 @@
 //! 地形只存 types 的话，一只生物从岩浆上走过就把岩浆抹掉了。
 //! 地形单独记在 floor，生物离开时 `World::reveal_floor` 把它铺回顶层。
 
+use serde::{Deserialize, Serialize};
+
 use crate::cell_type::{ct, TERRAIN_MASK};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,

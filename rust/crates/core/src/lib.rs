@@ -14,6 +14,7 @@ pub mod jsmath;
 pub mod mutation;
 pub mod organism;
 pub mod rng;
+pub mod save;
 pub mod sensors;
 pub mod species;
 pub mod world;

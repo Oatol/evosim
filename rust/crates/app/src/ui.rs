@@ -97,6 +97,7 @@ pub struct HudInfo {
     pub paused: bool,
     pub mode: u32,
     pub workshop_open: bool,
+    pub world_open: bool,
 }
 
 #[derive(Default)]
@@ -110,6 +111,7 @@ pub struct UiActions {
     pub center_on: Option<u32>,
     pub clear_selection: bool,
     pub toggle_workshop: bool,
+    pub toggle_world: bool,
 }
 
 pub const BG: Color32 = Color32::from_rgb(13, 17, 23);
@@ -283,6 +285,13 @@ pub fn draw(
                 ui.label(format!("{:.0} fps · {:.0} tps", hud.fps, hud.tps));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(hud.world_open, "世界")
+                        .on_hover_text("新建（可调尺寸）/ 保存 / 读取（快捷键 W）")
+                        .clicked()
+                    {
+                        act.toggle_world = true;
+                    }
                     if ui
                         .selectable_label(hud.workshop_open, "物种工坊")
                         .on_hover_text("手绘蓝图 + 生物库（快捷键 G）")
@@ -703,6 +712,7 @@ mod tests {
             paused: false,
             mode: 0,
             workshop_open: false,
+            world_open: false,
         };
         let view = ViewInfo {
             cam_x: 0.0,

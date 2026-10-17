@@ -1,9 +1,11 @@
 //! 全局参数表 —— 与 JS 版 `src/core/config.js` 的默认值逐项对应。
 
+use serde::{Deserialize, Serialize};
+
 use crate::cell_type::{self, ct};
 
 /// 每种身体细胞的可调属性
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct CellAttrs {
     pub hp: f64,
     pub cost: f64,
@@ -24,7 +26,7 @@ impl Default for CellAttrs {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldCfg {
     pub cols: usize,
     pub rows: usize,
@@ -49,7 +51,7 @@ impl Default for WorldCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LifeCfg {
     pub lifespan_multiplier: f64,
     pub extra_mover_food_cost: f64,
@@ -82,7 +84,7 @@ impl Default for LifeCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TerrainCfg {
     pub lava_enter_damage: f64,
     pub lava_stand_damage: f64,
@@ -105,7 +107,7 @@ impl Default for TerrainCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MutationCfg {
     pub add_prob: f64,
     pub change_prob: f64,
@@ -136,7 +138,7 @@ impl Default for MutationCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SenseCfg {
     pub look_range: i32,
     pub see_through_self: bool,
@@ -151,7 +153,7 @@ impl Default for SenseCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombatCfg {
     pub insta_kill: bool,
     pub food_blocks_reproduction: bool,
@@ -166,7 +168,7 @@ impl Default for CombatCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatsCfg {
     pub interval: u64,
     pub record_size: usize,
@@ -183,7 +185,7 @@ impl Default for StatsCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrainCfg {
     pub in_size: usize,
     pub hidden_size: usize,
@@ -200,7 +202,7 @@ impl Default for BrainCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimCfg {
     pub base_ticks_per_second: u32,
     pub max_steps_per_frame: u32,
@@ -217,7 +219,7 @@ impl Default for SimCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub world: WorldCfg,
     pub life: LifeCfg,

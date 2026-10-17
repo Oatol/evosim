@@ -21,6 +21,8 @@
 //!
 //! 值域 0–255，0 = 环境本底。显示时由渲染层的 256 项色表映射成颜色。
 
+use serde::{Deserialize, Serialize};
+
 use crate::cell_type::ct;
 use crate::grid::Grid;
 
@@ -28,6 +30,7 @@ use crate::grid::Grid;
 const SELF_W: u32 = 2;
 const TOTAL_W: u32 = 6;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Fields {
     pub len: usize,
     /// 温度场（0–255）

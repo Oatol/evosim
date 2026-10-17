@@ -4,11 +4,13 @@
 //! 权重用 f32（对应 JS 的 Float32Array），但**中间求和用 f64**——
 //! JS 的 `sum += a * b` 也是 f64 累加，这样两边才会一致。
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::Config;
 use crate::jsmath;
 use crate::rng::Rng;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Brain {
     pub in_size: usize,
     pub hidden_size: usize,

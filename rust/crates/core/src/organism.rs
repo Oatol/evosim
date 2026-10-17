@@ -4,6 +4,8 @@
 //! 需要写世界或伤害别人的操作（act / reproduce / die / harm）放在 `world.rs`，
 //! 因为 Rust 的借用规则不允许"拿着 &mut 自己再借 &mut 世界"。
 
+use serde::{Deserialize, Serialize};
+
 use std::sync::Arc;
 
 use crate::anatomy::{rotate_col, rotate_row, Anatomy, Flags};
@@ -15,7 +17,7 @@ use crate::grid::Grid;
 use crate::rng::Rng;
 use crate::sensors::{self, SenseView, SENSE_DIM};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Organism {
     pub id: u32,
     pub col: i32,

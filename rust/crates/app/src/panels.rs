@@ -61,6 +61,20 @@ pub struct PanelActions {
 }
 
 impl Panels {
+    /// 世界被整体替换（新建 / 读档）时调用：清掉所有**属于旧世界**的状态。
+    ///
+    /// 窗口开关（`show_inspector` 等）**保留** —— 用户开着的面板不该因为
+    /// 换了世界就自己关掉。这里只清"引用了旧世界数据"的东西：
+    /// 选中的个体 id、跟随/图钉、选中的物种指纹、曲线历史。
+    pub fn reset_world_state(&mut self) {
+        self.selected_org = None;
+        self.follow = false;
+        self.pinned = false;
+        self.selected_species = None;
+        self.history.clear();
+        self.last_sample_tick = 0;
+    }
+
     /// 每 20 tick 采一个点，最多留 600 个（约 12000 tick 的视野）
     pub fn sample(&mut self, world: &World) {
         if world.tick < self.last_sample_tick + 20 {

@@ -11,6 +11,8 @@
 //!   · `gaussian` 用 Box-Muller，带 spare 缓存——**调用次数会影响序列**，
 //!     所以 spare 的存取顺序必须和 JS 一模一样
 
+use serde::{Deserialize, Serialize};
+
 /// splitmix32：把单个 32 位种子扩展成 4 个状态字
 fn splitmix32(seed: u32) -> impl FnMut() -> u32 {
     let mut a = seed;
@@ -24,7 +26,7 @@ fn splitmix32(seed: u32) -> impl FnMut() -> u32 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rng {
     seed: u32,
     a: u32,

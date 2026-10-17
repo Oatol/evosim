@@ -1,9 +1,11 @@
 //! 身体蓝图 —— 基因组 A。与 JS 版 `src/life/Anatomy.js` 对应。
 
+use serde::{Deserialize, Serialize};
+
 use crate::cell_type::{def, is_directional, flag};
 use crate::rng::Rng;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodyCell {
     pub type_id: u8,
     pub dx: i32,
@@ -33,7 +35,7 @@ impl BodyCell {
 }
 
 /// 能力标志位集合
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flags(pub u16);
 
 impl Flags {
@@ -60,7 +62,7 @@ impl Flags {
     pub const SPIKE: u16 = flag::SPIKE;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Anatomy {
     pub cells: Vec<BodyCell>,
     pub birth_distance: i32,

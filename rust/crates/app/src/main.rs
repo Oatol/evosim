@@ -4,6 +4,7 @@
 //!   evosim-app                                   打开窗口
 //!   evosim-app --screenshot out.png --ticks 500  离屏渲染一张 PNG（不需要窗口）
 //!   evosim-app --bench --seconds 4 --speed 50    无窗口稳态压测
+//!   evosim-app --load saves/x.evosim             直接打开一份存档
 //!
 //! 快捷键：空格 暂停/继续 · S 单步 · [ ] 调速 · Tab 类型/物种着色 · F 适应窗口 · Esc 退出
 //! 鼠标：左键落笔（画笔工具）· 滚轮以光标为锚缩放 · 右键/中键拖动平移
@@ -12,6 +13,7 @@ mod paint;
 mod panels;
 mod ui;
 mod workshop;
+mod world_panel;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -93,7 +95,16 @@ fn main() {
 }
 
 fn screenshot(path: &str, seed: u32, pop: usize, ticks: u64, width: u32, height: u32) {
-    let mut world = build_world(seed, pop);
+    let mut world = match arg_value("--load") {
+        Some(p) => match evosim_core::save::load_from(std::path::Path::new(&p)) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("读档失败：{}", e);
+                std::process::exit(1);
+            }
+        },
+        None => build_world(seed, pop),
+    };
     let t0 = Instant::now();
     for _ in 0..ticks {
         world.step();
@@ -242,6 +253,7 @@ struct App {
     ui: ui::UiState,
     panels: panels::Panels,
     workshop: workshop::Workshop,
+    world_panel: world_panel::WorldPanel,
     /// 「手动放置」装进来的蓝图：下一次左键就把它放在那里
     pending_place: Option<evosim_core::blueprint::Blueprint>,
     /// 放置模式的一次性反馈（成功 / 放不下），显示在提示条上
@@ -284,6 +296,7 @@ impl App {
             ui: ui::UiState::default(),
             panels: panels::Panels::default(),
             workshop: workshop::Workshop::default(),
+            world_panel: world_panel::WorldPanel::default(),
             place_msg: String::new(),
             pending_place: None,
             ui_wants_pointer: false,
@@ -353,7 +366,19 @@ impl App {
         };
         surface.configure(&device, &config);
 
-        let mut world = build_world(self.seed, self.pop);
+        let mut world = match arg_value("--load") {
+            Some(p) => match evosim_core::save::load_from(std::path::Path::new(&p)) {
+                Ok(w) => {
+                    println!("已读取存档 {}", p);
+                    w
+                }
+                Err(e) => {
+                    eprintln!("读档失败：{}（改用默认世界）", e);
+                    build_world(self.seed, self.pop)
+                }
+            },
+            None => build_world(self.seed, self.pop),
+        };
         for _ in 0..self.pre_ticks {
             world.step();
         }
@@ -576,6 +601,9 @@ impl App {
         if act.toggle_workshop {
             self.workshop.open = !self.workshop.open;
         }
+        if act.toggle_world {
+            self.world_panel.open = !self.world_panel.open;
+        }
     }
 
     fn view_size(&self) -> (f32, f32) {
@@ -605,6 +633,106 @@ impl App {
             return;
         };
         self.center_on_org(id);
+    }
+
+    /// 整体替换世界（新建 / 读档）。
+    ///
+    /// 三件事必须一起做，漏一件就会看到"旧世界的残影"：
+    ///   1. **重建 `GridRenderer`** —— 纹理尺寸在构造时就固定了，换尺寸必须重来
+    ///   2. **相机 fit** —— 否则新世界可能在视野之外
+    ///   3. **清空引用旧世界的 UI 状态** —— 选中个体 / 曲线 / 待放置蓝图
+    ///
+    /// 这也是"世界窗口排在最前面做"的原因：所有面板都必须能正确处理
+    /// "世界被换掉了"，先把这个入口立好，后面新加的面板天然会写对。
+    fn install_world(&mut self, world: World) {
+        let (cols, rows) = (world.grid.cols as u32, world.grid.rows as u32);
+        let mode = self.renderer.as_ref().map(|r| r.mode).unwrap_or(0);
+
+        let rebuilt = match (self.renderer.as_ref(), self.config.as_ref()) {
+            (Some(old), Some(cfg)) => {
+                // Device / Queue 是 Arc 包装的，clone 只是加引用计数
+                let mut r = GridRenderer::new(
+                    old.device.clone(),
+                    old.queue.clone(),
+                    cfg.format,
+                    cols,
+                    rows,
+                );
+                r.set_mode(mode);
+                r.upload_types(&world);
+                r.upload_species(&world);
+                r.upload_field(&world.fields.temp);
+                Some(r)
+            }
+            _ => None,
+        };
+        if let Some(r) = rebuilt {
+            self.renderer = Some(r);
+        }
+
+        let (vw, vh) = self.view_size();
+        self.camera
+            .fit_grid(world.grid.cols, world.grid.rows, vw, vh, 20.0);
+
+        self.panels.reset_world_state();
+        self.pending_place = None;
+        self.place_msg.clear();
+        self.ui.highlights.clear();
+        self.ui.place_preview = None;
+        self.ui.hover.clear();
+        self.hover_cell = None;
+
+        // 换世界后先停住：让用户看清新的世界，也避免刚建好就窜过一屏 tick
+        self.paused = true;
+        self.acc = 0.0;
+        self.last = Instant::now();
+
+        self.world = Some(world);
+        self.upload_field();
+    }
+
+    fn new_world(&mut self, spec: world_panel::NewWorld) {
+        // 保留用户调过的参数，只换尺寸与种子
+        let mut cfg = self
+            .world
+            .as_ref()
+            .map(|w| w.config.clone())
+            .unwrap_or_default();
+        cfg.world.cols = spec.cols;
+        cfg.world.rows = spec.rows;
+        cfg.sim.seed = spec.seed;
+
+        let mut world = World::new(cfg, Rng::new(spec.seed));
+        if spec.demo_terrain {
+            generate_demo_world(&mut world, 1.0, 1.0);
+        }
+        if spec.pop > 0 {
+            seed_origin_of_life(&mut world);
+            spawn_population(&mut world, spec.pop, 3);
+        }
+        let (c, r) = (world.grid.cols, world.grid.rows);
+        self.install_world(world);
+        self.world_panel
+            .set_status(format!("已新建 {}×{} 的世界（种子 {}）", c, r, spec.seed), false);
+    }
+
+    fn load_world(&mut self, path: &std::path::Path) {
+        match evosim_core::save::load_from(path) {
+            Ok(world) => {
+                let (tick, orgs) = (world.tick, world.organisms.len());
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                self.install_world(world);
+                self.world_panel.set_status(
+                    format!("已读取 {} · tick {} · {} 只", name, tick, orgs),
+                    false,
+                );
+            }
+            Err(e) => self.world_panel.set_status(format!("读取失败：{}", e), true),
+        }
     }
 
     /// 把蓝图投放到当前视野中心
@@ -712,6 +840,7 @@ impl App {
             paused: self.paused,
             mode: self.renderer.as_ref().map(|r| r.mode).unwrap_or(0),
             workshop_open: self.workshop.open,
+            world_open: self.world_panel.open,
         };
 
         let (vw, vh) = self.view_size();
@@ -748,14 +877,17 @@ impl App {
             let ui_state = &mut self.ui;
             let panels = &mut self.panels;
             let wshop = &mut self.workshop;
+            let wpanel = &mut self.world_panel;
             let world = match self.world.as_mut() {
                 Some(w) => w,
                 None => return,
             };
             let mut shop_act = workshop::WorkshopActions::default();
+            let mut world_act = world_panel::WorldActions::default();
             let full = ctx.run(raw, |ctx| {
                 actions = ui::draw(ctx, ui_state, world, &hud, &view, panels);
                 shop_act = wshop.draw(ctx, world);
+                world_act = wpanel.draw(ctx, &*world);
             });
             if let Some(state) = self.egui_state.as_mut() {
                 state.handle_platform_output(&window, full.platform_output);
@@ -767,6 +899,13 @@ impl App {
             }
             if let Some(bp) = shop_act.center.take() {
                 self.spawn_blueprint_at_center(&bp);
+            }
+            // 世界窗口只收集意图，真正的替换在这里做（World 的所有权只有一处）
+            if let Some(spec) = world_act.create.take() {
+                self.new_world(spec);
+            }
+            if let Some(path) = world_act.load.take() {
+                self.load_world(&path);
             }
             self.ui_wants_pointer = self.egui_ctx.wants_pointer_input();
 
@@ -949,6 +1088,9 @@ impl ApplicationHandler for App {
                     // Tab 已在上面抢先处理（egui-winit 会无条件吞掉它）
                     PhysicalKey::Code(KeyCode::KeyG) => {
                         self.workshop.open = !self.workshop.open;
+                    }
+                    PhysicalKey::Code(KeyCode::KeyW) => {
+                        self.world_panel.open = !self.world_panel.open;
                     }
                     PhysicalKey::Code(KeyCode::KeyF) => {
                         self.apply_ui_actions(ui::UiActions {

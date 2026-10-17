@@ -9,6 +9,10 @@ dist/evosim2.exe
 # 第三方参考资料（The Powder Toy 源码，GPL，不纳入本仓库）
 The-Powder-Toy-master.zip
 
+# 存档（运行时产物，不进仓库）
+saves/
+**/saves/
+
 # 编辑器 / 系统
 .vscode/
 .idea/

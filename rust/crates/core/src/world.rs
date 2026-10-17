@@ -5,6 +5,8 @@
 //! 原因是 Rust 不允许"拿着 `&mut 自己` 再去借 `&mut 世界`"，
 //! 所以 act / reproduce / die / harm 都写成了 `&mut self` 的方法，按索引访问个体。
 
+use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,7 +27,7 @@ use crate::species::SpeciesRegistry;
 const NEIGHBORS_4: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
 /// 一套 swap-remove 索引（食物 / 腐殖质都用这个套路）
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct TerrainSet {
     pub cells: Vec<usize>,
     pub pos: Vec<i32>,
