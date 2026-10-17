@@ -122,6 +122,12 @@
   想画在窗口下面，就得在**帧首先**登记那一层，否则后建的一律盖在窗口上
 - **地形格的顶层 `types` 存的就是地形自己**（HUMUS/LAVA…），所以"能不能往上放食物"
   的判据是「`EMPTY` **或裸地形**」，只判 EMPTY 永远放不上去
+- **egui 想"画在窗口下面"只能用 `Order::Background`**：`Context::layer_painter()` 不创建
+  图层（要等 add 图形才登记），而且同一 Order 内**非 Area 图层永远排在 Area（窗口）之后**。
+  `Order::Background` 的注释原文就是 "Painted behind all floating windows"
+- **改过 UI 文案要重跑 `python tools/subset-font.py`**，否则新字在界面上是方块
+  （有测试 `embedded_font_covers_every_ui_char` 守着）。裁字体时 `hinting=False`
+  能把 576 KB 砍到 201 KB——12px 屏幕上字体自带的 hinting 用不上
 - **全屏 backdrop 遮罩**：检视器和物种树都栽过。症状是"跟随看不见""克隆永远提示先选中""关闭按钮不显眼"——
   同一个原因，改成非模态浮窗后一起消失
 - **`pause()` 里 `cancelAnimationFrame`**：暂停后准星/高亮/浮窗全冻住
