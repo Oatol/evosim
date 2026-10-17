@@ -335,12 +335,14 @@ pub fn draw(
                     if ui.button("单步").clicked() {
                         act.step_once = true;
                     }
-                    if ui.button("<").on_hover_text("降速").clicked() {
-                        act.speed_delta = -1;
-                    }
-                    ui.label(format!("{:.0}×", hud.speed));
+                    // 注意：这个 with_layout 是 right_to_left，**先加的在最右边**。
+                    // 想让人看到「左降速 · 1× · 右提速」，代码里就得先写提速。
                     if ui.button(">").on_hover_text("提速").clicked() {
                         act.speed_delta = 1;
+                    }
+                    ui.label(format!("{:.0}×", hud.speed));
+                    if ui.button("<").on_hover_text("降速").clicked() {
+                        act.speed_delta = -1;
                     }
                     ui.separator();
                     ui.checkbox(&mut panels.show_inspector, "检视器");
