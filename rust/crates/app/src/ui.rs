@@ -1,8 +1,7 @@
-//! egui 界面：顶部状态条、左侧工具/笔刷、右侧参数、右下悬停读数。
+//! egui 界面：顶部状态条、左侧工具/笔刷、右侧参数、右下悬停读数，外加三个面板。
 //!
 //! 风格刻意压紧（12px 字、行距 4、无圆角、1px 描边）——目标是 TPT 那种密度，
-//! 而不是 egui 默认的"通用桌面软件"观感。笔刷方块是**自绘控件**（painter 直接画），
-//! 这也是 M3 计划里"关键控件自绘"的落点。
+//! 而不是 egui 默认的"通用桌面软件"观感。笔刷方块是**自绘控件**（painter 直接画）。
 
 use std::sync::Arc;
 
@@ -13,11 +12,13 @@ use evosim_core::world::World;
 use evosim_render::colors::build_palette;
 
 use crate::paint::ERASER;
+use crate::panels::Panels;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Paint,
     Pan,
+    Inspect,
 }
 
 pub struct UiState {
@@ -27,6 +28,9 @@ pub struct UiState {
     pub hover: String,
     pub show_tools: bool,
     pub show_params: bool,
+    /// 世界坐标下的高亮矩形（1 格大小），由面板填充、这里换算成屏幕像素再描边
+    pub highlights: Vec<egui::Rect>,
+    pub highlight_color: Color32,
 }
 
 impl Default for UiState {
@@ -38,8 +42,20 @@ impl Default for UiState {
             hover: String::new(),
             show_tools: true,
             show_params: true,
+            highlights: Vec::new(),
+            highlight_color: ACCENT,
         }
     }
+}
+
+/// 相机快照（把世界坐标换算成屏幕像素用）
+#[derive(Clone, Copy)]
+pub struct ViewInfo {
+    pub cam_x: f32,
+    pub cam_y: f32,
+    pub zoom: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 pub struct HudInfo {
@@ -58,32 +74,32 @@ pub struct UiActions {
     pub toggle_mode: bool,
     pub fit: bool,
     pub wants_pointer: bool,
+    pub center_on: Option<u32>,
+    pub clear_selection: bool,
 }
 
-const BG: Color32 = Color32::from_rgb(13, 17, 23);
-const PANEL: Color32 = Color32::from_rgb(20, 26, 36);
-const BORDER: Color32 = Color32::from_rgb(45, 55, 72);
-const TEXT: Color32 = Color32::from_rgb(214, 222, 235);
-const TEXT_DIM: Color32 = Color32::from_rgb(130, 143, 160);
-const ACCENT: Color32 = Color32::from_rgb(56, 189, 248);
+pub const BG: Color32 = Color32::from_rgb(13, 17, 23);
+pub const PANEL: Color32 = Color32::from_rgb(20, 26, 36);
+pub const BORDER: Color32 = Color32::from_rgb(45, 55, 72);
+pub const TEXT: Color32 = Color32::from_rgb(214, 222, 235);
+pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 143, 160);
+pub const ACCENT: Color32 = Color32::from_rgb(56, 189, 248);
 
 /// 加载中文字体（优先微软雅黑，退回黑体）。找不到就用 egui 内置字体（中文会缺字）。
 pub fn configure(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     let candidates = [
-        ("C:/Windows/Fonts/msyh.ttc", 0u32),
-        ("C:/Windows/Fonts/simhei.ttf", 0u32),
-        ("C:/Windows/Fonts/Deng.ttf", 0u32),
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/Deng.ttf",
     ];
-    for (path, index) in candidates {
+    for path in candidates {
         if let Ok(bytes) = std::fs::read(path) {
             let bytes_len = bytes.len();
             let mut data = egui::FontData::from_owned(bytes);
-            data.index = index;
-            fonts
-                .font_data
-                .insert("cjk".to_owned(), Arc::new(data));
+            data.index = 0;
+            fonts.font_data.insert("cjk".to_owned(), Arc::new(data));
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
                 fonts
                     .families
@@ -146,12 +162,24 @@ pub fn configure(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudInfo) -> UiActions {
+pub fn draw(
+    ctx: &egui::Context,
+    st: &mut UiState,
+    world: &mut World,
+    hud: &HudInfo,
+    view: &ViewInfo,
+    panels: &mut Panels,
+) -> UiActions {
     let mut act = UiActions::default();
 
     // ── 顶部状态条 ──
     egui::TopBottomPanel::top("hud")
-        .frame(egui::Frame::NONE.fill(BG).stroke(Stroke::new(1.0, BORDER)).inner_margin(egui::Margin::symmetric(10, 5)))
+        .frame(
+            egui::Frame::NONE
+                .fill(BG)
+                .stroke(Stroke::new(1.0, BORDER))
+                .inner_margin(egui::Margin::symmetric(10, 5)),
+        )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let stats = world.snapshot_stats();
@@ -168,19 +196,19 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
                 ui.label(format!("{:.0} fps · {:.0} tps", hud.fps, hud.tps));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("适应窗口 F").clicked() {
+                    if ui.button("适应 F").clicked() {
                         act.fit = true;
                     }
                     if ui
-                        .button(if hud.mode == 1 { "着色：物种 Tab" } else { "着色：类型 Tab" })
+                        .button(if hud.mode == 1 { "着色：物种" } else { "着色：类型" })
                         .clicked()
                     {
                         act.toggle_mode = true;
                     }
-                    if ui.button(if hud.paused { "继续 空格" } else { "暂停 空格" }).clicked() {
+                    if ui.button(if hud.paused { "继续" } else { "暂停" }).clicked() {
                         act.toggle_pause = true;
                     }
-                    if ui.button("单步 S").clicked() {
+                    if ui.button("单步").clicked() {
                         act.step_once = true;
                     }
                     if ui.button("◀").clicked() {
@@ -190,6 +218,10 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
                     if ui.button("▶").clicked() {
                         act.speed_delta = 1;
                     }
+                    ui.separator();
+                    ui.checkbox(&mut panels.show_inspector, "检视器");
+                    ui.checkbox(&mut panels.show_species, "物种");
+                    ui.checkbox(&mut panels.show_chart, "曲线");
                 });
             });
         });
@@ -208,11 +240,13 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
                     if ui.selectable_label(st.tool == Tool::Pan, "平移").clicked() {
                         st.tool = Tool::Pan;
                     }
+                    if ui.selectable_label(st.tool == Tool::Inspect, "检视").clicked() {
+                        st.tool = Tool::Inspect;
+                    }
                 });
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("笔刷").color(TEXT_DIM));
 
-                // 两列自绘方块
                 let palette = build_palette();
                 let mut ids: Vec<u8> = TERRAIN_BRUSH_TYPES.to_vec();
                 ids.push(ERASER);
@@ -227,20 +261,12 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
 
                 ui.add_space(2.0);
                 ui.add(egui::Slider::new(&mut st.brush_size, 1..=12).text("大小"));
-                if st.brush != ERASER {
-                    let name = cell_type::label(st.brush);
-                    ui.label(
-                        egui::RichText::new(format!("正在画：{}", name))
-                            .color(TEXT_DIM)
-                            .size(11.0),
-                    );
+                let hint = if st.brush == ERASER {
+                    "正在擦：地形（生物与食物不动）".to_string()
                 } else {
-                    ui.label(
-                        egui::RichText::new("正在擦：地形（生物与食物不动）")
-                            .color(TEXT_DIM)
-                            .size(11.0),
-                    );
-                }
+                    format!("正在画：{}", cell_type::label(st.brush))
+                };
+                ui.label(egui::RichText::new(hint).color(TEXT_DIM).size(11.0));
             });
     }
 
@@ -248,7 +274,7 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
     if st.show_params {
         egui::Window::new("参数")
             .resizable(false)
-            .collapsible(false)
+            .collapsible(true)
             .default_pos([1100.0, 42.0])
             .show(ctx, |ui| {
                 let cfg = &mut world.config;
@@ -268,8 +294,7 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
                     egui::Slider::new(&mut cfg.life.food_prod_prob, 0.0..=100.0)
                         .text("生产者造食率")
                         .step_by(1.0),
-                )
-                .on_hover_text("生产者细胞每 tick 生成食物的概率（%）。");
+                );
                 ui.separator();
                 ui.checkbox(&mut cfg.mutation.use_global_mutability, "启用全局变异率");
                 ui.add(
@@ -281,20 +306,54 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
                     egui::Slider::new(&mut cfg.life.max_organisms, -1..=5000)
                         .text("种群上限")
                         .step_by(50.0),
-                )
-                .on_hover_text("-1 = 无上限");
+                );
                 ui.add(
                     egui::Slider::new(&mut cfg.life.lifespan_multiplier, 1.0..=1000.0)
                         .text("寿命倍率")
                         .step_by(1.0),
                 );
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("改完立刻生效（每 tick 现读）")
-                        .color(TEXT_DIM)
-                        .size(11.0),
-                );
             });
+    }
+
+    // ── 面板：检视器 / 物种 / 曲线 ──
+    st.highlights.clear();
+    let panel_act = panels.draw(ctx, world, &mut st.highlights);
+
+    // ── 世界坐标 → 屏幕像素，画高亮 ──
+    if !st.highlights.is_empty() {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("world-highlight"),
+        ));
+        let z = view.zoom;
+        for r in &st.highlights {
+            let sx = (r.min.x - view.cam_x) * z;
+            let sy = (r.min.y - view.cam_y) * z;
+            let size = (r.width() * z).max(1.0);
+            if sx + size < 0.0 || sy + size < 0.0 || sx > view.width || sy > view.height {
+                continue;
+            }
+            let rect = egui::Rect::from_min_size(egui::pos2(sx, sy), egui::vec2(size, size));
+            if z >= 3.0 {
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, st.highlight_color),
+                    StrokeKind::Inside,
+                );
+            } else {
+                painter.rect_filled(
+                    rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(
+                        st.highlight_color.r(),
+                        st.highlight_color.g(),
+                        st.highlight_color.b(),
+                        200,
+                    ),
+                );
+            }
+        }
     }
 
     // ── 右下：悬停读数 ──
@@ -313,6 +372,8 @@ pub fn draw(ctx: &egui::Context, st: &mut UiState, world: &mut World, hud: &HudI
     }
 
     act.wants_pointer = ctx.wants_pointer_input();
+    act.center_on = panel_act.center_on;
+    act.clear_selection = panel_act.clear_selection;
     act
 }
 
@@ -331,11 +392,8 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
 
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(26, 33, 45));
-    // 色块
-    let swatch = egui::Rect::from_min_size(
-        rect.min + egui::vec2(4.0, 4.0),
-        egui::vec2(16.0, 16.0),
-    );
+    let swatch =
+        egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(16.0, 16.0));
     painter.rect_filled(swatch, CornerRadius::ZERO, color);
     painter.rect_stroke(
         swatch,
@@ -360,7 +418,10 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
     painter.rect_stroke(
         rect,
         CornerRadius::ZERO,
-        Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { ACCENT } else { BORDER }),
+        Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected { ACCENT } else { BORDER },
+        ),
         StrokeKind::Inside,
     );
 
@@ -371,24 +432,36 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
             .map(|d| d.desc.to_string())
             .unwrap_or_default()
     };
-    resp.on_hover_text(desc).clicked().then(|| st.brush = id);
+    if resp.on_hover_text(desc).clicked() {
+        st.brush = id;
+        st.tool = Tool::Paint;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_world() -> World {
+        World::new(
+            evosim_core::config::Config::default(),
+            evosim_core::rng::Rng::new(1),
+        )
+    }
+
     #[test]
     fn ui_builds_without_panic() {
         let ctx = egui::Context::default();
         configure(&ctx);
 
-        let mut world = evosim_core::world::World::new(
-            evosim_core::config::Config::default(),
-            evosim_core::rng::Rng::new(1),
-        );
+        let mut world = test_world();
         let mut st = UiState::default();
         st.hover = "(12, 34) 嘴 · 个体 #3 · S1".to_string();
+        // 造一条高亮，顺便验证世界坐标 → 屏幕像素那段
+        st.highlights.push(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(1.0, 1.0),
+        ));
 
         let hud = HudInfo {
             fps: 60.0,
@@ -397,6 +470,14 @@ mod tests {
             paused: false,
             mode: 0,
         };
+        let view = ViewInfo {
+            cam_x: 0.0,
+            cam_y: 0.0,
+            zoom: 4.0,
+            width: 1600.0,
+            height: 950.0,
+        };
+        let mut panels = Panels::default();
 
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(
@@ -405,7 +486,7 @@ mod tests {
         ));
 
         let out = ctx.run(input, |ctx| {
-            let _ = draw(ctx, &mut st, &mut world, &hud);
+            let _ = draw(ctx, &mut st, &mut world, &hud, &view, &mut panels);
         });
 
         assert!(!out.shapes.is_empty(), "界面没有产出任何图形");
@@ -413,7 +494,6 @@ mod tests {
 
     #[test]
     fn brush_list_covers_registry_and_eraser() {
-        // 笔刷列表必须来自注册表 + 橡皮擦，不能手写漏项
         let mut ids: Vec<u8> = evosim_core::cell_type::TERRAIN_BRUSH_TYPES.to_vec();
         ids.push(crate::paint::ERASER);
         assert!(ids.contains(&evosim_core::cell_type::ct::WALL));

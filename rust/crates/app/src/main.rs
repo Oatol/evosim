@@ -9,6 +9,7 @@
 //! 鼠标：左键落笔（画笔工具）· 滚轮以光标为锚缩放 · 右键/中键拖动平移
 
 mod paint;
+mod panels;
 mod ui;
 
 use std::sync::Arc;
@@ -208,6 +209,7 @@ struct App {
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
     ui: ui::UiState,
+    panels: panels::Panels,
     /// egui 是否吃掉了指针（吃掉就不落笔）
     ui_wants_pointer: bool,
 }
@@ -243,6 +245,7 @@ impl App {
             egui_state: None,
             egui_renderer: None,
             ui: ui::UiState::default(),
+            panels: panels::Panels::default(),
             ui_wants_pointer: false,
         }
     }
@@ -473,6 +476,60 @@ impl App {
                 );
             }
         }
+        if let Some(id) = act.center_on {
+            self.center_on_org(id);
+        }
+        if act.clear_selection {
+            self.panels.selected_org = None;
+            self.panels.follow = false;
+        }
+    }
+
+    fn view_size(&self) -> (f32, f32) {
+        match self.config.as_ref() {
+            Some(c) => (c.width as f32, c.height as f32),
+            None => (1600.0, 950.0),
+        }
+    }
+
+    /// 把相机对准某个个体
+    fn center_on_org(&mut self, id: u32) {
+        let Some(org) = self.world.as_ref().and_then(|w| w.organism(id)) else {
+            return;
+        };
+        let (col, row) = (org.col as f32, org.row as f32);
+        let (w, h) = self.view_size();
+        self.camera.x = col - (w / self.camera.zoom) * 0.5;
+        self.camera.y = row - (h / self.camera.zoom) * 0.5;
+    }
+
+    /// 跟随：每帧把相机钉在选中个体身上
+    fn apply_follow(&mut self) {
+        if !self.panels.follow {
+            return;
+        }
+        let Some(id) = self.panels.selected_org else {
+            return;
+        };
+        self.center_on_org(id);
+    }
+
+    /// 检视工具：点谁选谁（点空地取消选中）
+    fn inspect_at_cursor(&mut self) {
+        let Some((col, row)) = self.hover_cell else {
+            return;
+        };
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let Some(idx) = world.grid.index(col, row) else {
+            return;
+        };
+        let owner = world.grid.owners[idx];
+        self.panels.selected_org = if owner >= 0 { Some(owner as u32) } else { None };
+        if self.panels.selected_org.is_none() {
+            self.panels.follow = false;
+        }
     }
 
     fn paint_at_cursor(&mut self) {
@@ -507,16 +564,26 @@ impl App {
             mode: self.renderer.as_ref().map(|r| r.mode).unwrap_or(0),
         };
 
+        let (vw, vh) = self.view_size();
+        let view = ui::ViewInfo {
+            cam_x: self.camera.x,
+            cam_y: self.camera.y,
+            zoom: self.camera.zoom,
+            width: vw,
+            height: vh,
+        };
+
         let ctx = self.egui_ctx.clone();
         let mut actions = ui::UiActions::default();
         {
             let ui_state = &mut self.ui;
+            let panels = &mut self.panels;
             let world = match self.world.as_mut() {
                 Some(w) => w,
                 None => return,
             };
             let full = ctx.run(raw, |ctx| {
-                actions = ui::draw(ctx, ui_state, world, &hud);
+                actions = ui::draw(ctx, ui_state, world, &hud, &view, panels);
             });
             if let Some(state) = self.egui_state.as_mut() {
                 state.handle_platform_output(&window, full.platform_output);
@@ -643,6 +710,11 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.update_hover();
                 self.step_simulation();
+                if let Some(world) = self.world.as_ref() {
+                    self.panels.sample(world);
+                    self.panels.tick(world);
+                }
+                self.apply_follow();
                 self.draw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -718,8 +790,14 @@ impl ApplicationHandler for App {
                 MouseButton::Left => {
                     if state == ElementState::Pressed {
                         if !self.egui_ctx.wants_pointer_input() {
-                            self.painting = true;
-                            self.paint_at_cursor();
+                            match self.ui.tool {
+                                ui::Tool::Paint => {
+                                    self.painting = true;
+                                    self.paint_at_cursor();
+                                }
+                                ui::Tool::Inspect => self.inspect_at_cursor(),
+                                ui::Tool::Pan => {}
+                            }
                         }
                     } else {
                         self.painting = false;
