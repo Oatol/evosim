@@ -88,6 +88,16 @@ pub const TEXT: Color32 = Color32::from_rgb(214, 222, 235);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 143, 160);
 pub const ACCENT: Color32 = Color32::from_rgb(56, 189, 248);
 
+/// 世界高亮所在的图层。
+///
+/// **必须是 `Order::Background`** —— egui 对这个 Order 的定义原文是
+/// "Painted behind all floating windows"。换成 `Order::Middle`（窗口所在层）
+/// 就会盖在物种工坊 / 检视器上面：`GraphicLayers::drain()` 在同一 Order 内
+/// 先画登记成 Area 的窗口，再画"不是 Area"的图层，而我们的高亮不是 Area。
+pub fn highlight_layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Background, egui::Id::new("world-highlight"))
+}
+
 /// 加载中文字体（优先微软雅黑，退回黑体）。找不到就用 egui 内置字体（中文会缺字）。
 pub fn configure(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -175,13 +185,19 @@ pub fn draw(
 ) -> UiActions {
     let mut act = UiActions::default();
 
-    // ── 先把"世界高亮"这一层建出来 ──
+    // ── 世界高亮画在 **Order::Background** 上 ──
     //
-    // egui 同一 Order 内的图层按**创建顺序**绘制。如果等面板（窗口）都画完再建这一层，
-    // 它就会盖在窗口上面（用户看到的就是"高亮浮在 UI 之上"）。
-    // 在帧首先登记一次，顺序就固定在最底层（仍然在 Order::Middle 里，只是排在窗口之前）。
-    let hl_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("world-highlight"));
-    let _ = ctx.layer_painter(hl_layer);
+    // 为什么不是 Middle（窗口所在的那一层）：
+    //   1. `Context::layer_painter()` 只是构造一个 Painter，**不会**创建图层；
+    //      图层要等到真正 add 图形时才登记，所以"帧首先登记一次"是无效的。
+    //   2. 更关键的是 `GraphicLayers::drain()` 的绘制顺序：同一 Order 内先画
+    //      登记在 `area_order` 里的 Area（窗口），再画"没登记成 Area"的图层。
+    //      我们的高亮不是 Area，所以它**永远排在所有窗口之后** —— 这就是
+    //      "高亮浮在工坊/检视器之上"的根因。
+    //
+    // Order::Background 的定义就是 "Painted behind all floating windows"，
+    // 换到这一层才是语义正确、且不依赖任何登记顺序的做法。
+    let hl_layer = highlight_layer();
 
     // ── 顶部状态条 ──
     egui::TopBottomPanel::top("hud")
@@ -617,5 +633,77 @@ mod tests {
         assert!(ids.contains(&evosim_core::cell_type::ct::LAVA));
         assert!(ids.contains(&crate::paint::ERASER));
         assert_eq!(ids.len(), 8, "7 个地形笔刷 + 橡皮擦");
+    }
+
+    /// 回归：世界高亮必须画在**窗口下面**。
+    ///
+    /// 曾经的 bug：高亮画在 `Order::Middle`。`GraphicLayers::drain()` 在同一个
+    /// Order 内先画登记成 Area 的窗口、再画"不是 Area"的图层，而高亮不是 Area，
+    /// 所以它永远排在所有窗口之后 —— 一打开物种工坊 / 检视器，高亮就压在上面。
+    ///
+    /// 这里不依赖窗口渲染（headless 下 egui 的窗口帧有淡入，第一帧会被剔成 Noop），
+    /// 而是直接验证"层的先后"这件事本身：往 Middle 层画一个窗口底色，再往高亮层
+    /// 画描边，然后检查绘制顺序里描边排在底色之前。
+    #[test]
+    fn highlight_is_painted_below_windows() {
+        assert_eq!(
+            highlight_layer().order,
+            egui::Order::Background,
+            "高亮层必须是 Order::Background（egui 定义：Painted behind all floating windows）"
+        );
+
+        let ctx = egui::Context::default();
+        configure(&ctx);
+
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1600.0, 950.0),
+        ));
+
+        let out = ctx.run(input, |ctx| {
+            // 先画"窗口"（Middle 层），再画高亮 —— 故意按最坏的顺序添加
+            let win_layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("fake-window"));
+            ctx.layer_painter(win_layer).rect_filled(
+                egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 200.0)),
+                CornerRadius::ZERO,
+                PANEL,
+            );
+            ctx.layer_painter(highlight_layer()).rect_stroke(
+                egui::Rect::from_min_size(egui::pos2(120.0, 120.0), egui::vec2(8.0, 8.0)),
+                CornerRadius::ZERO,
+                Stroke::new(1.0, ACCENT),
+                StrokeKind::Inside,
+            );
+        });
+
+        fn walk<'a>(shapes: &'a [egui::Shape], out: &mut Vec<&'a egui::epaint::RectShape>) {
+            for s in shapes {
+                match s {
+                    egui::Shape::Rect(r) => out.push(r),
+                    egui::Shape::Vec(v) => walk(v, out),
+                    _ => {}
+                }
+            }
+        }
+        let flat: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
+        let mut rects = Vec::new();
+        walk(&flat, &mut rects);
+
+        let hl = rects
+            .iter()
+            .position(|r| r.fill == Color32::TRANSPARENT && r.stroke.color == ACCENT)
+            .expect("没有画出高亮描边");
+        let win = rects
+            .iter()
+            .position(|r| r.fill == PANEL)
+            .expect("没有画出窗口底色");
+
+        assert!(
+            hl < win,
+            "高亮必须画在窗口之前（高亮 #{}, 窗口 #{}）——否则会盖在工坊/检视器上面",
+            hl,
+            win
+        );
     }
 }
