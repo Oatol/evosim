@@ -1,0 +1,12 @@
+[package]
+name = "evosim-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "evosim"
+path = "src/main.rs"
+
+[dependencies]
+evosim-core = { path = "../core" }
