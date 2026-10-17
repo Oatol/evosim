@@ -333,6 +333,9 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // right_to_left 里先加的排在最右，所以先垫一格空白，
+            // 否则计数会紧贴窗口右边框（看着像被裁了一半）。
+            ui.add_space(6.0);
             // 显示"改没改过"，省得用户忘了自己动过手
             let changed = (0..CELL_DEFS.len())
                 .filter(|&i| {
