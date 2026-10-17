@@ -2,7 +2,7 @@
 //
 // 为什么不用"每个细胞一个四边形"：200×150 = 30000 格，实例化 3 万个 quad
 // 在低倍率下是纯浪费。这里反过来做：屏幕像素 → 世界坐标 → 查纹理。
-// 缩放、平移、世界平铺全部在着色器里完成，CPU 每帧只更新一个 48 字节的 uniform。
+// 缩放、平移、世界环绕全部在着色器里完成，CPU 每帧只更新一个 48 字节的 uniform。
 
 struct Uniforms {
     // 视口像素尺寸
@@ -26,6 +26,10 @@ struct Uniforms {
 // 类型调色板（256 项 RGBA8）
 @group(0) @binding(3) var type_palette: texture_2d<f32>;
 
+// 世界之外的背景色。刻意比"空格"（#0b1020）更暗一点，
+// 这样缩小时能一眼看出世界的边界在哪。
+const BACKDROP: vec4<f32> = vec4<f32>(0.019, 0.027, 0.047, 1.0);
+
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     // 一个覆盖整个裁剪空间的大三角形
@@ -45,11 +49,32 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let cols = i32(u.grid.x);
     let rows = i32(u.grid.y);
 
-    // 世界坐标取整 → 环绕折回（与 Grid::index 的 rem_euclid 语义一致）
+    // 世界在屏幕上的像素尺寸
+    let world_px = u.grid * u.zoom;
+
     var col = i32(floor(world.x));
     var row = i32(floor(world.y));
-    col = ((col % cols) + cols) % cols;
-    row = ((row % rows) + rows) % rows;
+
+    // ── 只在"世界比视口大"的方向做环绕 ──
+    //
+    // 两个方向都要单独判断：世界可能一边比视口宽、另一边比视口窄。
+    // 如果无条件取模，缩小到能看见整个世界时，画面会把同一个世界重复铺满屏幕
+    // —— 1.x 踩过这个坑，这里用世界尺寸和视口尺寸的比较来根治。
+    if (world_px.x < u.viewport.x) {
+        if (col < 0 || col >= cols) {
+            return BACKDROP;
+        }
+    } else {
+        col = ((col % cols) + cols) % cols;
+    }
+
+    if (world_px.y < u.viewport.y) {
+        if (row < 0 || row >= rows) {
+            return BACKDROP;
+        }
+    } else {
+        row = ((row % rows) + rows) % rows;
+    }
 
     let uv = vec2<u32>(u32(col), u32(row));
 

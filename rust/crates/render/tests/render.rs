@@ -165,3 +165,38 @@ fn small_world(cols: usize, rows: usize) -> World {
     cfg.world.rows = rows;
     World::new(cfg, Rng::new(1))
 }
+
+/// 世界比视口小时**不许平铺**。
+///
+/// 曾经的 bug：着色器无条件取模，缩到能看见整个世界时，屏幕被同一个世界重复铺满。
+/// 现在按"世界像素尺寸 < 视口尺寸"逐方向判断，越界就画背景色。
+#[test]
+fn no_tiling_when_world_smaller_than_viewport() {
+    let Some((device, queue)) = evosim_render::create_headless_device() else {
+        return;
+    };
+    let mut world = small_world(8, 8);
+    world.fill_grid(ct::EMPTY, false);
+    world.set_cell(2, 2, ct::WALL, -1);
+
+    let mut r = GridRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, 8, 8);
+    r.upload_types(&world);
+
+    // zoom=2 → 世界只有 16×16 像素，视口 80×80；相机 (-10,-10) 把世界放到屏幕 (20,20)-(36,36)
+    let cam = Camera {
+        x: -10.0,
+        y: -10.0,
+        zoom: 2.0,
+    };
+    let rgba = render_to_rgba(&mut r, W, H, &cam);
+
+    // 世界内部：屏幕 (25,25) → 世界 (2.5,2.5) → 格子 (2,2) = 墙
+    assert_eq!(px(&rgba, 25, 25), palette_rgb(ct::WALL), "世界内部应渲染出墙");
+
+    // 世界外部：必须是与空格不同的背景色（否则说明又平铺了）
+    let backdrop = px(&rgba, 5, 5);
+    assert_ne!(backdrop, palette_rgb(ct::EMPTY), "世界之外不该是空格色");
+    assert_ne!(backdrop, palette_rgb(ct::WALL), "世界之外不该出现世界的副本");
+    assert_eq!(px(&rgba, 70, 70), backdrop, "两侧背景应一致");
+    assert_eq!(px(&rgba, 5, 70), backdrop, "四角都应是背景");
+}

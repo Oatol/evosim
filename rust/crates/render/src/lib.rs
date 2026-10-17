@@ -296,10 +296,11 @@ impl GridRenderer {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
+                        // 与世界之外的背景色一致（着色器里的 BACKDROP）
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.043,
-                            g: 0.063,
-                            b: 0.125,
+                            r: 0.019,
+                            g: 0.027,
+                            b: 0.047,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
