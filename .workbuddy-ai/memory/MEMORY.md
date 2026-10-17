@@ -58,25 +58,12 @@
   `tick`（世界级，`applyTerrainTick` 调，需索引）。函数在 `life/Terrain.js`，数值在 `Config.terrain`。
   **读 `floor` 层而不是顶层 `types`**（生物自己的细胞就压在枢轴格上）
 
-**存档 / 导出 / 界面**
-- **存档四件套**：配置快照 + 地形 + 全部个体（含 base64 Float32 权重）+ RNG 状态；外加物种表。
-  地形存 `floor` 层（含被生物踩住的），按类型 key 分组 `grid.terrain`；`SAVE_VERSION = 2`，v1 仍可读
-- **`localStorage` 必须过 `storageAvailable()` 探测**（`file://` 下抛 `SecurityError`）；**CSV 带 UTF-8 BOM**
-- **浮窗点击穿透**：外层 `pointer-events:none`、只有面板 `auto`。**绝不用全屏 backdrop**——它会吃掉所有点击
-  （含工具栏），是"克隆选中"永远失败的根因。未锁定时**只被"点世界画布"关闭**（判据 `closest('.canvas-wrap')`），
-  **物种树默认锁上**、检视器默认不锁。关闭路径必须收敛到各自 `close()`（`onClose`/`onOpenChanged` 只在这里
-  触发，且要加 `if (this.root.hidden) return;`）
-- **Esc 分层**：检视器 → 物种工坊 → 物种树 → 参数抽屉 → 退出放置模式
-- **渲染循环与模拟解耦**：`running` 只控制"是否推进世界"，RAF 循环常驻。**`pause()` 不能 `cancelAnimationFrame`**
-  （否则 `onFrame` 不再触发，准星/高亮/浮窗冻在最后一帧）。**`engine.fps`/`tps` 暂停时是冻结旧读数**，
-  测性能必须先 `engine.start()`
-- **物种树只展开存活分支**（前序遍历；`buildLineage` 是不碰 DOM 的纯函数），节点上限 240、存活物种一律保留。
-  **物种色由指纹哈希决定**（确定性不存表）——这是"按物种着色"与物种树能互相对照的前提
-- **两种高亮都画在主画布上**（非世界状态）；相机跟随由 `engine.onFrame` 消费，个体死亡/检视器关闭都要
-  `setFollow(false)`。**生物库读回统一走 `blueprintOf()`**（曾手写解析把 `dx` 读成 `type`，蓝图整个错位）
-- **桌面版写盘通道**：exe 本地服务 `GET /__evosim/ping` + `POST /__evosim/save`，HTML 注入
-  `window.__EVOSIM_HOST__={app,dir}`。**浏览器版没标记就一个探测请求都不发**（失败请求会留控制台错误，
-  而"无控制台错误"是端到端硬指标）。`safeName()` 只取 basename 并清洗非法字符
+**存档 / 导出（JS 版已冻结，细节见 DESIGN.md）**
+- JS 版：存档四件套（配置快照 + 地形 floor 层 + 全部个体含权重 + RNG）+ 物种表，`SAVE_VERSION=2`；
+  CSV 带 UTF-8 BOM；`localStorage` 过 `storageAvailable()` 探测
+- 浮窗一律**点击穿透**（外层 `pointer-events:none`、面板 `auto`），**绝不用全屏 backdrop**
+- **渲染循环与模拟解耦**：`pause()` 不能 `cancelAnimationFrame`（否则 onFrame 不再触发，准星冻住）
+- 物种色 = 指纹哈希（确定性、不存表）——"按物种着色"与物种树能互相对照的前提
 
 ## 架构决策：JS 版冻结，转 Rust 原生（2026-10-17）
 
@@ -96,23 +83,22 @@
 
 ## 性能基线（2026-10-17 实测，讨论性能前先看这张表）
 
+**稳态**（种群长到 ~1550 只、200×150）：
+
 | 项 | 实测 |
 |---|---|
-| `world.step()` 稀疏（9 只） | 0.027 ms/tick |
-| `world.step()` 满载（1517 只） | **2.0 ms/tick**（≈1.3 µs/只） |
-| `renderer.render()` zoom 2/4/8/16 | 0.002 / 0.003 / 0.54 / 0.13 ms/帧 |
-| `render()` 含全量层重建 | 0.26–0.30 ms/帧 |
-| 1× / 10× / 50× | 144fps·60tps / **4fps**·600tps / **4.6fps**·1838tps |
-| 单只大脑前向 | 1.01 µs（扁平化批处理 0.68 µs，**仅 1.47×**） |
-| 全分辨率 5 点扩散（30k 格） | 0.13 ms/次 → 60Hz 仅 8 ms/s |
-| 全图重着色 30k 像素 | 0.043 ms/次 |
-| **Rust 单线程（1530 只）** | **0.453 ms/tick** |
-| **Rust + rayon 并行 think()** | **0.210 ms/tick（≈9.5×）** |
+| JS 版（Chrome，1517 只） | 2.0 ms/tick |
+| Rust 单线程 | 0.803 ms/tick（2.5×） |
+| **Rust + rayon（按物理核 8 线程，fat LTO）** | **0.279 ms/tick（7.2×）** |
+| 50× 倍速（目标 3000 tps） | **~3580 tps（119%），已跑满** |
+| 环境场 update（两张 30k 格） | 0.154 ms/次 → 60Hz 约占 1% 帧预算 |
+| 全图重着色 30k 像素 | 0.043 ms/次；render 全量重建 0.26–0.30 ms/帧 |
 
-**结论：瓶颈是"每只生物 ~1.3 µs/tick 的 CPU 模拟"（其中大脑前向 1.0 µs），不是渲染。**
-渲染只占 0.1–0.5 ms/帧 → **换 GPU 渲染几乎零收益**；换桌面外壳也不改 CPU 速度。
-真正的杠杆：Worker 化（保 60fps 手感）→ 感知/统计降频（1.5–2×）→ WASM SIMD 批量前向（3–5×）→ 多 Worker 分片。
-**`pause()` 期间不能测性能**（fps/tps 冻结），必须先 `engine.start()`。
+- **瓶颈是每只生物 ~1.3 µs/tick 的 CPU 模拟**（其中大脑前向约 1.0 µs，占 77%），不是渲染 →
+  换 GPU 渲染几乎零收益；单只成本**与体型线性相关**（act 遍历细胞、think 遍历带朝向的细胞）
+- **测性能必须用 `--bench` 的稳态**：整轮平均（含种群从 9 长到 1500 的低负载阶段）会得到
+  好看但无意义的 0.21 ms/tick
+- **线程数按物理核数**（逻辑核一半）：8 线程 0.415，用满逻辑核反而 0.483
 
 ## 踩过的坑（都是真发生过的）
 
