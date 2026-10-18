@@ -833,6 +833,45 @@ mod tests {
         assert!(!out.shapes.is_empty(), "界面没有产出任何图形");
     }
 
+    /// 类型参数窗口要能把**每一种**类型都画出来。
+    ///
+    /// `ui_builds_without_panic` 用的是 `UiState::default()`，那个窗口是关着的，
+    /// 所以它一个字都没画到。这里逐个选中跑一帧。
+    ///
+    /// 地形那半边是这次新接进来的：参数种类和值的来源都和细胞不同
+    /// （`Config.terrain` vs `Config.cells`），`Values::get` 挂错分支会**静默返回 0**
+    /// ——滑块照样画得出来，只是永远是 0 且拖不动。只有真的每种都画一遍才发现得了。
+    #[test]
+    fn type_params_window_draws_every_type() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut world = test_world();
+
+        let mut ids: Vec<u8> = evosim_core::cell_type::LIVING_CELL_TYPES.to_vec();
+        ids.extend_from_slice(&evosim_core::cell_type::PARAM_TERRAIN_TYPES);
+
+        for id in ids {
+            let mut sel = id;
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 950.0),
+            ));
+            let out = ctx.run(input, |ctx| {
+                egui::Window::new("类型参数").show(ctx, |ui| {
+                    crate::cells::draw(ui, &mut world, &mut sel);
+                });
+            });
+            assert_eq!(
+                sel,
+                id,
+                "选中「{}」之后被面板改掉了（多半是兜底分支误判成「没有参数」）",
+                evosim_core::cell_type::label(id)
+            );
+            assert!(!out.shapes.is_empty(), "「{}」没画出任何图形", evosim_core::cell_type::label(id));
+        }
+    }
+
     /// 回归：放置模式必须压过当前工具。
     ///
     /// 曾经的 bug：投放逻辑藏在 `paint_at_cursor` 里，那条路径要求工具是「画笔」，
