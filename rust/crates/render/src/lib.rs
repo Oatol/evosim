@@ -320,6 +320,7 @@ impl GridRenderer {
         match mode {
             2 => self.set_field_colormap(&colors::temp_colormap()),
             3 => self.set_field_colormap(&colors::rad_colormap()),
+            4 => self.set_field_colormap(&colors::light_colormap()),
             _ => {}
         }
     }

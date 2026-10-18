@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::fields::Fields;
 use crate::grid::Grid;
+use crate::light::Light;
 use crate::organism::Organism;
 use crate::rng::Rng;
 use crate::species::SpeciesRegistry;
@@ -54,7 +55,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v3：`LifeCfg` 加了 `breed_cost_exponent` / `max_body_cells`（大体型）。同理。
 /// v4：`CellAttrs` 加了 5 个每细胞倍率（`bite_mult` / `prod_mult` / `regen_mult` /
 /// `storage_mult` / `armor_resist`），让参数按细胞类型分化。同理。
-pub const VERSION: u32 = 4;
+/// v5：`SaveFile` 加了 `light`（光场，批次 7）。同理。
+pub const VERSION: u32 = 5;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
@@ -80,6 +82,9 @@ pub struct SaveFile {
     pub organisms: Vec<Organism>,
     pub species: SpeciesRegistry,
     pub fields: Fields,
+    /// 光场。**存下来而不是读档重算**：重算只依赖地形，理论上等价，
+    /// 但存档应该能完整还原「用户看到的那一帧」，别在这里省 30KB。
+    pub light: Light,
 }
 
 /// 只读文件头就能拿到的摘要（世界窗口列存档用）
@@ -148,6 +153,7 @@ pub fn encode(world: &World) -> Vec<u8> {
         organisms: world.organisms.clone(),
         species: world.species.clone(),
         fields: world.fields.clone(),
+        light: world.light.clone(),
     };
 
     let body = bincode::serialize(&save).expect("存档序列化失败");
@@ -234,6 +240,7 @@ fn into_world(save: SaveFile) -> World {
         organisms,
         species,
         fields,
+        light,
     } = save;
 
     // 先按 config 建一个空世界（拿到尺寸正确的索引表），随后整体覆盖
@@ -263,6 +270,7 @@ fn into_world(save: SaveFile) -> World {
         .collect();
     world.species = species;
     world.fields = fields;
+    world.light = light;
 
     world
 }

@@ -494,6 +494,7 @@ impl App {
             match renderer.mode {
                 2 => renderer.upload_field(&world.fields.temp),
                 3 => renderer.upload_field(&world.fields.rad),
+                4 => renderer.upload_field(&world.light.level),
                 _ => {}
             }
         }
@@ -531,6 +532,9 @@ impl App {
                 rad as u32 * 100 / 255
             ));
         }
+        // 光照**总是显示**（0 也是信息：全黑 = 生产者在这里没有产出）
+        let lit = world.light.at(&world.grid, col, row);
+        text.push_str(&format!(" · 光照 {}%", lit as u32 * 100 / 255));
         if owner >= 0 {
             if let Some(org) = world.organism(owner as u32) {
                 let sp = org
@@ -544,7 +548,7 @@ impl App {
                     org.id,
                     sp,
                     org.energy,
-                    org.reproduce_at(&world.config),
+                    org.energy_capacity(&world.config),
                     org.cell_count()
                 ));
             }
@@ -570,9 +574,9 @@ impl App {
             self.speed_idx = i.clamp(0, SPEEDS.len() as i32 - 1) as usize;
         }
         if act.toggle_mode {
-            // 四档循环：类型 → 物种 → 温度 → 辐射 → 类型
+            // 五档循环：类型 → 物种 → 温度 → 辐射 → 光照 → 类型
             if let Some(renderer) = self.renderer.as_mut() {
-                renderer.set_mode((renderer.mode + 1) % 4);
+                renderer.set_mode((renderer.mode + 1) % 5);
             }
             if let Some(world) = self.world.as_ref() {
                 if let Some(renderer) = self.renderer.as_mut() {

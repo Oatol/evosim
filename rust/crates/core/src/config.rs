@@ -18,7 +18,7 @@ pub struct CellAttrs {
     pub sense_range: f64,
     // ── 倍率：乘在**全局基值**上，默认 1.0 = 完全等价旧行为 ──
     //
-    // 为什么用倍率而不是绝对值：这几项原本是全局参数（`life.food_prod_prob` 等），
+    // 为什么用倍率而不是绝对值：这几项原本是全局参数（`life.photosynthesis_rate` 等），
     // 直接下放成每细胞的绝对值就得给 16 种细胞都填一个"合理"的数，
     // 而且默认值一变黄金快照立刻漂移。倍率写法让默认配置**逐位不变**，
     // 只有用户主动拖滑块才偏离 1.x 基线。
@@ -96,6 +96,11 @@ pub struct WorldCfg {
     pub food_decay_rate: f64,
     pub clear_walls_on_reset: bool,
     pub auto_reset: bool,
+    /// 太阳强度（0 = 永夜，1 = 正常，2 = 双倍）。
+    ///
+    /// 采样时乘在光场上，**不重算光场**，所以拖动滑块是零成本的。
+    /// 拨到 0 就是永夜——一个现成的对照实验：没有光合，看生态怎么塌。
+    pub sun_intensity: f64,
 }
 
 impl Default for WorldCfg {
@@ -108,6 +113,7 @@ impl Default for WorldCfg {
             food_decay_rate: 2.0,
             clear_walls_on_reset: false,
             auto_reset: false,
+            sun_intensity: 1.0,
         }
     }
 }
@@ -117,7 +123,19 @@ pub struct LifeCfg {
     pub lifespan_multiplier: f64,
     pub extra_mover_food_cost: f64,
     pub max_organisms: i64,
-    pub food_prod_prob: f64,
+    /// 光合速率：满照（光强 255）下一个生产者细胞每 tick 产出多少能量。
+    ///
+    /// 批次 7 之前这里是 `food_prod_prob`（凭空在相邻空格造食物的概率），
+    /// 那是台永动机——造食物不消耗任何东西。现在光成了唯一的能量来源，
+    /// 生产者是**转换器**：产出正比于它所在格的光强，暗处产出为 0。
+    pub photosynthesis_rate: f64,
+    /// 每个细胞提供的能量容量。光合直充体内之后必须有上限，否则无限膨胀。
+    pub energy_per_cell: f64,
+    /// 每个储食细胞额外提供的能量容量（电池）。
+    ///
+    /// 储食细胞因此同时是收益和风险：装得多 = 熬得过饥荒 / 黑夜，
+    /// 但被杀死时对方从尸体上吃到的也更多。
+    pub storage_capacity: f64,
     pub movers_can_produce: bool,
     pub turn_cooldown: i32,
     pub metabolism_scale: f64,
@@ -146,7 +164,9 @@ impl Default for LifeCfg {
             lifespan_multiplier: 100.0,
             extra_mover_food_cost: 0.0,
             max_organisms: -1,
-            food_prod_prob: 5.0,
+            photosynthesis_rate: 0.12,
+            energy_per_cell: 2.0,
+            storage_capacity: 6.0,
             movers_can_produce: false,
             turn_cooldown: 4,
             metabolism_scale: 0.0,
@@ -541,7 +561,7 @@ impl AttrField {
             AttrField::SenseRange => "眼睛能看多远。0 = 用全局视野距离。",
             AttrField::FoodValue => "被吃掉时提供多少能量（会再乘上食物量倍率）。",
             AttrField::BiteMult => "一份食物换多少能量的倍率（× 全局「食物量倍率」）。",
-            AttrField::ProdMult => "造食概率的倍率（× 全局「生产者造食率」）。",
+            AttrField::ProdMult => "光合产出的倍率（× 全局「光合速率」）。",
             AttrField::RegenMult => "每 tick 抹掉累积伤害的倍率（× 全局「再生速率」）。",
             AttrField::StorageMult => "繁殖阈值抬高量的倍率（× 全局「储食加成」）。",
             AttrField::ArmorResist => "受到攻击时的伤害减免比例。1.00 = 完全免疫（出厂值）。",
@@ -599,94 +619,6 @@ impl ParamRef {
     #[inline]
     pub fn is_cell(self) -> bool {
         matches!(self, ParamRef::Cell(_))
-    }
-}
-
-/// 参数元数据（面板渲染用）。第一阶段只用得上少数几项。
-pub struct FieldMeta {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub min: f64,
-    pub max: f64,
-    pub step: f64,
-    pub note: &'static str,
-}
-
-pub const KEY_FIELDS: [FieldMeta; 6] = [
-    FieldMeta {
-        key: "metabolism_scale",
-        label: "全局消耗量倍率",
-        min: 0.0,
-        max: 5.0,
-        step: 0.05,
-        note: "0 = 关闭。调高会带来真实的选择压力",
-    },
-    FieldMeta {
-        key: "food_energy_scale",
-        label: "食物量倍率",
-        min: 0.1,
-        max: 10.0,
-        step: 0.1,
-        note: "一份食物能提供多少能量",
-    },
-    FieldMeta {
-        key: "food_prod_prob",
-        label: "生产者造食率",
-        min: 0.0,
-        max: 100.0,
-        step: 1.0,
-        note: "生产者细胞每 tick 生成食物的概率（%）",
-    },
-    FieldMeta {
-        key: "global_mutability",
-        label: "全局变异率",
-        min: 1.0,
-        max: 100.0,
-        step: 1.0,
-        note: "需勾选「启用全局变异率」才生效",
-    },
-    FieldMeta {
-        key: "max_organisms",
-        label: "种群上限",
-        min: -1.0,
-        max: 5000.0,
-        step: 50.0,
-        note: "-1 = 无上限",
-    },
-    FieldMeta {
-        key: "lifespan_multiplier",
-        label: "寿命倍率",
-        min: 1.0,
-        max: 1000.0,
-        step: 1.0,
-        note: "寿命 = 细胞数 × 倍率",
-    },
-];
-
-impl Config {
-    /// 按 key 读关键参数（第一阶段只暴露这几个）
-    pub fn get_key(&self, key: &str) -> f64 {
-        match key {
-            "metabolism_scale" => self.life.metabolism_scale,
-            "food_energy_scale" => self.life.food_energy_scale,
-            "food_prod_prob" => self.life.food_prod_prob,
-            "global_mutability" => self.mutation.global_mutability,
-            "max_organisms" => self.life.max_organisms as f64,
-            "lifespan_multiplier" => self.life.lifespan_multiplier,
-            _ => 0.0,
-        }
-    }
-
-    pub fn set_key(&mut self, key: &str, v: f64) {
-        match key {
-            "metabolism_scale" => self.life.metabolism_scale = v,
-            "food_energy_scale" => self.life.food_energy_scale = v,
-            "food_prod_prob" => self.life.food_prod_prob = v,
-            "global_mutability" => self.mutation.global_mutability = v,
-            "max_organisms" => self.life.max_organisms = v as i64,
-            "lifespan_multiplier" => self.life.lifespan_multiplier = v,
-            _ => {}
-        }
     }
 }
 

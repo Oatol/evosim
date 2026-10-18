@@ -354,11 +354,12 @@ pub fn draw(
                         1 => "着色：物种",
                         2 => "着色：温度",
                         3 => "着色：辐射",
+                        4 => "着色：光照",
                         _ => "着色：类型",
                     };
                     if ui
                         .button(mode_label)
-                        .on_hover_text("Tab 依次切换：类型 → 物种 → 温度 → 辐射")
+                        .on_hover_text("Tab 依次切换：类型 → 物种 → 温度 → 辐射 → 光照")
                         .clicked()
                     {
                         act.toggle_mode = true;
@@ -491,11 +492,40 @@ pub fn draw(
                         .step_by(0.1),
                 )
                 .on_hover_text("一份食物能提供多少能量（默认 1）。");
+                // ── 光与光合 ──
+                //
+                // 这两项是批次 7 新增的。生产者不再是永动机：它把**所在格的光**转成能量，
+                // 所以「太阳强度」直接决定整个生态的丰饶度，拨到 0 就是永夜。
+                let before_sun = cfg.world.sun_intensity;
+                let mut sun = before_sun;
                 ui.add(
-                    egui::Slider::new(&mut cfg.life.food_prod_prob, 0.0..=100.0)
-                        .text("生产者造食率")
-                        .step_by(1.0),
+                    egui::Slider::new(&mut sun, 0.0..=2.0)
+                        .text("太阳强度")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "光场的全局乘数，采样时乘上去，不重算光场。\n\
+                     0 = 永夜（光合全部停摆），1 = 正常，2 = 双倍。",
                 );
+                if (sun - before_sun).abs() > 1e-9 {
+                    cfg.world.sun_intensity = sun;
+                }
+                let before_photo = cfg.life.photosynthesis_rate;
+                let mut photo = before_photo;
+                ui.add(
+                    egui::Slider::new(&mut photo, 0.0..=1.0)
+                        .text("光合速率")
+                        .step_by(0.01)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "满照下一个生产者细胞每 tick 产出多少能量。\n\
+                     产出正比于它所在格的光强——暗处的生产者是纯负担。",
+                );
+                if (photo - before_photo).abs() > 1e-9 {
+                    cfg.life.photosynthesis_rate = photo;
+                }
                 ui.separator();
                 ui.checkbox(&mut cfg.mutation.use_global_mutability, "启用全局变异率");
                 ui.add(

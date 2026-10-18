@@ -136,6 +136,22 @@ impl Organism {
             .count()
     }
 
+    /// 能量容量的**上限**（光合直充体内之后必须有，否则无限膨胀）。
+    ///
+    /// `身体格数 × energy_per_cell + 储食细胞数 × storage_capacity`。
+    ///
+    /// 储食细胞因此同时是收益和风险：装得多 = 熬得过饥荒 / 黑夜，
+    /// 但被杀死时对方从尸体上吃到的也更多。
+    ///
+    /// 注意它和 [`reproduce_at`](Self::reproduce_at) 是两件事：
+    /// 后者是**触发繁殖**的阈值，前者是**能装多少**。容量必须大于阈值，
+    /// 否则永远攒不够繁殖的能量——默认参数下 `n×2.0` 对 `n^p` 恒成立。
+    pub fn energy_capacity(&self, cfg: &Config) -> f64 {
+        let n = self.anatomy.cells.len() as f64;
+        n * cfg.life.energy_per_cell
+            + self.storage_count() as f64 * cfg.life.storage_capacity
+    }
+
     /// 被攻击时反弹的伤害（所有刺细胞的 damage 之和）
     pub fn spike_damage(&self, cfg: &Config) -> f64 {
         if !self.anatomy.has(Flags::SPIKE) {

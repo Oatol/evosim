@@ -11,6 +11,7 @@ pub mod factory;
 pub mod fields;
 pub mod grid;
 pub mod jsmath;
+pub mod light;
 pub mod mutation;
 pub mod organism;
 pub mod rng;

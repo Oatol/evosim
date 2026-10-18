@@ -180,7 +180,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::MOUTH, "MOUTH", "mouth", "嘴")
     },
     CellDef {
-        desc: "以「生产者造食率」的概率在相邻空格长出食物；会动的个体默认不能用。",
+        desc: "按所在格的光强把能量直接充进体内；暗处不产出。会动的个体默认不能用。",
         is_body_cell: true,
         paintable: true,
         visible: true,

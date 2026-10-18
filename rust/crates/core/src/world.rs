@@ -19,6 +19,7 @@ use crate::config::AttrField;
 use crate::config::Config;
 use crate::fields::Fields;
 use crate::grid::Grid;
+use crate::light::Light;
 use crate::mutation::mutate_organism;
 use crate::organism::Organism;
 use crate::rng::Rng;
@@ -59,6 +60,18 @@ pub struct World {
     /// 也不会因为倍速把 CPU 吃光。也因此它不影响黄金快照。
     pub fields: Fields,
 
+    /// 光场（0–255）。生产者细胞靠它吃饭，见 `light.rs`。
+    ///
+    /// 和 `fields` 一样在 `update_fields()` 里刷，但性质不同：光场是**地形的纯函数**
+    /// （生物不挡光），所以刷新只是把地形重新投射一遍，不涉及时间演化。
+    /// 光合按 tick 采样 `light.level[i]`，所以刷新的频率只要不低于地形变化即可。
+    pub light: Light,
+
+    /// 光合产出因超出容量而被丢弃的累计能量（f64）。
+    ///
+    /// 现在只是统计量；批次 10 做守恒审计时，它要和「热池」一起进能量账。
+    pub energy_wasted: f64,
+
     /// 阶段 B 的随机结算顺序（复用，避免每 tick 分配）
     order: Vec<usize>,
 }
@@ -78,12 +91,17 @@ impl World {
             terrain: HashMap::new(),
             species: SpeciesRegistry::default(),
             fields: Fields::new(len),
+            light: Light::new(config.world.cols, config.world.rows),
+            energy_wasted: 0.0,
             order: Vec::new(),
             config,
             rng,
         };
         w.init_food_index();
         w.init_terrain_index();
+        // 建世界时地形是空的，但 `light` 的初值全 0（全黑）。这里先投一次，
+        // 否则要等到第一次 `update_fields()` 才亮起来——中间那几帧光合会白算。
+        w.light.rebuild(&w.grid);
         w
     }
 
@@ -755,6 +773,11 @@ impl World {
 
     // ────────────────────────────── 细胞功能 ──────────────────────────────
 
+    /// 这个个体能存多少能量（见 [`Organism::energy_capacity`]）。
+    fn energy_capacity(&self, i: usize) -> f64 {
+        self.organisms[i].energy_capacity(&self.config)
+    }
+
     fn run_cell_function(&mut self, i: usize, cell: BodyCell) {
         let behavior = match cell_type::def(cell.type_id).and_then(|d| d.behavior) {
             Some(b) => b,
@@ -784,22 +807,37 @@ impl World {
                 {
                     return;
                 }
-                // 全局「生产者造食率」× 这个生产者自己的倍率（出厂 1.0 = 不变）
-                let prob = self.config.life.food_prod_prob
-                    * self.config.attr(cell.type_id, AttrField::ProdMult);
-                if prob <= 0.0 {
-                    return;
-                }
-                if !self.rng.chance(prob) {
-                    return;
-                }
+                // ── 光合：光强 × 全局光合速率 × 这个生产者自己的倍率 ──
+                //
+                // 能量**直接进体内**，不经过食物格。这是批次 7 的核心改动：
+                // 以前是 `rng.chance(food_prod_prob)` 凭空在相邻空格造一份食物，
+                // 造食物不消耗任何东西——那是台永动机。
+                //
+                // 现在光成了唯一的能量来源：产出正比于**这一格的光强**，
+                // 所以「站在哪」第一次有了价值。暗处的生产者产出为 0，
+                // 它是纯负担（占一格、消耗一份 upkeep），这本身就是选择压。
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
-                let n = NEIGHBORS_4[self.rng.int(4)];
-                if let Some(index) = self.grid.index(col + n.0, row + n.1) {
-                    if self.grid.types[index] == ct::EMPTY {
-                        self.set_cell_at(index, ct::FOOD, -1);
-                    }
+                let lit = self.light.lit_at(&self.grid, col, row);
+                if lit <= 0.0 {
+                    return;
+                }
+                let gain = lit
+                    * self.config.life.photosynthesis_rate
+                    * self.config.attr(cell.type_id, AttrField::ProdMult)
+                    * self.config.world.sun_intensity;
+                if gain <= 0.0 {
+                    return;
+                }
+                // 容量上限：光合直充体内之后必须有，否则能量无限膨胀。
+                // 超出部分丢弃并记账（批次 10 的守恒审计要用）。
+                let cap = self.energy_capacity(i);
+                let room = (cap - self.organisms[i].energy).max(0.0);
+                if gain <= room {
+                    self.organisms[i].energy += gain;
+                } else {
+                    self.organisms[i].energy = cap;
+                    self.energy_wasted += gain - room;
                 }
             }
             Behavior::Killer => {
@@ -1019,6 +1057,7 @@ impl World {
         self.clear_organisms();
         self.grid.wrap = self.config.world.wrap_edges;
         self.grid.fill(ct::EMPTY, keep_terrain);
+        self.light.rebuild(&self.grid);
         self.init_food_index();
         self.init_terrain_index();
         self.species = SpeciesRegistry::default();
@@ -1034,6 +1073,8 @@ impl World {
         self.grid = Grid::new(cols, rows, self.config.world.wrap_edges);
         self.fields.resize(self.grid.len);
         self.fields.clear();
+        self.light.resize(cols, rows);
+        self.light.rebuild(&self.grid);
         self.init_food_index();
         self.init_terrain_index();
         self.species = SpeciesRegistry::default();
@@ -1043,10 +1084,18 @@ impl World {
 
     // ────────────────────────────── 环境场 ──────────────────────────────
 
-    /// 推进一格环境场（温度 / 辐射）。**由主程序按墙钟 60 Hz 调用**，不在 `step()` 里。
+    /// 推进一格环境场（温度 / 辐射）并重算光场。**由主程序按墙钟 60 Hz 调用**，
+    /// 不在 `step()` 里。
+    ///
+    /// 光场在这里重算是图省事：它是地形的纯函数，`O(cols×rows)` 一次扫描约 40 µs，
+    /// 60 Hz 下占 0.24% CPU。换成「地形变了才重算」要找出所有改 `floor` 的路径
+    /// （画/擦/填充/重置/读档/工坊放置……），漏一个就是光场和地形不同步的怪 bug。
     pub fn update_fields(&mut self) {
-        let World { grid, fields, .. } = self;
+        let World {
+            grid, fields, light, ..
+        } = self;
         fields.update(grid);
+        light.rebuild(grid);
     }
 
     // ────────────────────────────── 统计 ──────────────────────────────
@@ -1318,20 +1367,138 @@ mod tests {
         assert_eq!(run(0.0), 0.0, "摄取倍率 0 应该吃不到任何能量");
     }
 
-    /// 生产者的「生产速度」要乘在造食概率上。
+    /// 造一个「光合测试个体」：1 个生产者 + 1 个储食，满照，能量清零。
+    ///
+    /// **必须把繁殖阈值拉到天上去**：`act_organism` 末尾含繁殖判定，能量一过阈值
+    /// 就会被扣掉一份繁殖成本，测到的就不是光合产出了。这个坑在批次 6 测
+    /// `bite_mult` 时踩过一次。
+    ///
+    /// 容量 = 2 格 × 2.0 + 1 储食 × 6.0 = 10.0，足够装下这些测试的产出。
+    fn photo_world() -> World {
+        let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0), (ct::STORAGE, 1, 0)]);
+        w.config.life.storage_food_bonus = 1000.0;
+        w.config.life.photosynthesis_rate = 0.5;
+        w.config.world.sun_intensity = 1.0;
+        w.light.level.fill(255);
+        w.organisms[0].energy = 0.0;
+        w
+    }
+
+    /// 生产者的「生产速度」要乘在光合产出上。
     #[test]
-    fn prod_mult_scales_food_production() {
-        // 概率拉到 100% 保证必成功，再让倍率决定"成不成"
-        let run = |mult: f64| -> usize {
-            let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
-            w.config.life.food_prod_prob = 100.0;
+    fn prod_mult_scales_photosynthesis() {
+        let run = |mult: f64| -> f64 {
+            let mut w = photo_world();
             w.config.cells[ct::PRODUCER as usize].prod_mult = mult;
-            let before = w.snapshot_stats().food;
             w.act_organism(0);
-            w.snapshot_stats().food - before
+            w.organisms[0].energy
         };
-        assert_eq!(run(1.0), 1, "造食率 100% 时每 tick 应长出 1 份食物");
-        assert_eq!(run(0.0), 0, "生产速度 0 时不该长出食物");
+        assert!(
+            (run(1.0) - 0.5).abs() < 1e-9,
+            "满照下应产出光合速率 0.5，实测 {}",
+            run(1.0)
+        );
+        assert!((run(2.0) - 1.0).abs() < 1e-9, "倍率 2.0 应产出双倍");
+        assert_eq!(run(0.0), 0.0, "生产速度 0 时不该产出能量");
+    }
+
+    /// 没有光就没有光合——这是「光成了唯一能量来源」的守门测试。
+    ///
+    /// 以前生产者是永动机（凭空造食物），这条测试在旧模型下根本写不出来。
+    #[test]
+    fn photosynthesis_requires_light() {
+        let run = |level: u8| -> f64 {
+            let mut w = photo_world();
+            w.light.level.fill(level);
+            w.act_organism(0);
+            w.organisms[0].energy
+        };
+        assert_eq!(run(0), 0.0, "全黑时生产者产出必须为 0（它是纯负担）");
+        assert!((run(255) - 0.5).abs() < 1e-9, "满照时产出 = 光合速率");
+        // 半照应该正好一半
+        let half = run(128);
+        assert!(
+            (half - 0.5 * 128.0 / 255.0).abs() < 1e-9,
+            "半照产出应正比于光强，实测 {}",
+            half
+        );
+    }
+
+    /// 太阳强度是采样时的乘数，拨到 0 就是永夜。
+    #[test]
+    fn sun_intensity_scales_photosynthesis() {
+        let run = |sun: f64| -> f64 {
+            let mut w = photo_world();
+            w.config.world.sun_intensity = sun;
+            w.act_organism(0);
+            w.organisms[0].energy
+        };
+        assert!((run(1.0) - 0.5).abs() < 1e-9);
+        assert!((run(2.0) - 1.0).abs() < 1e-9, "双倍太阳应该产出双倍");
+        assert_eq!(run(0.0), 0.0, "太阳拨到 0 = 永夜，不该有产出");
+    }
+
+    /// 维持成本必须每 tick 从能量里扣掉。
+    ///
+    /// 这条钉的是「多一格要不要付账」在**个体层面**成立。宏观上体型会不会被压住
+    /// 还要看演化（`tests/regression.rs` 里那条），但扣费本身必须是精确的。
+    #[test]
+    fn metabolism_drains_energy_every_tick() {
+        let mut w = photo_world();
+        w.config.life.metabolism_scale = 0.5;
+        w.organisms[0].energy = 1.0;
+        let up = w.organisms[0].upkeep_cost(&w.config);
+        assert!(up > 0.0, "metabolism_scale = 0.5 时 upkeep 应该大于 0");
+        w.act_organism(0);
+        // 顺序是「先扣代谢，再加光合」：1.0 − upkeep + 0.5（满照 × rate 0.5）
+        let expected = 1.0 - up + 0.5;
+        assert!(
+            (w.organisms[0].energy - expected).abs() < 1e-9,
+            "能量应为 {:.6}（1.0 − {:.6} + 0.5），实测 {:.6}",
+            expected,
+            up,
+            w.organisms[0].energy
+        );
+    }
+
+    /// 能量不能超过容量——光合直充体内之后必须有上限，否则无限膨胀。
+    #[test]
+    fn capacity_limits_energy() {
+        let mut w = photo_world();
+        w.config.life.photosynthesis_rate = 100.0; // 一次就撑爆
+        w.act_organism(0);
+        // 容量 = 2 格 × 2.0 + 1 储食 × 6.0 = 10.0
+        let cap = w.energy_capacity(0);
+        assert!((cap - 10.0).abs() < 1e-9, "容量应为 10.0，实测 {}", cap);
+        assert!(
+            (w.organisms[0].energy - cap).abs() < 1e-9,
+            "能量应被夹在容量，实测 {}",
+            w.organisms[0].energy
+        );
+        assert!(
+            (w.energy_wasted - (100.0 - cap)).abs() < 1e-6,
+            "超出容量的部分应记入 energy_wasted，实测 {}",
+            w.energy_wasted
+        );
+    }
+
+    /// 储食细胞提供额外容量（电池）。
+    #[test]
+    fn storage_cells_add_capacity() {
+        let (w1, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        let (w2, _) = tiny_world(&[(ct::PRODUCER, 0, 0), (ct::STORAGE, 1, 0)]);
+        let c1 = w1.energy_capacity(0);
+        let c2 = w2.energy_capacity(0);
+        let per = w1.config.life.energy_per_cell;
+        let extra = w1.config.life.storage_capacity;
+        assert!((c1 - per).abs() < 1e-9, "1 格身体容量 = energy_per_cell");
+        assert!(
+            (c2 - (2.0 * per + extra)).abs() < 1e-9,
+            "2 格（含 1 储食）容量 = 2×{} + {}，实测 {}",
+            per,
+            extra,
+            c2
+        );
     }
 
     /// 再生细胞的「再生速率」要乘在每 tick 抹掉的伤害上。

@@ -1344,6 +1344,72 @@ p = 0.6 时成本已经便宜到 `3^0.6 ≈ 1.93`，若成本是瓶颈，体型�
 > 附：第一轮扫描用了单种子、单点，被噪声骗过一次——同一个 p 换种子，种群能从 256 跳到 1157。
 > 这个模拟在临界点上，**任何单点结论都要多种子复核**。
 
+#### 9.7.6 光场与光合（`rust/crates/core/src/light.rs`）
+
+**为什么加**：批次 5 的扫描证明体型推不动，但当时归因不够准——真正的瓶颈不只是
+繁殖成本，而是**模拟里没有空间梯度**。食物由生产者细胞在自己旁边凭空产出，
+所以「去哪里」不是决策，「身体朝哪边」没有意义，「移动」只是逃命。
+光场同时给这三件事定价。
+
+**算法**：每列从顶行往下扫，遇墙归零，其余每格减 `absorb`。
+
+```rust
+for c in 0..cols {
+    let mut v = 255;                              // 地表满照
+    for r in 0..rows {
+        if blocks_light(floor[i]) { v = 0 }       // 墙：本格及以下全黑
+        else if r > 0 { v = v.saturating_sub(absorb) }
+        level[i] = v;
+    }
+}
+```
+
+`absorb = ceil(255 / (rows × 0.8))`：150 行 → 3，第 85 行归零，**上半亮、下半黑**。
+
+**为什么不塞进 `fields.rs`**：温度/辐射是各向同性扩散（5 点模板 + 每帧衰减 + scratch
+双缓冲），光是方向性投射（单次扫描、原地写、遇墙归零）。混在一起会让 `Fields::update`
+变成三种算法轮流跑的大杂烩，而且光场本来可以不每帧算（它是地形的纯函数）。
+
+**生物不挡光**（只有墙挡），三个理由：① 否则 `level` 依赖每 tick 都在变的 `types`，
+光场必须每 tick 重算；② 否则大身体用自己的上半身遮住下半身，体型越大越吃亏，
+正好和目标相反；③ 生物是薄薄一层组织，透光。
+
+**光合**：`gain = 光强/255 × photosynthesis_rate × prod_mult × sun_intensity`，
+直接进 `organism.energy`。旧模型是 `rng.chance(food_prod_prob)` 凭空在相邻格造食物，
+**造食物不消耗任何东西**——永动机。
+
+**容量**：`n_cells × energy_per_cell + n_storage × storage_capacity`。超出丢弃并计入
+`World.energy_wasted`（批次 10 的守恒审计要用）。储食细胞因此从"抬高繁殖阈值"
+变成**电池**：装得多 = 熬得过饥荒，但被杀死时对方从尸体上吃到的也更多。
+
+**验证**（`examples/light_check`，全程序化，不看截图）：
+
+| 判据 | 结果 |
+|---|---|
+| 光场有垂直梯度（顶 255 / 底 0） | ✅ |
+| 种群待在有光的上半部（平均行 40.6 vs 中线 75） | ✅ |
+| 生态不崩（2000 tick 后 736 个体、平均体型 5.41） | ✅ |
+| **生产者偏向身体靠光的一侧** | ❌ 比值 1.00 |
+
+最后一条没成立，原因值得记下来：**垂直梯度太缓**。5 格身体只跨 5 行，光强差
+`5×3/255 ≈ 6%`，而变异不针对布局（`mutate_anatomy` 是随机增删/换格），
+所以 6000 tick 内筛不出"生产者长在上面"的布局。要让体内布局有意义，得让梯度更陡
+（指数衰减）或给布局单独的选择压——这是后续可做的，不是 bug。
+
+**意外发现：光合直充体内让体型从 3 格涨到 5.4 格，但那是"免费的午餐"。**
+
+对照实验（seed 1001、6000 tick）：
+
+| `metabolism_scale` | 平均体型 | 个体数 |
+|---|---|---|
+| 0（出厂） | **4.48** | 997 |
+| 0.02 | **3.32** | 1269 |
+
+`metabolism_scale = 0` 意味着多一格**零成本**，而多一个生产者有正收益（多一份光合），
+所以体型自然膨胀。一打开维持成本，体型立刻被压回 3 格出头。
+
+这条对照直接说明：**没有维持成本，守恒就只是个说法**。批次 8/10 要把这条接上。
+
 ---
 
 ## 10. 参数默认值
@@ -1361,7 +1427,11 @@ autoReset = false           // 灭绝时自动重置
 lifespanMultiplier = 100
 extraMoverFoodCost = 0
 maxOrganisms = -1           // -1 = 无上限
-foodProdProb = 5            // 生产者细胞每 tick 生成食物的概率（%）
+// —— 批次 7 起：光合取代「凭空造食物」——
+photosynthesisRate = 0.12   // 满照下一个生产者细胞每 tick 产出的能量
+energyPerCell = 2.0         // 每格身体提供的能量容量
+storageCapacity = 6.0       // 每个储食细胞额外提供的容量（电池）
+sunIntensity = 1.0          // 光场的全局乘数（0 = 永夜）
 moversCanProduce = false    // 移动者是否兼作生产者
 turnCooldown = 4            // 转身后的冷却 tick 数（防止原地打转，见 §6.2）
 metabolismScale = 0         // 全局消耗量倍率（0 = 关闭每 tick 消耗，见 §6.4）
@@ -1395,7 +1465,7 @@ cells.EYE      = { hp: 1, cost: 0.006, damage: 0, senseRange: 0, foodValue: 1 }
 // 乘在对应的全局参数上，默认 1.0 = 与 1.x 逐位等价。
 // 只有 `armor_resist` 是比例不是倍率：1.0 = 100% 减免 = 旧的"完全免疫"。
 cells.MOUTH.biteMult       = 1.0   // × life.foodEnergyScale
-cells.PRODUCER.prodMult    = 1.0   // × life.foodProdProb
+cells.PRODUCER.prodMult    = 1.0   // × life.photosynthesisRate
 cells.REGEN.regenMult      = 1.0   // × life.regenRate
 cells.STORAGE.storageMult  = 1.0   // × life.storageFoodBonus
 cells.ARMOR.armorResist    = 1.0   // 伤害减免比例，1.0 = 完全免疫
@@ -1767,9 +1837,17 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 
 ### 2.0（Rust + egui）进度
 
-1.x 的阶段 1–9 在 2.0 里是"照抄语义、逐位对齐"地重做一遍（`tools/parity-check.mjs` +
+1.x 的阶段 1–9 在 2.0 里是"照抄语义、逐位对齐"地重做了一遍（`tools/parity-check.mjs` +
 `tests/golden.rs`：5 种子 × 2000 tick × 每 50 tick = 200 检查点逐位一致）。进度记在这里，
 细节见 §9.7 / §11.0。
+
+> **⚠️ 批次 7 起，黄金快照已废弃。** 逐位对齐是迁移期的质量保证，而 2.0 现在要改
+> 模拟本身（光场 / 能量守恒 / 卵生），每次有意的行为改动都得去改基线，"测试红了"
+> 和"测试过时了"分不清。替代品是 `crates/core/tests/regression.rs` 里的**特征化测试**：
+> 跑固定 tick 数，断言种群 / 体型 / 光场梯度落在合理区间。
+> `tools/parity-check.mjs`、`tools/export-golden.mjs`、`tools/trace-golden.mjs`、
+> `golden/world.txt`、`golden/gauss.txt` 已删除；`golden/rng-u32.txt` 保留
+> （RNG 是确定性基础，不是模拟行为）。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
@@ -1785,6 +1863,7 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 | 批次 6.5 | 窗口按职责拆开：`细胞参数`（只列 9 种身体细胞）/ `全局参数`；补上地形效果分组 | ✅ |
 | 批次 6.6 | 按作用域重新划线：`细胞参数` → `类型参数`（细胞 + 地形，选中哪个调哪个），数据层统一成 `ParamRef` | ✅ |
 | 批次 6.6b | 顺手修 `fields.rs` 的 `i - cols + 1` 无符号下溢（debug 下 5 条测试必挂，release 靠回绕歪打正着） | ✅ |
+| 批次 7 | **光场**（垂直投射 + 墙遮挡 + 深度衰减）+ 光合直充体内 + 能量容量；**黄金快照废弃**，改特征化测试；存档 `VERSION` → 5 | ✅ |
 
 **批次 5 的结论要单独说**：参数做出来了，默认值锁着黄金快照（`p = 1.0` / `cap = 0`），
 但**扫描证明这两个旋钮推不动体型**——p 从 0.6 到 1.2 平均体型只动 0.12 格，体型上限完全不生效

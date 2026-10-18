@@ -1,37 +1,29 @@
-# golden —— JS 版导出的对照基线
+# golden —— 只剩 RNG 基线
 
-这些文件由 `node tools/export-golden.mjs` 生成，**不要手改**。
-Rust 版的行为必须与它们逐位一致（`cargo test` 里的 `tests/golden.rs` 会检查）。
+## 现状（批次 7 起）
 
-| 文件 | 内容 |
-|---|---|
-| `rng-u32.txt` | seed=12345 的前 200 个 `nextUint32()`（8 位十六进制，每行一个） |
-| `gauss.txt` | 同种子的前 200 个 `gaussian(0,1)`（f64 位模式，16 位十六进制） |
-| `world.txt` | 3 个种子（1001/4242/7777）在 1/10/50/100/200/500 tick 的状态摘要 |
+**模拟行为的黄金快照已废弃。** 原来这里有 `world.txt`（3 个种子 × 6 个 tick 点的状态摘要）
+和 `gauss.txt`，用来断言 Rust 版与 JS 版逐位一致。那是 1.x → 2.0 迁移期的质量保证，
+现在 2.0 要改模拟本身（光场、能量守恒、卵生），逐位对齐只会挡路，已删除。
 
-`world.txt` 的一行：
+替代品是 `crates/core/tests/regression.rs` 里的**特征化测试**：跑固定 tick 数，
+断言种群 / 体型 / 光场梯度落在合理区间。它抓不到"第 37 tick 多算了一点"，
+但能抓到"改完生态崩了"。
 
-```
-seed 1001 tick 50 orgs 10 food 336 species 9 body 40 digest 5f067ca6
-```
+## 保留 `rng-u32.txt`
 
-- `orgs` 个体数 · `food` 食物格数 · `species` 物种数 · `body` 身体格总数
-- `digest` = FNV-1a 摘要，混入网格三层与全部个体字段（算法见 `rust/README.md`）
+seed=12345 的前 200 个 `nextUint32()`（8 位十六进制，每行一个）。
 
-## 为什么高斯样本有 6 个对不上，摘要却全等
+**RNG 不是模拟行为，是确定性基础。** 它的序列一漂，所有存档重放、实验复现、
+A/B 对照全部失效——和"要不要对齐 1.x"无关，所以留着。
 
-`Math.log`（V8 的 fdlibm 移植）与 Rust `f64::ln`（系统 libm）在个别输入上差 1–2 ulp。
-200 个样本里 6 个不同，但：
+`regression.rs::rng_matches_js_sequence` 校验前 8 个。
 
-- 大脑权重最终存成 **f32**，1–2 ulp 的 f64 差异被 f32 舍入吸收
-- 实测 5 个种子 × 2000 tick，状态摘要**全部一致**
+## 关于高斯样本的历史注记
 
-如果哪天出现真正的分歧，把 `crates/core/src/jsmath.rs` 换成 fdlibm 移植版即可。
+`gauss.txt` 曾经有 6/200 个样本和 JS 对不上：`Math.log`（V8 的 fdlibm 移植）
+与 Rust `f64::ln`（系统 libm）在个别输入上差 1–2 ulp。当时不影响模拟，因为
+大脑权重最终存成 f32，1–2 ulp 的 f64 差异被 f32 舍入吸收。
 
-## 重新生成
-
-```bash
-node tools/export-golden.mjs          # 重写这三份文件
-cd rust && cargo test --release       # 立刻验证 Rust 是否还跟得上
-node tools/parity-check.mjs --ticks 2000   # 更大范围（5 种子 × 2000 tick）
-```
+这个文件已随黄金快照一起删除。**如果以后真的需要 bit 级复现**，
+把 `crates/core/src/jsmath.rs` 换成 fdlibm 移植版即可。
