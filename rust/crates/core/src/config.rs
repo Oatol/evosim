@@ -5,13 +5,33 @@ use serde::{Deserialize, Serialize};
 use crate::cell_type::{self, ct};
 
 /// 每种身体细胞的可调属性
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CellAttrs {
+    // ── 通用：所有身体细胞都参与结算（按格累加）──
     pub hp: f64,
     pub cost: f64,
-    pub damage: f64,
-    pub sense_range: f64,
     pub food_value: f64,
+    // ── 专属：只有对应类型会读 ──
+    /// `KILLER` 每次攻击的伤害 / `SPIKE` 反弹的伤害
+    pub damage: f64,
+    /// `EYE` 的视野距离（0 = 用全局 `sense.look_range`）
+    pub sense_range: f64,
+    // ── 倍率：乘在**全局基值**上，默认 1.0 = 完全等价旧行为 ──
+    //
+    // 为什么用倍率而不是绝对值：这几项原本是全局参数（`life.food_prod_prob` 等），
+    // 直接下放成每细胞的绝对值就得给 16 种细胞都填一个"合理"的数，
+    // 而且默认值一变黄金快照立刻漂移。倍率写法让默认配置**逐位不变**，
+    // 只有用户主动拖滑块才偏离 1.x 基线。
+    /// 嘴：一份食物换多少能量的倍率
+    pub bite_mult: f64,
+    /// 生产者：造食概率的倍率
+    pub prod_mult: f64,
+    /// 再生：每 tick 抹掉伤害的倍率
+    pub regen_mult: f64,
+    /// 储食：繁殖阈值抬高量的倍率
+    pub storage_mult: f64,
+    /// 装甲：伤害减免比例（0..1）。**1.0 = 完全免疫**，也就是旧行为。
+    pub armor_resist: f64,
 }
 
 impl Default for CellAttrs {
@@ -22,6 +42,47 @@ impl Default for CellAttrs {
             damage: 0.0,
             sense_range: 0.0,
             food_value: 1.0,
+            bite_mult: 1.0,
+            prod_mult: 1.0,
+            regen_mult: 1.0,
+            storage_mult: 1.0,
+            armor_resist: 1.0,
+        }
+    }
+}
+
+impl CellAttrs {
+    /// 按属性键取值。UI 的滑块和 `Config::attr` 都走这里，
+    /// 免得"面板改的是这个字段、模拟读的是那个字段"这种错位。
+    #[inline]
+    pub fn get(&self, f: AttrField) -> f64 {
+        match f {
+            AttrField::Hp => self.hp,
+            AttrField::Cost => self.cost,
+            AttrField::Damage => self.damage,
+            AttrField::SenseRange => self.sense_range,
+            AttrField::FoodValue => self.food_value,
+            AttrField::BiteMult => self.bite_mult,
+            AttrField::ProdMult => self.prod_mult,
+            AttrField::RegenMult => self.regen_mult,
+            AttrField::StorageMult => self.storage_mult,
+            AttrField::ArmorResist => self.armor_resist,
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, f: AttrField, v: f64) {
+        match f {
+            AttrField::Hp => self.hp = v,
+            AttrField::Cost => self.cost = v,
+            AttrField::Damage => self.damage = v,
+            AttrField::SenseRange => self.sense_range = v,
+            AttrField::FoodValue => self.food_value = v,
+            AttrField::BiteMult => self.bite_mult = v,
+            AttrField::ProdMult => self.prod_mult = v,
+            AttrField::RegenMult => self.regen_mult = v,
+            AttrField::StorageMult => self.storage_mult = v,
+            AttrField::ArmorResist => self.armor_resist = v,
         }
     }
 }
@@ -253,12 +314,15 @@ impl Default for Config {
     fn default() -> Self {
         let mut cells = [CellAttrs::default(); 16];
         for d in cell_type::CELL_DEFS.iter() {
+            // 前 5 项从 CELL_DEFS 取（出厂值唯一真源），后面的倍率一律走默认 1.0
+            // —— 以后再加字段也不用回来改这里。
             cells[d.id as usize] = CellAttrs {
                 hp: d.hp,
                 cost: d.cost,
                 damage: d.damage,
                 sense_range: d.sense_range,
                 food_value: d.food_value,
+                ..CellAttrs::default()
             };
         }
         Config {
@@ -279,14 +343,7 @@ impl Default for Config {
 impl Config {
     #[inline]
     pub fn attr(&self, type_id: u8, f: AttrField) -> f64 {
-        let a = &self.cells[(type_id as usize).min(15)];
-        match f {
-            AttrField::Hp => a.hp,
-            AttrField::Cost => a.cost,
-            AttrField::Damage => a.damage,
-            AttrField::SenseRange => a.sense_range,
-            AttrField::FoodValue => a.food_value,
-        }
+        self.cells[(type_id as usize).min(15)].get(f)
     }
 
     /// 一份食物能提供多少能量（兜底成 1，与 JS 版一致）
@@ -301,6 +358,11 @@ impl Config {
     }
 }
 
+/// 单个细胞属性的取用键。
+///
+/// 前 5 个是 1.x 就有的；后 5 个是 2.0 新增的**倍率**（默认 1.0，乘在全局基值上）。
+/// `CELL_DEFS[i].params` 声明每种细胞暴露哪几个——不是每种细胞都该有全部 10 项：
+/// `damage` 只对杀手/刺有意义，`sense_range` 只对眼睛有意义，其余的改了没反应。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttrField {
     Hp,
@@ -308,6 +370,70 @@ pub enum AttrField {
     Damage,
     SenseRange,
     FoodValue,
+    BiteMult,
+    ProdMult,
+    RegenMult,
+    StorageMult,
+    ArmorResist,
+}
+
+impl AttrField {
+    /// 面板上的名字
+    pub fn label(self) -> &'static str {
+        match self {
+            AttrField::Hp => "血量",
+            AttrField::Cost => "消耗",
+            AttrField::Damage => "伤害",
+            AttrField::SenseRange => "感知距离",
+            AttrField::FoodValue => "食物值",
+            AttrField::BiteMult => "摄取倍率",
+            AttrField::ProdMult => "生产速度",
+            AttrField::RegenMult => "再生速率",
+            AttrField::StorageMult => "储备倍率",
+            AttrField::ArmorResist => "伤害减免",
+        }
+    }
+
+    /// 滑块的量程与精度：`(lo, hi, step, decimals)`
+    ///
+    /// 每条都要贴住真实取值域——量程给太宽，拖柄会永远趴在最左端看不出当前值
+    /// （细胞参数面板第一版就栽在"血量 1.0 配 0~20 量程"上）。
+    pub fn range(self) -> (f64, f64, f64, usize) {
+        match self {
+            // 量程要贴住真实取值域：出厂值大致落在量程 10%~40% 处。
+            // 血量出厂 1.0 配 0~20 的话拖柄永远趴在 5%，既看不出当前值也调不动
+            // ——细胞参数面板第一版就栽在这上面。
+            AttrField::Hp => (0.0, 5.0, 0.1, 1),
+            // 消耗出厂 0.002~0.008，步长必须比它细，否则会被吸附成 0
+            AttrField::Cost => (0.0, 0.05, 0.001, 3),
+            AttrField::Damage => (0.0, 5.0, 0.1, 1),
+            AttrField::SenseRange => (0.0, 10.0, 1.0, 0),
+            AttrField::FoodValue => (0.0, 10.0, 0.1, 1),
+            // 倍率统一 0~5：1.0 是出厂值，落在量程 20% 处
+            AttrField::BiteMult => (0.0, 5.0, 0.05, 2),
+            AttrField::ProdMult => (0.0, 5.0, 0.05, 2),
+            AttrField::RegenMult => (0.0, 5.0, 0.05, 2),
+            AttrField::StorageMult => (0.0, 5.0, 0.05, 2),
+            // 减免是比例，满量程就是"完全免疫"
+            AttrField::ArmorResist => (0.0, 1.0, 0.01, 2),
+        }
+    }
+
+    /// 面板上的说明
+    pub fn hint(self) -> &'static str {
+        match self {
+            AttrField::Hp => "被打掉多少伤害这个细胞才会死。0 = 一碰就碎。",
+            AttrField::Cost => "每 tick 的能量开销（会再乘上全局消耗量倍率）。",
+            AttrField::Damage => "攻击型细胞每次命中的伤害。",
+            AttrField::SenseRange => "眼睛能看多远。0 = 用全局视野距离。",
+            AttrField::FoodValue => "被吃掉时提供多少能量（会再乘上食物量倍率）。",
+            AttrField::BiteMult => "一份食物换多少能量的倍率（× 全局「食物量倍率」）。",
+            AttrField::ProdMult => "造食概率的倍率（× 全局「生产者造食率」）。",
+            AttrField::RegenMult => "每 tick 抹掉累积伤害的倍率（× 全局「再生速率」）。",
+            AttrField::StorageMult => "繁殖阈值抬高量的倍率（× 全局「储食加成」）。",
+            AttrField::ArmorResist => "受到攻击时的伤害减免比例。1.00 = 完全免疫（出厂值）。",
+        }
+    }
 }
 
 /// 参数元数据（面板渲染用）。第一阶段只用得上少数几项。

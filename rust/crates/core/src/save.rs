@@ -52,7 +52,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// 这两个字段不参与模拟，但 bincode 是定长结构编码，少字段就解不出来，
 /// 所以必须升版本——旧档直接报错，不做静默兼容。
 /// v3：`LifeCfg` 加了 `breed_cost_exponent` / `max_body_cells`（大体型）。同理。
-pub const VERSION: u32 = 3;
+/// v4：`CellAttrs` 加了 5 个每细胞倍率（`bite_mult` / `prod_mult` / `regen_mult` /
+/// `storage_mult` / `armor_resist`），让参数按细胞类型分化。同理。
+pub const VERSION: u32 = 4;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

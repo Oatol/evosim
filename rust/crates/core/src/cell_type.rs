@@ -3,6 +3,8 @@
 //! 加一种新细胞 = 往 `CELL_DEFS` 里加一项（需要新行为再补一个 match 分支）。
 //! 网格读写、配色、感知编码、结构变异、存档、参数面板都从这里读。
 
+use crate::config::AttrField;
+
 /// 细胞类型 id。**写进存档，定下就不能改。**
 pub mod ct {
     pub const EMPTY: u8 = 0;
@@ -84,6 +86,12 @@ pub struct CellDef {
     pub enter: Option<EnterFx>,
     pub stand: Option<StandFx>,
     pub tick: Option<TickFx>,
+    /// 这种细胞在参数面板里暴露哪几项，**顺序即显示顺序**。
+    ///
+    /// 这是"按细胞类型给参数"的单一真源：不是每种细胞都该有全部 10 项。
+    /// `damage` 只对杀手/刺有意义、`sense_range` 只对眼睛有意义，其余类型给出来
+    /// 就是死旋钮（拖了没反应）。空数组 = 这种细胞没有可调参数（地形走 `Config.terrain`）。
+    pub params: &'static [AttrField],
     // 属性出厂默认（运行时以 Config.cells 为准）
     pub hp: f64,
     pub cost: f64,
@@ -113,6 +121,7 @@ const fn base(id: u8, key: &'static str, name: &'static str, label: &'static str
         enter: None,
         stand: None,
         tick: None,
+        params: &[],
         hp: 1.0,
         cost: 0.0,
         damage: 0.0,
@@ -156,6 +165,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         visible: true,
         flag: Some(flag::MOUTH),
         behavior: Some(Behavior::Mouth),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::BiteMult,
+            AttrField::FoodValue,
+        ],
         cost: 0.002,
         colors: [0xe07b39, 0xff9500, 0xe69f00],
         ..base(ct::MOUTH, "MOUTH", "mouth", "嘴")
@@ -167,6 +182,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         visible: true,
         flag: Some(flag::PRODUCER),
         behavior: Some(Behavior::Producer),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::ProdMult,
+            AttrField::FoodValue,
+        ],
         cost: 0.002,
         colors: [0x4caf50, 0x00e676, 0x009e73],
         ..base(ct::PRODUCER, "PRODUCER", "producer", "生产者")
@@ -177,6 +198,9 @@ pub static CELL_DEFS: [CellDef; 16] = [
         paintable: true,
         visible: true,
         flag: Some(flag::MOVER),
+        // 移动器没有专属参数：移动是"一格/次"，没有速度概念。
+        // 给它加速度要改移动逻辑（一次走两格？每 N tick 走一次？），那是改模拟，不是加参数。
+        params: &[AttrField::Hp, AttrField::Cost, AttrField::FoodValue],
         cost: 0.008,
         colors: [0x38bdf8, 0x00b0ff, 0x56b4e9],
         ..base(ct::MOVER, "MOVER", "mover", "移动器")
@@ -188,6 +212,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         visible: true,
         flag: Some(flag::KILLER),
         behavior: Some(Behavior::Killer),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::Damage,
+            AttrField::FoodValue,
+        ],
         damage: 1.0,
         cost: 0.006,
         colors: [0xef4444, 0xff1744, 0xd55e00],
@@ -199,6 +229,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         paintable: true,
         visible: true,
         flag: Some(flag::ARMOR),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::ArmorResist,
+            AttrField::FoodValue,
+        ],
         cost: 0.004,
         colors: [0xa855f7, 0xd500f9, 0xcc79a7],
         ..base(ct::ARMOR, "ARMOR", "armor", "装甲")
@@ -211,6 +247,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         directional: true,
         flag: Some(flag::EYE),
         behavior: Some(Behavior::Eye),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::SenseRange,
+            AttrField::FoodValue,
+        ],
         cost: 0.006,
         colors: [0xd8b4fe, 0xffffff, 0xf0e442],
         ..base(ct::EYE, "EYE", "eye", "眼睛")
@@ -261,6 +303,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         is_body_cell: true,
         paintable: true,
         flag: Some(flag::STORAGE),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::StorageMult,
+            AttrField::FoodValue,
+        ],
         cost: 0.004,
         food_value: 3.0,
         colors: [0xfbbf24, 0xffd600, 0xf0c000],
@@ -272,6 +320,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         paintable: true,
         flag: Some(flag::REGEN),
         behavior: Some(Behavior::Regen),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::RegenMult,
+            AttrField::FoodValue,
+        ],
         cost: 0.005,
         colors: [0x5eead4, 0x00ffc8, 0x44d7b6],
         ..base(ct::REGEN, "REGEN", "regen", "再生")
@@ -281,6 +335,12 @@ pub static CELL_DEFS: [CellDef; 16] = [
         is_body_cell: true,
         paintable: true,
         flag: Some(flag::SPIKE),
+        params: &[
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::Damage,
+            AttrField::FoodValue,
+        ],
         damage: 1.0,
         cost: 0.004,
         colors: [0x94a3b8, 0xe0e6ee, 0xb8c0cc],

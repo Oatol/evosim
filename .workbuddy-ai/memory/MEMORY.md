@@ -104,7 +104,7 @@
   **禁止**：`tools/click.ps1` / `drag.ps1` / `wheel.ps1` 之类的注入输入、长时间跑满 CPU 的扫描。
 - **长跑扫描要控功耗**：单次 `body_scan` 这类扫描控制在 1 分钟内（~15000 tick × 少量组合）。
   多组合 × 多种子 × 4 万 tick 那种（实测 18 分钟满载）会触发过热。
-- `cargo test --release`（当前 78 项：app 36 / core 32 / golden 2 / render 8）
+- `cargo test --release`（当前 85 项：app 38 / core 37 / golden 2 / render 8）
 - `node tools/parity-check.mjs`（对 JS 基线）
 - 打包：`node rust/tools/package.mjs` → `dist/evosim2.exe`（~7.07 MB）
 - 截图/压测：`evosim-app --screenshot out.png --ticks N [--mode temp|rad]`、`--bench --seconds 4 --speed 50`
@@ -132,6 +132,14 @@
 - **批次 5 完成（参数化）**：`LifeCfg` 加 `breed_cost_exponent`（默认 1.0）+
   `max_body_cells`（默认 0 = 不限），参数面板可调，**存档 VERSION → 3**。
   `breed_cost` 抽成自由函数以便单测。**扫描结论：这两个旋钮推不动体型**（见下）。
+- **批次 6 完成**：细胞参数按类型分化 —— `CellDef.params` 声明每种细胞暴露哪几项，
+  面板照着渲染。**5 个全局参数下放成每细胞倍率**（bite/prod/regen/storage/armor_resist），
+  默认全 1.0 → 行为逐位不变。存档 VERSION → 4。
+  **教训一：给 16 种细胞一视同仁 5 个属性 = 29 个死旋钮**（`damage` 只有杀手/刺读、
+  `sense_range` 只有眼睛读）。**教训二：`act_organism` 末尾含繁殖判定**，
+  测"吃了多少能量"必须先抬繁殖阈值，否则测到的是"吃到的减去繁殖成本"。
+  **教训三：默认值 1.0 的倍率，乘错地方/压根没乘，编译器和 golden 都不会报错**——
+  必须把倍率调离 1.0 写端到端测试。
 - **下一步候选**：
   - 给大体型**实质收益**（储能 / 抗捕食 / 分摊开销），让体型真成为一条演化轴——前提是先解决
     「出生要求整块空地，身体越大越难落脚」这个反向选择

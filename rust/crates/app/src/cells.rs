@@ -1,95 +1,31 @@
-//! 细胞参数窗口：16 种细胞 × 5 个属性。
+//! 细胞参数窗口：**按细胞类型**暴露各自的参数。
 //!
-//! 参数本身在 `Config.cells` 里（早就存在、也进存档），这个窗口只是把它露出来。
-//! 两件事需要小心：
+//! 以前是 16 种 × 5 个属性一视同仁，结果 80 个滑块里有 29 个是死旋钮——
+//! `damage` 只有杀手/刺会读，`sense_range` 只有眼睛会读，拖别的类型完全没反应。
+//! 现在每种细胞在 `CELL_DEFS[i].params` 里声明自己有哪些参数，面板照着渲染。
+//!
+//! 三件事需要小心：
 //!
 //! * **改的是活世界的配置**，立刻影响后续演化，但不是"重置世界"——已经存在的个体会
 //!   按新参数结算，所以数值跨度别设太夸张，否则一次拖动就能让全种群暴毙。
 //! * **默认值以 `CELL_DEFS` 为准**，不在 UI 里写死。以后加细胞或调平衡，
 //!   这里的「重置」会自动跟着走。
+//! * **只在真的变了才写回**。egui 的 Slider 会在绘制时按 `step_by` 吸附值，
+//!   无条件写回等于让"打开窗口"变成一个会改配置的动作（0.006 被吸成 0 这个坑踩过）。
 
 use egui::{Color32, CornerRadius, Sense, Stroke, Vec2};
 
 use evosim_core::cell_type::{self, CELL_DEFS};
-use evosim_core::config::{AttrField, CellAttrs};
+use evosim_core::config::CellAttrs;
 use evosim_core::world::World;
 
 use crate::ui::{ACCENT, BORDER, TEXT, TEXT_DIM};
-
-/// 5 个属性的滑块配置。
-///
-/// 两条经验，都是踩出来的：
-///
-/// * `step` 必须按属性的**实际量级**给。消耗的默认值是 0.002~0.008 这个量级，
-///   如果用 0.05 的步长，egui 会在绘制时把 0.006 吸附成 0——用户只是打开窗口、
-///   什么都没碰，配置就被改了。
-/// * `hi` 必须贴着**真实取值域**给，不能图省事给个大数。血量出厂值是 1.0，
-///   量程要是 0~20，拖柄就永远趴在最左端（5% 处），既看不出当前值也调不动。
-///   现在每种属性的出厂值大致落在量程的 10%~40%，拖动才是有意义的。
-struct FieldDef {
-    field: AttrField,
-    name: &'static str,
-    lo: f64,
-    hi: f64,
-    step: f64,
-    decimals: usize,
-    hint: &'static str,
-}
-
-static FIELDS: [FieldDef; 5] = [
-    FieldDef {
-        field: AttrField::Hp,
-        name: "血量",
-        lo: 0.0,
-        hi: 5.0,
-        step: 0.1,
-        decimals: 1,
-        hint: "被打掉多少伤害这个细胞才会死。0 = 一碰就碎。",
-    },
-    FieldDef {
-        field: AttrField::Cost,
-        name: "消耗",
-        lo: 0.0,
-        hi: 0.05,
-        // 默认值就是 0.002 级别，步长必须比它细
-        step: 0.001,
-        decimals: 3,
-        hint: "每 tick 的能量开销（会再乘上全局消耗量倍率）。",
-    },
-    FieldDef {
-        field: AttrField::Damage,
-        name: "伤害",
-        lo: 0.0,
-        hi: 5.0,
-        step: 0.1,
-        decimals: 1,
-        hint: "攻击型细胞每次命中造成的伤害。",
-    },
-    FieldDef {
-        field: AttrField::SenseRange,
-        name: "感知距离",
-        lo: 0.0,
-        hi: 10.0,
-        step: 1.0,
-        decimals: 0,
-        hint: "眼睛能看多远。0 = 用全局视野距离。",
-    },
-    FieldDef {
-        field: AttrField::FoodValue,
-        name: "食物值",
-        lo: 0.0,
-        hi: 10.0,
-        step: 0.1,
-        decimals: 1,
-        hint: "被吃掉时提供多少能量（会再乘上食物量倍率）。",
-    },
-];
 
 fn fmt(v: f64, decimals: usize) -> String {
     format!("{:.*}", decimals, v)
 }
 
-/// `CELL_DEFS` 里的出厂值
+/// `CELL_DEFS` 里的出厂值。倍率类一律走 `CellAttrs::default()`（1.0）。
 fn defaults(id: u8) -> CellAttrs {
     match cell_type::def(id) {
         Some(d) => CellAttrs {
@@ -98,42 +34,9 @@ fn defaults(id: u8) -> CellAttrs {
             damage: d.damage,
             sense_range: d.sense_range,
             food_value: d.food_value,
+            ..CellAttrs::default()
         },
         None => CellAttrs::default(),
-    }
-}
-
-fn get(a: &CellAttrs, f: AttrField) -> f64 {
-    match f {
-        AttrField::Hp => a.hp,
-        AttrField::Cost => a.cost,
-        AttrField::Damage => a.damage,
-        AttrField::SenseRange => a.sense_range,
-        AttrField::FoodValue => a.food_value,
-    }
-}
-
-fn set(a: &mut CellAttrs, f: AttrField, v: f64) {
-    match f {
-        AttrField::Hp => a.hp = v,
-        AttrField::Cost => a.cost = v,
-        AttrField::Damage => a.damage = v,
-        AttrField::SenseRange => a.sense_range = v,
-        AttrField::FoodValue => a.food_value = v,
-    }
-}
-
-/// 数组下标 → 属性，由 `FIELDS` 决定。
-///
-/// 不写死 `[a.hp, a.cost, ...]`：那样以后在 `FIELDS` 里插一行、忘了同步
-/// 这里的顺序，滑块就会去改别的属性，而且不会报错。
-fn read(a: &CellAttrs) -> [f64; 5] {
-    std::array::from_fn(|k| get(a, FIELDS[k].field))
-}
-
-fn write(a: &mut CellAttrs, v: [f64; 5]) {
-    for (k, f) in FIELDS.iter().enumerate() {
-        set(a, f.field, v[k]);
     }
 }
 
@@ -236,6 +139,11 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
             .color(TEXT_DIM)
             .size(10.0),
         );
+        ui.label(
+            egui::RichText::new(format!("{} 项参数", d.params.len()))
+                .color(TEXT_DIM)
+                .size(10.0),
+        );
     });
     if !d.desc.is_empty() {
         ui.label(
@@ -247,71 +155,73 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
 
     ui.add_space(4.0);
 
-    // ── 5 个属性 ──
-    //
-    // 一次性读进数组再写回：直接对 `cfg.cells[id]` 的字段取 &mut
-    // 会和循环里的 ui 借用打架，绕开它比跟借用检查器较劲划算。
     let id = *selected as usize;
-    let before = read(&world.config.cells[id]);
-    let factory = read(&defaults(*selected));
-    let mut vals = before;
+    // 一次性读进局部副本再写回：直接对 `cfg.cells[id]` 的字段取 &mut
+    // 会和循环里的 ui 借用打架，绕开它比跟借用检查器较劲划算。
+    let before = world.config.cells[id];
+    let factory = defaults(*selected);
+    let mut cur = before;
 
-    // 用 Grid 而不是 Slider::text()：`text()` 把名字排在**数值框之后**，
-    // 一行变成「滑块 1.0 血量」，名字在最右边、还每行不等宽，扫视起来很难受。
-    // Grid 让名字固定在左列，滑块起点也对齐。
-    ui.spacing_mut().slider_width = 200.0;
-    egui::Grid::new("cell_attrs")
-        .num_columns(2)
-        .spacing([10.0, 7.0])
-        .show(ui, |ui| {
-            for (k, f) in FIELDS.iter().enumerate() {
-                // 名字右边挂出厂值：不挂的话用户不知道"正常"是多少，
-                // 而拖动过之后又看不出来回没回去。
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    // 改过的项名字变蓝，一眼看出动过哪个属性
-                    let touched = vals[k] != factory[k];
-                    ui.label(
-                        egui::RichText::new(f.name)
-                            .color(if touched { ACCENT } else { TEXT })
-                            .size(12.0),
-                    );
-                    ui.label(
-                        egui::RichText::new(fmt(factory[k], f.decimals))
-                            .color(TEXT_DIM)
-                            .size(10.0),
-                    );
-                });
-                ui.add(
-                    egui::Slider::new(&mut vals[k], f.lo..=f.hi)
-                        .step_by(f.step)
-                        .fixed_decimals(f.decimals),
-                )
-                .on_hover_text(f.hint);
-                ui.end_row();
-            }
-        });
-    // 只在真的变了才写回：egui 的 Slider 会在绘制时 clamp/吸附值，
-    // 无条件写回等于让"打开窗口"变成一个会改配置的动作。
-    if vals != before {
-        write(&mut world.config.cells[id], vals);
-    }
-
-    // ── 哪些属性对这个细胞真的有用 ──
-    ui.add_space(2.0);
-    let mut notes: Vec<&str> = Vec::new();
-    if d.terrain {
-        notes.push("地形：只有「血量」和「食物值」有意义");
-    }
-    if d.behavior.is_none() && !d.terrain && !d.is_body_cell {
-        notes.push("这一项没有行为逻辑，属性基本不影响模拟");
-    }
-    if !notes.is_empty() {
+    if d.params.is_empty() {
+        // 地形 / 空 / 墙 / 食物：这些格子没有"每细胞"参数
+        let why = if d.terrain {
+            "地形效果在右侧「参数」面板里，每种地形一组（岩浆 / 沼泽 / 辐射 / 腐殖质）"
+        } else if d.id == cell_type::ct::FOOD {
+            "食物没有每格参数，腐败速率和能量换算在右侧「参数」面板里"
+        } else {
+            "这类格子没有可调参数"
+        };
         ui.label(
-            egui::RichText::new(notes.join("；"))
+            egui::RichText::new(why)
                 .color(Color32::from_rgb(251, 191, 36))
                 .size(10.0),
         );
+    } else {
+        // 用 Grid 而不是 Slider::text()：`text()` 把名字排在**数值框之后**，
+        // 一行变成「滑块 1.0 血量」，名字在最右边、还每行不等宽，扫视起来很难受。
+        // Grid 让名字固定在左列，滑块起点也对齐。
+        ui.spacing_mut().slider_width = 200.0;
+        egui::Grid::new("cell_attrs")
+            .num_columns(2)
+            .spacing([10.0, 7.0])
+            .show(ui, |ui| {
+                for f in d.params {
+                    let (lo, hi, step, dec) = f.range();
+                    let fv = factory.get(*f);
+                    let mut v = cur.get(*f);
+                    // 名字右边挂出厂值：不挂的话用户不知道"正常"是多少，
+                    // 而拖动过之后又看不出来回没回去。
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        // 改过的项名字变蓝，一眼看出动过哪个属性
+                        ui.label(
+                            egui::RichText::new(f.label())
+                                .color(if v != fv { ACCENT } else { TEXT })
+                                .size(12.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(fmt(fv, dec))
+                                .color(TEXT_DIM)
+                                .size(10.0),
+                        );
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut v, lo..=hi)
+                            .step_by(step)
+                            .fixed_decimals(dec),
+                    )
+                    .on_hover_text(f.hint());
+                    if v != cur.get(*f) {
+                        cur.set(*f, v);
+                    }
+                    ui.end_row();
+                }
+            });
+        // 只在真的变了才写回：Slider 会在绘制时 clamp/吸附值，
+        // 无条件写回等于让"打开窗口"变成一个会改配置的动作。
+        if cur != before {
+            world.config.cells[id] = cur;
+        }
     }
 
     ui.add_space(4.0);
@@ -338,15 +248,13 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
             ui.add_space(6.0);
             // 显示"改没改过"，省得用户忘了自己动过手
             let changed = (0..CELL_DEFS.len())
-                .filter(|&i| {
-                    read(&world.config.cells[i]) != read(&defaults(i as u8))
-                })
+                .filter(|&i| world.config.cells[i] != defaults(i as u8))
                 .count();
             ui.label(
                 egui::RichText::new(if changed == 0 {
                     "全部是默认值".to_string()
                 } else {
-                    format!("{} 项被改过", changed)
+                    format!("{} 种被改过", changed)
                 })
                 .color(if changed == 0 { TEXT_DIM } else { ACCENT })
                 .size(10.0),
@@ -363,6 +271,7 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use evosim_core::config::AttrField;
 
     #[test]
     fn defaults_match_cell_defs() {
@@ -376,14 +285,13 @@ mod tests {
 
     #[test]
     fn config_default_matches_cell_defs() {
-        // 窗口右下角会显示"N 项被改过"，它靠比较 Config 与 CELL_DEFS 得出。
+        // 窗口右下角会显示"N 种被改过"，它靠比较 Config 与 CELL_DEFS 得出。
         // 两者一旦不同源，用户一打开窗口就会看到莫须有的"改动"。
         let cfg = evosim_core::config::Config::default();
         for d in CELL_DEFS.iter() {
-            let a = cfg.cells[d.id as usize];
             assert_eq!(
-                read(&a),
-                read(&defaults(d.id)),
+                cfg.cells[d.id as usize],
+                defaults(d.id),
                 "{}（id {}）的 Config 默认值和 CELL_DEFS 不一致",
                 d.key,
                 d.id
@@ -392,11 +300,26 @@ mod tests {
     }
 
     #[test]
-    fn read_write_roundtrip() {
-        let mut a = CellAttrs::default();
-        let v = [1.5, 2.5, 3.5, 4.5, 5.5];
-        write(&mut a, v);
-        assert_eq!(read(&a), v);
+    fn get_set_roundtrip_covers_every_field() {
+        // get/set 的 match 漏一个分支 → 那个滑块拖了没反应，而且不报错。
+        let all = [
+            AttrField::Hp,
+            AttrField::Cost,
+            AttrField::Damage,
+            AttrField::SenseRange,
+            AttrField::FoodValue,
+            AttrField::BiteMult,
+            AttrField::ProdMult,
+            AttrField::RegenMult,
+            AttrField::StorageMult,
+            AttrField::ArmorResist,
+        ];
+        for (k, f) in all.iter().enumerate() {
+            let mut a = CellAttrs::default();
+            let v = 100.0 + k as f64; // 每个字段写不同的值，串了就能发现
+            a.set(*f, v);
+            assert_eq!(a.get(*f), v, "{:?} 的 get/set 不互通", f);
+        }
     }
 
     #[test]
@@ -405,27 +328,89 @@ mod tests {
         // 什么都没碰，配置就变了。这条和"步长把 0.006 吸附成 0"是同一类 bug，
         // 一旦有人调了某个细胞的数值而忘了改量程，这里会先炸。
         for d in CELL_DEFS.iter() {
-            let v = read(&defaults(d.id));
-            for (k, f) in FIELDS.iter().enumerate() {
+            let v = defaults(d.id);
+            for f in d.params {
+                let (lo, hi, _, _) = f.range();
+                let x = v.get(*f);
                 assert!(
-                    v[k] >= f.lo && v[k] <= f.hi,
+                    x >= lo && x <= hi,
                     "{}（id {}）的 {} 出厂值 {} 不在量程 {}..={} 内",
                     d.key,
                     d.id,
-                    f.name,
-                    v[k],
-                    f.lo,
-                    f.hi
+                    f.label(),
+                    x,
+                    lo,
+                    hi
                 );
             }
         }
     }
 
+    /// 每种身体细胞都必须有参数，否则面板上是个空窗；地形则必须**没有**
+    /// 每细胞参数（它们走 `Config.terrain`，在这里给滑块是误导）。
     #[test]
-    fn field_table_covers_all_five_attrs() {
-        // 少一项就意味着某个属性在 UI 里改不了
-        assert_eq!(FIELDS.len(), 5);
-        let names: Vec<&str> = FIELDS.iter().map(|f| f.name).collect();
-        assert_eq!(names, vec!["血量", "消耗", "伤害", "感知距离", "食物值"]);
+    fn params_are_declared_for_body_cells_only() {
+        for d in CELL_DEFS.iter() {
+            if d.is_body_cell {
+                assert!(
+                    !d.params.is_empty(),
+                    "{} 是身体细胞，应该有参数",
+                    d.key
+                );
+            } else {
+                assert!(
+                    d.params.is_empty(),
+                    "{} 不是身体细胞，不该有每细胞参数（地形走 Config.terrain）",
+                    d.key
+                );
+            }
+        }
+    }
+
+    /// 专属参数不能张冠李戴：`damage` 只给杀手/刺，`sense_range` 只给眼睛。
+    /// 这些是"拖了没反应"的根源，让注册表自己守住。
+    #[test]
+    fn exclusive_params_only_on_types_that_use_them() {
+        use evosim_core::cell_type::ct;
+        for d in CELL_DEFS.iter() {
+            let has = |f: AttrField| d.params.contains(&f);
+            if has(AttrField::Damage) {
+                assert!(
+                    d.id == ct::KILLER || d.id == ct::SPIKE,
+                    "{} 不该有「伤害」——只有杀手和刺会读它",
+                    d.key
+                );
+            }
+            if has(AttrField::SenseRange) {
+                assert_eq!(d.id, ct::EYE, "{} 不该有「感知距离」——只有眼睛会读它", d.key);
+            }
+            // 倍率各自只属于一种细胞
+            for (f, owner) in [
+                (AttrField::BiteMult, ct::MOUTH),
+                (AttrField::ProdMult, ct::PRODUCER),
+                (AttrField::RegenMult, ct::REGEN),
+                (AttrField::StorageMult, ct::STORAGE),
+                (AttrField::ArmorResist, ct::ARMOR),
+            ] {
+                if has(f) {
+                    assert_eq!(d.id, owner, "{} 不该有「{}」", d.key, f.label());
+                }
+            }
+        }
+    }
+
+    /// 三种通用属性每种身体细胞都要有，否则改不了一个该能改的数。
+    #[test]
+    fn universal_params_present_everywhere() {
+        for d in CELL_DEFS.iter().filter(|d| d.is_body_cell) {
+            for f in [AttrField::Hp, AttrField::Cost, AttrField::FoodValue] {
+                assert!(
+                    d.params.contains(&f),
+                    "{} 缺少通用参数「{}」",
+                    d.key,
+                    f.label()
+                );
+            }
+        }
     }
 }

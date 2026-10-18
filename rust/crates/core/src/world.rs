@@ -764,7 +764,10 @@ impl World {
             Behavior::Mouth => {
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
-                let gain = self.config.food_energy_gain();
+                // 全局「食物量倍率」× 这张嘴自己的摄取倍率。倍率出厂 1.0，
+                // 所以默认配置下与旧行为逐位相同。
+                let gain = self.config.food_energy_gain()
+                    * self.config.attr(cell.type_id, AttrField::BiteMult);
                 for k in 0..4 {
                     let n = NEIGHBORS_4[k];
                     if let Some(index) = self.grid.index(col + n.0, row + n.1) {
@@ -781,7 +784,9 @@ impl World {
                 {
                     return;
                 }
-                let prob = self.config.life.food_prod_prob;
+                // 全局「生产者造食率」× 这个生产者自己的倍率（出厂 1.0 = 不变）
+                let prob = self.config.life.food_prod_prob
+                    * self.config.attr(cell.type_id, AttrField::ProdMult);
                 if prob <= 0.0 {
                     return;
                 }
@@ -813,7 +818,21 @@ impl World {
                             continue;
                         }
                         if self.grid.types[index] == ct::ARMOR {
-                            continue; // 装甲格打不动
+                            // 装甲从"完全免疫"改成"按比例减免"。
+                            //
+                            // 出厂 1.0 = 100% 减免，必须走 `continue` 的**快路径**：
+                            // `harm_organism` 即使 amount = 0 也会触发刺的反伤和死亡判定，
+                            // 把伤害乘 0 送进去会引入旧行为里没有的副作用（黄金快照会漂）。
+                            let resist = self.config.attr(ct::ARMOR, AttrField::ArmorResist);
+                            if resist >= 1.0 {
+                                continue;
+                            }
+                            // resist <= 0 或 NaN 都退回"不减免"，按普通格处理
+                            if resist > 0.0 {
+                                let eff = damage * (1.0 - resist);
+                                self.harm_organism(owner as u32, eff, Some(my_id));
+                                continue;
+                            }
                         }
                         self.harm_organism(owner as u32, damage, Some(my_id));
                     }
@@ -823,7 +842,9 @@ impl World {
                 if self.organisms[i].damage <= 0.0 {
                     return;
                 }
-                let rate = self.config.life.regen_rate;
+                // 全局「再生速率」× 这个再生细胞自己的倍率（出厂 1.0 = 不变）
+                let rate = self.config.life.regen_rate
+                    * self.config.attr(cell.type_id, AttrField::RegenMult);
                 if !(rate > 0.0) {
                     return;
                 }
@@ -1238,5 +1259,143 @@ mod tests {
             }
         }
         assert!(on_neighbor > 0, "腐殖质应该也会在周围长食物");
+    }
+
+    // ────────────────────────── 每细胞倍率真的接到模拟上了吗 ──────────────────────────
+    //
+    // 光"编译通过 + 默认值不漂移"证明不了参数有用：倍率乘错地方、或者压根没乘，
+    // 编译器和黄金快照都不会报错（默认 1.0 时乘不乘结果一样）。这一组测试
+    // 每一项都把倍率**调离 1.0**，断言模拟结果真的跟着变、且方向正确。
+
+    /// 造一个 8×8 的空世界 + 一个指定身体的小个体，返回世界和它的 id
+    fn tiny_world(cells: &[(u8, i32, i32)]) -> (World, u32) {
+        let mut cfg = Config::default();
+        cfg.world.cols = 8;
+        cfg.world.rows = 8;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+
+        let mut rng = Rng::new(1);
+        let mut org = Organism::new(&w.config, &mut rng, &w.grid, 3, 3);
+        for (t, dx, dy) in cells {
+            org.anatomy.add_cell(*t, *dx, *dy, 0);
+        }
+        org.anatomy.recompute();
+        let id = w.add_organism(org);
+        (w, id)
+    }
+
+    /// 嘴的「摄取倍率」要乘在食物能量上。
+    #[test]
+    fn bite_mult_scales_energy_gain() {
+        let run = |mult: f64| -> f64 {
+            // 带一个储食细胞并把「储食加成」拉到 1000：繁殖阈值变成 2*(1+1000)，
+            // 吃 4 份食物远远够不着，就不会触发繁殖扣费。
+            //
+            // 为什么必须隔离：`act_organism` 末尾**包含繁殖判定**，
+            // 能量攒够阈值就扣掉一份成本再生一个——不隔离的话测到的是
+            // "吃到的能量减去繁殖成本"，倍率关系会被这个常数偏移毁掉。
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::STORAGE, 1, 0)]);
+            w.config.life.storage_food_bonus = 1000.0;
+            w.config.cells[ct::MOUTH as usize].bite_mult = mult;
+            // 嘴在 (3,3)，四邻域各放一份食物
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                let i = w.grid.index(3 + dx, 3 + dy).unwrap();
+                w.set_cell_at(i, ct::FOOD, -1);
+            }
+            let e0 = w.organisms[0].energy;
+            w.act_organism(0);
+            w.organisms[0].energy - e0
+        };
+        let base = run(1.0);
+        assert!(base > 0.0, "嘴应该吃到东西（默认 4 份食物）");
+        assert!(
+            (run(2.0) - base * 2.0).abs() < 1e-9,
+            "摄取倍率 2.0 应该拿到双倍能量（{} vs {}）",
+            run(2.0),
+            base
+        );
+        assert_eq!(run(0.0), 0.0, "摄取倍率 0 应该吃不到任何能量");
+    }
+
+    /// 生产者的「生产速度」要乘在造食概率上。
+    #[test]
+    fn prod_mult_scales_food_production() {
+        // 概率拉到 100% 保证必成功，再让倍率决定"成不成"
+        let run = |mult: f64| -> usize {
+            let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+            w.config.life.food_prod_prob = 100.0;
+            w.config.cells[ct::PRODUCER as usize].prod_mult = mult;
+            let before = w.snapshot_stats().food;
+            w.act_organism(0);
+            w.snapshot_stats().food - before
+        };
+        assert_eq!(run(1.0), 1, "造食率 100% 时每 tick 应长出 1 份食物");
+        assert_eq!(run(0.0), 0, "生产速度 0 时不该长出食物");
+    }
+
+    /// 再生细胞的「再生速率」要乘在每 tick 抹掉的伤害上。
+    #[test]
+    fn regen_mult_scales_damage_removal() {
+        let run = |mult: f64| -> f64 {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::REGEN, 1, 0)]);
+            w.config.life.regen_rate = 0.1;
+            w.config.cells[ct::REGEN as usize].regen_mult = mult;
+            w.organisms[0].damage = 1.0;
+            w.act_organism(0);
+            1.0 - w.organisms[0].damage
+        };
+        assert!((run(1.0) - 0.1).abs() < 1e-9, "默认速率应抹掉 0.1");
+        assert!((run(3.0) - 0.3).abs() < 1e-9, "倍率 3.0 应抹掉 0.3");
+        assert_eq!(run(0.0), 0.0, "倍率 0 应该完全不再生");
+    }
+
+    /// 装甲的「伤害减免」要真的作用在受到的伤害上。
+    #[test]
+    fn armor_resist_reduces_incoming_damage() {
+        // 攻击者带杀手在 (3,3)，目标在 (4,3) 且那一格是装甲
+        let run = |resist: f64| -> f64 {
+            let (mut w, _) = tiny_world(&[(ct::KILLER, 0, 0)]);
+            w.config.cells[ct::KILLER as usize].damage = 1.0;
+            w.config.cells[ct::ARMOR as usize].armor_resist = resist;
+
+            let mut rng = Rng::new(2);
+            let mut victim = Organism::new(&w.config, &mut rng, &w.grid, 4, 3);
+            victim.anatomy.add_cell(ct::ARMOR, 0, 0, 0);
+            victim.anatomy.recompute();
+            w.add_organism(victim);
+
+            w.act_organism(0); // 杀手出手
+            w.organisms[1].damage
+        };
+        assert_eq!(run(1.0), 0.0, "减免 100%（出厂值）应完全免疫");
+        assert!(
+            (run(0.5) - 0.5).abs() < 1e-9,
+            "减免 50% 时 1.0 伤害应只进 0.5（实际 {}）",
+            run(0.5)
+        );
+        assert!(
+            (run(0.0) - 1.0).abs() < 1e-9,
+            "减免 0% 时应吃满 1.0 伤害（实际 {}）",
+            run(0.0)
+        );
+    }
+
+    /// 储食细胞的「储备倍率」要乘在繁殖阈值上。
+    #[test]
+    fn storage_mult_scales_reproduce_threshold() {
+        let run = |mult: f64| -> f64 {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::STORAGE, 1, 0)]);
+            w.config.life.storage_food_bonus = 1.0;
+            w.config.cells[ct::STORAGE as usize].storage_mult = mult;
+            w.organisms[0].reproduce_at(&w.config)
+        };
+        // 基础成本 = 2 格，1 个储食细胞 → base * (1 + 1 * bonus)
+        assert!((run(1.0) - 4.0).abs() < 1e-9, "默认应为 2 * (1+1) = 4");
+        assert!((run(2.0) - 6.0).abs() < 1e-9, "倍率 2.0 应为 2 * (1+2) = 6");
+        assert!(
+            (run(0.0) - 2.0).abs() < 1e-9,
+            "倍率 0 应退回基础成本（等于没有储食加成）"
+        );
     }
 }

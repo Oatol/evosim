@@ -1141,9 +1141,51 @@ class FossilRecord {
 
 #### 9.7.3 细胞参数（`rust/crates/app/src/cells.rs`）
 
-16 种细胞 × 5 个属性（血量 / 消耗 / 伤害 / 感知距离 / 食物值），改的是 `Config.cells`，
+**按细胞类型暴露各自的参数**，不再是 16 种 × 同一套 5 个属性。改的是 `Config.cells`，
 **立刻影响后续演化，但不重置世界**——已经存在的个体按新参数结算。
-`Config.cells` 早就在存档里，所以这个窗口不需要动存档版本。
+
+**为什么必须按类型分**：`damage` 只有 `KILLER`（攻击）和 `SPIKE`（反伤）会读，
+`sense_range` 只有 `EYE`（`is_directional` 才进视觉）会读。一视同仁地给 16 种细胞
+5 个滑块，等于 80 个里有 **29 个是死旋钮**——拖了完全没反应，用户会以为面板坏了。
+
+**单一真源是 `CELL_DEFS[i].params`**：每种细胞声明自己暴露哪几项，顺序即显示顺序。
+地形/空/墙/食物声明为空数组（地形走 `Config.terrain`），面板会显示一行说明而不是空窗。
+四条测试守着：`params_are_declared_for_body_cells_only`（身体细胞必须有、地形必须没有）、
+`exclusive_params_only_on_types_that_use_them`（`damage` 只能出现在杀手/刺上）、
+`universal_params_present_everywhere`（血量/消耗/食物值每种都要有）、
+`get_set_roundtrip_covers_every_field`（`CellAttrs::get/set` 漏分支会静默失效）。
+
+| 细胞 | 参数 |
+|---|---|
+| 嘴 | 血量 · 消耗 · **摄取倍率** · 食物值 |
+| 生产者 | 血量 · 消耗 · **生产速度** · 食物值 |
+| 移动器 | 血量 · 消耗 · 食物值（移动是"一格/次"，没有速度概念） |
+| 杀手 | 血量 · 消耗 · 伤害 · 食物值 |
+| 装甲 | 血量 · 消耗 · **伤害减免** · 食物值 |
+| 眼睛 | 血量 · 消耗 · 感知距离 · 食物值 |
+| 储食 | 血量 · 消耗 · **储备倍率** · 食物值 |
+| 再生 | 血量 · 消耗 · **再生速率** · 食物值 |
+| 刺 | 血量 · 消耗 · 伤害 · 食物值 |
+
+**5 个"倍率"是从全局参数下放来的**（`bite_mult` / `prod_mult` / `regen_mult` /
+`storage_mult` / `armor_resist`）。用倍率而不是绝对值，是因为：
+
+- 直接给每细胞一个绝对值，就得给 16 种细胞都填"合理"的数，而且默认值一变黄金快照立刻漂
+- 倍率写法让默认配置（全 1.0）**逐位不变**，只有用户主动拖滑块才偏离 1.x 基线
+
+乘法的位置：`实际值 = 全局基值 × 该细胞倍率`。装甲的 `armor_resist` 例外，它是**比例**不是倍率，
+默认 1.0 = 100% 减免 = 旧的"完全免疫"。注意实现里 `resist >= 1.0` 必须走 `continue` 的**快路径**：
+`harm_organism` 即使 `amount = 0` 也会触发刺的反伤和死亡判定，把伤害乘 0 送进去会引入旧行为
+里没有的副作用（黄金快照会漂）。
+
+**5 条端到端测试**（`world.rs`）证明倍率真的接上了模拟：光"编译通过 + 默认值不漂"证明不了
+——倍率乘错地方或压根没乘，编译器和黄金快照都不会报错（默认 1.0 时乘不乘结果一样）。
+每条都把倍率**调离 1.0**，断言结果跟着变且方向正确。
+
+> 写这组测试时踩到一个坑：`act_organism` 末尾**包含繁殖判定**，能量攒够阈值就扣一份成本再生。
+> 测"嘴吃了多少能量"时必须先用储食细胞把阈值抬高（`storage_food_bonus = 1000`），
+> 否则测到的是"吃到的减去繁殖成本"，倍率关系被一个常数偏移毁掉（4 份食物 4 点能量，
+> 结果测出 3 点）。
 
 **默认值只有 `CELL_DEFS` 一个真源**，UI 里不写死数字；`Config::default()` 也从它派生
 （有 `config_default_matches_cell_defs` 守着）。这样以后加细胞或调平衡，「重置」自动跟着走。
@@ -1155,13 +1197,13 @@ class FossilRecord {
 * **量程必须贴着真实取值域。** 血量出厂值 1.0，量程要是 0~20，拖柄就永远趴在最左端（5% 处），
   既看不出当前值也调不动。现在每种属性的出厂值大致落在量程的 10%~40%。
   `every_factory_value_fits_its_slider` 守着这条：以后谁调了细胞数值忘了改量程，测试先炸。
-* **只在 `vals != before` 时才写回。** Slider 会在绘制时 clamp/吸附，无条件写回等于让
+* **只在 `cur != before` 时才写回。** Slider 会在绘制时 clamp/吸附，无条件写回等于让
   "打开窗口"变成一个会改配置的动作。
 
 **布局用 `Grid` 而不是 `Slider::text()`**：`text()` 把名字排在**数值框之后**，
 一行变成「滑块 1.0 血量」——名字在最右、每行还不等宽，扫视起来很难受。
 Grid 让名字固定在左列、滑块起点对齐，出厂值以暗色小字挂在名字右边（拖动后才知道"正常"是多少）。
-名字在值偏离出厂值时变蓝，右下角同时显示「N 项被改过 / 全部是默认值」。
+名字在值偏离出厂值时变蓝，右下角同时显示「N 种被改过 / 全部是默认值」。
 
 **滑块轨道单独提亮**（`ui.rs` 的 `style.visuals`）：egui 0.31 里轨道取 `widgets.inactive.bg_fill`
 （全库只有滑块用它，按钮走 `weak_bg_fill`），而它原本和面板底色只差 6 级灰度，深底上等于隐形。
@@ -1295,6 +1337,15 @@ cells.MOVER    = { hp: 1, cost: 0.008, damage: 0, senseRange: 0, foodValue: 1 }
 cells.KILLER   = { hp: 1, cost: 0.006, damage: 1, senseRange: 0, foodValue: 1 }
 cells.ARMOR    = { hp: 1, cost: 0.004, damage: 0, senseRange: 0, foodValue: 1 }
 cells.EYE      = { hp: 1, cost: 0.006, damage: 0, senseRange: 0, foodValue: 1 }
+
+// —— 以下 5 个倍率是 2.0 新增，1.x 没有（见 §9.7.3）——
+// 乘在对应的全局参数上，默认 1.0 = 与 1.x 逐位等价。
+// 只有 `armor_resist` 是比例不是倍率：1.0 = 100% 减免 = 旧的"完全免疫"。
+cells.MOUTH.biteMult       = 1.0   // × life.foodEnergyScale
+cells.PRODUCER.prodMult    = 1.0   // × life.foodProdProb
+cells.REGEN.regenMult      = 1.0   // × life.regenRate
+cells.STORAGE.storageMult  = 1.0   // × life.storageFoodBonus
+cells.ARMOR.armorResist    = 1.0   // 伤害减免比例，1.0 = 完全免疫
 
 // 变异
 addProb = 25, changeProb = 25, removeProb = 25
@@ -1677,6 +1728,7 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 | 批次 4 | 谱系树（DFS 排序 + 父子竖线 / 过滤补全祖先链 / 时间轴缩放） | ✅ |
 | 批次 4.5 | 修物种计数取值：`size()` → `alive_count`（4 处）+ 树过滤默认收紧到 5 | ✅ |
 | 批次 5 | 体型参数（繁殖成本指数 p + 体型上限）+ `examples/body_scan` 扫描 | ✅ 参数化 / ⚠️ 目标未达成 |
+| 批次 6 | 细胞参数按类型分化（`CELL_DEFS[i].params`）+ 5 个全局参数下放成每细胞倍率，存档 `VERSION` → 4 | ✅ |
 
 **批次 5 的结论要单独说**：参数做出来了，默认值锁着黄金快照（`p = 1.0` / `cap = 0`），
 但**扫描证明这两个旋钮推不动体型**——p 从 0.6 到 1.2 平均体型只动 0.12 格，体型上限完全不生效

@@ -119,7 +119,9 @@ impl Organism {
         if !self.anatomy.has(Flags::STORAGE) {
             return base;
         }
-        let bonus = cfg.life.storage_food_bonus;
+        // 全局「储食加成」× 储食细胞自己的倍率（出厂 1.0 = 与旧行为逐位相同）
+        let bonus =
+            cfg.life.storage_food_bonus * cfg.attr(ct::STORAGE, AttrField::StorageMult);
         if !(bonus > 0.0) {
             return base;
         }
