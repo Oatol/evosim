@@ -3,7 +3,7 @@
 //! 加一种新细胞 = 往 `CELL_DEFS` 里加一项（需要新行为再补一个 match 分支）。
 //! 网格读写、配色、感知编码、结构变异、存档、参数面板都从这里读。
 
-use crate::config::AttrField;
+use crate::config::{AttrField, ParamRef, TerrainField};
 
 /// 细胞类型 id。**写进存档，定下就不能改。**
 pub mod ct {
@@ -86,12 +86,16 @@ pub struct CellDef {
     pub enter: Option<EnterFx>,
     pub stand: Option<StandFx>,
     pub tick: Option<TickFx>,
-    /// 这种细胞在参数面板里暴露哪几项，**顺序即显示顺序**。
+    /// 这种类型在参数面板里暴露哪几项，**顺序即显示顺序**。
     ///
-    /// 这是"按细胞类型给参数"的单一真源：不是每种细胞都该有全部 10 项。
+    /// 这是"按类型给参数"的单一真源：不是每种细胞都该有全部 10 项。
     /// `damage` 只对杀手/刺有意义、`sense_range` 只对眼睛有意义，其余类型给出来
-    /// 就是死旋钮（拖了没反应）。空数组 = 这种细胞没有可调参数（地形走 `Config.terrain`）。
-    pub params: &'static [AttrField],
+    /// 就是死旋钮（拖了没反应）。
+    ///
+    /// 身体细胞声明 `ParamRef::Cell(..)`（落在 `Config.cells[id]`），
+    /// 地形声明 `ParamRef::Terrain(..)`（落在 `Config.terrain`）。
+    /// 空/食物/墙没有任何可调项 —— 它们的数值是写死在模拟里的，给滑块等于骗人。
+    pub params: &'static [ParamRef],
     // 属性出厂默认（运行时以 Config.cells 为准）
     pub hp: f64,
     pub cost: f64,
@@ -166,10 +170,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::MOUTH),
         behavior: Some(Behavior::Mouth),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::BiteMult,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::BiteMult),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.002,
         colors: [0xe07b39, 0xff9500, 0xe69f00],
@@ -183,10 +187,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::PRODUCER),
         behavior: Some(Behavior::Producer),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::ProdMult,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::ProdMult),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.002,
         colors: [0x4caf50, 0x00e676, 0x009e73],
@@ -200,7 +204,11 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::MOVER),
         // 移动器没有专属参数：移动是"一格/次"，没有速度概念。
         // 给它加速度要改移动逻辑（一次走两格？每 N tick 走一次？），那是改模拟，不是加参数。
-        params: &[AttrField::Hp, AttrField::Cost, AttrField::FoodValue],
+        params: &[
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::FoodValue),
+        ],
         cost: 0.008,
         colors: [0x38bdf8, 0x00b0ff, 0x56b4e9],
         ..base(ct::MOVER, "MOVER", "mover", "移动器")
@@ -213,10 +221,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::KILLER),
         behavior: Some(Behavior::Killer),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::Damage,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::Damage),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         damage: 1.0,
         cost: 0.006,
@@ -230,10 +238,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         visible: true,
         flag: Some(flag::ARMOR),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::ArmorResist,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::ArmorResist),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.004,
         colors: [0xa855f7, 0xd500f9, 0xcc79a7],
@@ -248,10 +256,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::EYE),
         behavior: Some(Behavior::Eye),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::SenseRange,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::SenseRange),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.006,
         colors: [0xd8b4fe, 0xffffff, 0xf0e442],
@@ -265,6 +273,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         passable: true,
         enter: Some(EnterFx::Burn),
         stand: Some(StandFx::Burn),
+        params: &[
+            ParamRef::terrain(TerrainField::LavaEnter),
+            ParamRef::terrain(TerrainField::LavaStand),
+        ],
         colors: [0xff6a00, 0xff2d00, 0xe05a00],
         ..base(ct::LAVA, "LAVA", "lava", "岩浆")
     },
@@ -275,6 +287,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         terrain: true,
         passable: true,
         enter: Some(EnterFx::Bog),
+        params: &[ParamRef::terrain(TerrainField::SwampCost)],
         colors: [0x3f5540, 0x5a7d5a, 0x4d6b4d],
         ..base(ct::SWAMP, "SWAMP", "swamp", "沼泽")
     },
@@ -285,6 +298,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         terrain: true,
         passable: true,
         stand: Some(StandFx::Irradiate),
+        params: &[
+            ParamRef::terrain(TerrainField::RadDamage),
+            ParamRef::terrain(TerrainField::RadMutation),
+        ],
         colors: [0xd4f000, 0xeeff00, 0xc8d400],
         ..base(ct::RAD, "RAD", "rad", "辐射带")
     },
@@ -295,6 +312,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         terrain: true,
         passable: true,
         tick: Some(TickFx::Fertilize),
+        params: &[ParamRef::terrain(TerrainField::HumusFood)],
         colors: [0x6b4f2a, 0x8d6e3a, 0x7a5c33],
         ..base(ct::HUMUS, "HUMUS", "humus", "腐殖质")
     },
@@ -304,10 +322,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         paintable: true,
         flag: Some(flag::STORAGE),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::StorageMult,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::StorageMult),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.004,
         food_value: 3.0,
@@ -321,10 +339,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         flag: Some(flag::REGEN),
         behavior: Some(Behavior::Regen),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::RegenMult,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::RegenMult),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         cost: 0.005,
         colors: [0x5eead4, 0x00ffc8, 0x44d7b6],
@@ -336,10 +354,10 @@ pub static CELL_DEFS: [CellDef; 16] = [
         paintable: true,
         flag: Some(flag::SPIKE),
         params: &[
-            AttrField::Hp,
-            AttrField::Cost,
-            AttrField::Damage,
-            AttrField::FoodValue,
+            ParamRef::cell(AttrField::Hp),
+            ParamRef::cell(AttrField::Cost),
+            ParamRef::cell(AttrField::Damage),
+            ParamRef::cell(AttrField::FoodValue),
         ],
         damage: 1.0,
         cost: 0.004,
@@ -443,6 +461,12 @@ pub static TERRAIN_BRUSH_TYPES: [u8; 7] = [
     ct::RAD,
     ct::HUMUS,
 ];
+
+/// 有可调参数的**地形** —— 「类型参数」窗口第二段按钮由它派生，**顺序即显示顺序**。
+///
+/// 只有这 4 种在 `TerrainCfg` 里有对应字段。空 / 食物 / 墙的数值写死在模拟里，
+/// 列进参数面板等于摆一个拖了没反应的旋钮。
+pub static PARAM_TERRAIN_TYPES: [u8; 4] = [ct::LAVA, ct::SWAMP, ct::RAD, ct::HUMUS];
 
 /// 有"世界级每 tick 行为"的地形
 pub static TICKING_TERRAIN_TYPES: [u8; 1] = [ct::HUMUS];

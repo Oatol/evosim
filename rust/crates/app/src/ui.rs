@@ -54,10 +54,10 @@ pub struct UiState {
     pub hover: String,
     pub show_tools: bool,
     pub show_params: bool,
-    /// 细胞参数窗口
-    pub cell_params_open: bool,
-    /// 细胞参数里当前选中的细胞 id
-    pub cell_selected: u8,
+    /// 类型参数窗口（细胞 / 地形，选中哪个调哪个）
+    pub type_params_open: bool,
+    /// 类型参数里当前选中的类型 id
+    pub type_selected: u8,
     /// 世界坐标下的高亮矩形（1 格大小）+ 各自的颜色。
     /// 由面板填充，这里换算成屏幕像素再描边。
     pub highlights: Vec<(egui::Rect, Color32)>,
@@ -77,8 +77,8 @@ impl Default for UiState {
             hover: String::new(),
             show_tools: true,
             show_params: true,
-            cell_params_open: false,
-            cell_selected: 3,
+            type_params_open: false,
+            type_selected: ct::MOUTH,
             highlights: Vec::new(),
             place_hint: None,
             place_preview: None,
@@ -330,22 +330,22 @@ pub fn draw(
                     if ui
                         .selectable_label(st.show_params, "全局参数")
                         .on_hover_text(
-                            "整个模拟一份的设置：世界 / 生命 / 地形 / 变异 / 感知\n\
-                             改这里会影响所有个体和所有格子",
+                            "整个模拟一份的设置：生命规则 / 变异 / 感知 / 体型\n\
+                             改这里对所有个体所有格子一起生效；每种类型自己的参数在「类型参数」",
                         )
                         .clicked()
                     {
                         st.show_params = !st.show_params;
                     }
                     if ui
-                        .selectable_label(st.cell_params_open, "细胞参数")
+                        .selectable_label(st.type_params_open, "类型参数")
                         .on_hover_text(
-                            "每种细胞自己的参数：血量 / 消耗 / 食物值 + 该类型专属属性\n\
-                             只列身体细胞——地形参数在「全局参数」里",
+                            "每种类型自己的参数：细胞 / 地形，选中哪个调哪个\n\
+                             这里管「每种一份」，全局乘数在「全局参数」里",
                         )
                         .clicked()
                     {
-                        st.cell_params_open = !st.cell_params_open;
+                        st.type_params_open = !st.type_params_open;
                     }
                     if ui.button("适应窗口").on_hover_text("快捷键 F").clicked() {
                         act.fit = true;
@@ -465,8 +465,11 @@ pub fn draw(
 
     // ── 右侧：全局参数 ──
     //
-    // 和「细胞参数」的分工：这里的东西整个模拟只有一份（世界尺寸、生命规则、
-    // 每种地形一组效果、变异、感知），改了对所有个体所有格子一起生效。
+    // 和「类型参数」的分工：这里的东西整个模拟只有一份（世界尺寸、生命规则、
+    // 变异、感知），改了对所有个体所有格子一起生效；那边的值每种类型一份。
+    //
+    // 两边不是"粗调 / 细调"，而是：**实际值 = 这里的全局基值 × 那边的类型倍率**。
+    // 所以地形效果**不在这里**——那是每种地形一份，归「类型参数」。
     if st.show_params {
         let mut params_open = st.show_params;
         egui::Window::new("全局参数")
@@ -550,102 +553,23 @@ pub fn draw(
                 if cap != before_cap {
                     cfg.life.max_body_cells = cap;
                 }
-
-                // ── 地形效果 ──
-                //
-                // 和「细胞参数」是同一套思路：每种地形只列自己的旋钮。
-                // 区别是这些值对整个画布上该地形的**所有**格子生效，不是每格独立。
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("地形效果")
-                        .color(TEXT)
-                        .size(12.0)
-                        .strong(),
-                );
-                ui.label(
-                    egui::RichText::new("每种地形一组，改了对画布上所有该地形格子生效")
-                        .color(TEXT_DIM)
-                        .size(10.0),
-                );
-
-                terrain_head(ui, ct::LAVA, "岩浆");
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.lava_enter_damage,
-                    0.0,
-                    10.0,
-                    0.5,
-                    "踏入伤害",
-                    "踩进岩浆那一下的冲击伤害（默认 2）。",
-                );
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.lava_stand_damage,
-                    0.0,
-                    10.0,
-                    0.5,
-                    "停留伤害",
-                    "待在岩浆里每 tick 的持续伤害（默认 1）。",
-                );
-
-                terrain_head(ui, ct::SWAMP, "沼泽");
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.swamp_move_cost,
-                    0.0,
-                    5.0,
-                    0.1,
-                    "移动能耗",
-                    "在沼泽里走一步额外消耗的能量（默认 0.5）。能量不够会落到 0 并进入饥饿计时。",
-                );
-
-                terrain_head(ui, ct::RAD, "辐射带");
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.rad_damage,
-                    0.0,
-                    5.0,
-                    0.05,
-                    "每 tick 伤害",
-                    "待在辐射带里每 tick 扣的血（默认 0.25）。",
-                );
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.rad_mutation_boost,
-                    1.0,
-                    20.0,
-                    0.5,
-                    "变异倍率",
-                    "站在辐射里的个体，**后代**的变异率乘这个倍数（默认 3）。",
-                );
-
-                terrain_head(ui, ct::HUMUS, "腐殖质");
-                slider_f64(
-                    ui,
-                    &mut cfg.terrain.humus_food_prob,
-                    0.0,
-                    5.0,
-                    0.1,
-                    "冒食概率",
-                    "每 tick 往相邻空格（含自己那格）长食物的概率，单位 %（默认 0.5）。",
-                );
             });
         st.show_params = params_open;
     }
 
-    if st.cell_params_open {
-        let mut open = st.cell_params_open;
-        egui::Window::new("细胞参数")
+    if st.type_params_open {
+        let mut open = st.type_params_open;
+        egui::Window::new("类型参数")
             .resizable(false)
             .collapsible(false)
             .min_width(470.0)
             .max_width(470.0)
             .open(&mut open)
-            .default_pos([520.0, 380.0])
+            .default_pos([500.0, 300.0])
             .show(ctx, |ui| {
-                crate::cells::draw(ui, world, &mut st.cell_selected);
+                crate::cells::draw(ui, world, &mut st.type_selected);
             });
-        st.cell_params_open = open;
+        st.type_params_open = open;
     }
 
     // ── 面板：检视器 / 物种 / 曲线 ──
@@ -1044,46 +968,4 @@ mod tests {
         assert!(kb < 400, "内嵌字体 {} KB，太大了（关掉 hinting 能砍一半）", kb);
         assert!(kb > 50, "内嵌字体只有 {} KB，是不是裁错了", kb);
     }
-}
-
-/// 一个"只在真的变了才写回"的 f64 滑块。
-///
-/// 为什么要绕这一道：egui 的 Slider 会在绘制时按 `step_by` **吸附**值，
-/// 直接 `&mut` 绑定等于让"打开面板"变成一个会改配置的动作
-/// （0.006 被 0.05 的步长吸成 0 这个坑踩过）。
-///
-/// 阈值用 1e-9 而不是精确相等：`step_by(0.1)` 这类二进制不精确的步长会把
-/// 0.5 吸成 0.5000000000000001，差 1e-16 却会让"有没有改过"判断为真。
-fn slider_f64(
-    ui: &mut egui::Ui,
-    target: &mut f64,
-    lo: f64,
-    hi: f64,
-    step: f64,
-    text: &str,
-    hint: &str,
-) {
-    let before = *target;
-    let mut v = before;
-    ui.add(egui::Slider::new(&mut v, lo..=hi).text(text).step_by(step))
-        .on_hover_text(hint);
-    if (v - before).abs() > 1e-9 {
-        *target = v;
-    }
-}
-
-/// 地形分组的小标题，用该地形在世界里的颜色——和画布上看到的对得上
-fn terrain_head(ui: &mut egui::Ui, id: u8, name: &str) {
-    ui.add_space(4.0);
-    let c = cell_type::def(id).map(|d| d.colors[0]).unwrap_or(0xffffff);
-    ui.label(
-        egui::RichText::new(name)
-            .color(Color32::from_rgb(
-                ((c >> 16) & 0xff) as u8,
-                ((c >> 8) & 0xff) as u8,
-                (c & 0xff) as u8,
-            ))
-            .size(11.0)
-            .strong(),
-    );
 }

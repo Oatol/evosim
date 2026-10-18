@@ -160,7 +160,7 @@ impl Default for LifeCfg {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TerrainCfg {
     pub lava_enter_damage: f64,
     pub lava_stand_damage: f64,
@@ -179,6 +179,105 @@ impl Default for TerrainCfg {
             rad_damage: 0.25,
             rad_mutation_boost: 3.0,
             humus_food_prob: 0.5,
+        }
+    }
+}
+
+impl TerrainCfg {
+    /// 按参数键取值。和 `CellAttrs::get` 对称，面板不直接摸字段。
+    #[inline]
+    pub fn get(&self, f: TerrainField) -> f64 {
+        match f {
+            TerrainField::LavaEnter => self.lava_enter_damage,
+            TerrainField::LavaStand => self.lava_stand_damage,
+            TerrainField::SwampCost => self.swamp_move_cost,
+            TerrainField::RadDamage => self.rad_damage,
+            TerrainField::RadMutation => self.rad_mutation_boost,
+            TerrainField::HumusFood => self.humus_food_prob,
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, f: TerrainField, v: f64) {
+        match f {
+            TerrainField::LavaEnter => self.lava_enter_damage = v,
+            TerrainField::LavaStand => self.lava_stand_damage = v,
+            TerrainField::SwampCost => self.swamp_move_cost = v,
+            TerrainField::RadDamage => self.rad_damage = v,
+            TerrainField::RadMutation => self.rad_mutation_boost = v,
+            TerrainField::HumusFood => self.humus_food_prob = v,
+        }
+    }
+}
+
+/// 每种地形的可调参数键 —— `AttrField` 的地形版。
+///
+/// `AttrField` 指向 `Config.cells[id]` 的一个字段，这里指向 `Config.terrain` 的一个字段。
+/// 两者都通过 `ParamRef` 进 `CELL_DEFS[i].params`，所以「类型参数」面板只有一套渲染代码。
+///
+/// **加一个地形参数 = 给 `TerrainCfg` 加字段 + 这里加变体 + 在对应地形的 `params` 里声明。**
+/// 漏掉最后一步就是个死旋钮（面板上看不见，或者看见了拖不动），
+/// `every_terrain_field_is_declared` 测试会先炸。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerrainField {
+    LavaEnter,
+    LavaStand,
+    SwampCost,
+    RadDamage,
+    RadMutation,
+    HumusFood,
+}
+
+impl TerrainField {
+    /// 全部变体。测试拿它做"有没有漏声明"的守门。
+    pub const ALL: [TerrainField; 6] = [
+        TerrainField::LavaEnter,
+        TerrainField::LavaStand,
+        TerrainField::SwampCost,
+        TerrainField::RadDamage,
+        TerrainField::RadMutation,
+        TerrainField::HumusFood,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TerrainField::LavaEnter => "踏入伤害",
+            TerrainField::LavaStand => "停留伤害",
+            TerrainField::SwampCost => "移动能耗",
+            TerrainField::RadDamage => "每 tick 伤害",
+            TerrainField::RadMutation => "变异倍率",
+            TerrainField::HumusFood => "冒食概率",
+        }
+    }
+
+    /// `(lo, hi, step, decimals)`，和 `AttrField::range` 同构。
+    ///
+    /// 量程要贴住出厂值：出厂 0.25 配 0~100 的话拖柄永远趴在左端，
+    /// 看不出当前值也调不动。
+    pub fn range(self) -> (f64, f64, f64, usize) {
+        match self {
+            TerrainField::LavaEnter => (0.0, 10.0, 0.5, 1),
+            TerrainField::LavaStand => (0.0, 10.0, 0.5, 1),
+            TerrainField::SwampCost => (0.0, 5.0, 0.1, 1),
+            TerrainField::RadDamage => (0.0, 5.0, 0.05, 2),
+            // 1 是下限：0 倍变异率等于关掉辐射带的另一半功能，没意义
+            TerrainField::RadMutation => (1.0, 20.0, 0.5, 1),
+            TerrainField::HumusFood => (0.0, 5.0, 0.1, 1),
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            TerrainField::LavaEnter => "踩进岩浆那一下的冲击伤害（默认 2）。",
+            TerrainField::LavaStand => "待在岩浆里每 tick 的持续伤害（默认 1）。",
+            TerrainField::SwampCost => {
+                "在沼泽里走一步额外消耗的能量（默认 0.5）。能量不够会落到 0 并进入饥饿计时。"
+            }
+            TerrainField::RadDamage => "待在辐射带里每 tick 扣的血（默认 0.25）。",
+            TerrainField::RadMutation => "站在辐射里的个体，**后代**的变异率乘这个倍数（默认 3）。",
+            TerrainField::HumusFood => {
+                "每 tick 往相邻空格（含自己那格）长食物的概率，单位 %（默认 0.5）。"
+            }
         }
     }
 }
@@ -378,6 +477,20 @@ pub enum AttrField {
 }
 
 impl AttrField {
+    /// 全部变体。测试拿它做"get/set 有没有漏分支"的守门。
+    pub const ALL: [AttrField; 10] = [
+        AttrField::Hp,
+        AttrField::Cost,
+        AttrField::Damage,
+        AttrField::SenseRange,
+        AttrField::FoodValue,
+        AttrField::BiteMult,
+        AttrField::ProdMult,
+        AttrField::RegenMult,
+        AttrField::StorageMult,
+        AttrField::ArmorResist,
+    ];
+
     /// 面板上的名字
     pub fn label(self) -> &'static str {
         match self {
@@ -433,6 +546,59 @@ impl AttrField {
             AttrField::StorageMult => "繁殖阈值抬高量的倍率（× 全局「储食加成」）。",
             AttrField::ArmorResist => "受到攻击时的伤害减免比例。1.00 = 完全免疫（出厂值）。",
         }
+    }
+}
+
+/// 参数面板里一项可调参数的**来源**。
+///
+/// 这是「类型参数」窗口能用一套代码画完细胞和地形的原因：面板只认
+/// `(当前选中的类型, ParamRef)`，值到底从 `Config.cells[id]` 还是 `Config.terrain` 取，
+/// 由变体自己决定。
+///
+/// 为什么不让 `CellAttrs` 直接带上地形字段：那等于给 16 种细胞各存一份没用的地形参数，
+/// 而且 `Config.terrain` 是模拟里真正被读的那份，两份真源必然对不上。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamRef {
+    Cell(AttrField),
+    Terrain(TerrainField),
+}
+
+impl ParamRef {
+    /// `const` 构造器：`CELL_DEFS` 是 `static`，里面的 `params` 必须是常量表达式，
+    /// 不能用 `From`/`Into`（那是运行时 trait）。
+    pub const fn cell(f: AttrField) -> Self {
+        ParamRef::Cell(f)
+    }
+
+    pub const fn terrain(f: TerrainField) -> Self {
+        ParamRef::Terrain(f)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ParamRef::Cell(f) => f.label(),
+            ParamRef::Terrain(f) => f.label(),
+        }
+    }
+
+    pub fn range(self) -> (f64, f64, f64, usize) {
+        match self {
+            ParamRef::Cell(f) => f.range(),
+            ParamRef::Terrain(f) => f.range(),
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            ParamRef::Cell(f) => f.hint(),
+            ParamRef::Terrain(f) => f.hint(),
+        }
+    }
+
+    /// 这一项是不是"每种细胞一份"的属性（而不是"每种地形一份"）。
+    #[inline]
+    pub fn is_cell(self) -> bool {
+        matches!(self, ParamRef::Cell(_))
     }
 }
 

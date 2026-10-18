@@ -162,7 +162,11 @@ fn pass(
                 i - 1
             };
             let rt = if c + 1 == cols {
-                if wrap { i - cols + 1 } else { i }
+                // 写成 `i + 1 - cols` 而不是 `i - cols + 1`：后者在**第一行最后一格**
+                // 会先算 `i - cols`（i = cols-1 < cols）再 +1，debug 下直接
+                // "attempt to subtract with overflow" panic。release 下因为回绕
+                // 恰好得到 0 才没暴露——歪打正着，别依赖它。
+                if wrap { i + 1 - cols } else { i }
             } else {
                 i + 1
             };
