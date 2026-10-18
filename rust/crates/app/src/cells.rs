@@ -1,4 +1,10 @@
-//! 细胞参数窗口：**按细胞类型**暴露各自的参数。
+//! 细胞参数窗口：**每种细胞**自己的参数。
+//!
+//! 和「全局参数」窗口的分工：这里的值每格独立，改「生产者」的生产速度只影响生产者细胞；
+//! 那边的值整个模拟一份（世界 / 生命 / 地形 / 变异 / 感知）。
+//!
+//! 只列 9 种**身体细胞**（`LIVING_CELL_TYPES`）。地形/空/墙/食物没有每细胞参数，
+//! 列在这里选中也是空窗——它们的设置是全局的，每种地形一组，归「全局参数」。
 //!
 //! 以前是 16 种 × 5 个属性一视同仁，结果 80 个滑块里有 29 个是死旋钮——
 //! `damage` 只有杀手/刺会读，`sense_range` 只有眼睛会读，拖别的类型完全没反应。
@@ -15,7 +21,7 @@
 
 use egui::{Color32, CornerRadius, Sense, Stroke, Vec2};
 
-use evosim_core::cell_type::{self, CELL_DEFS};
+use evosim_core::cell_type::{self, CELL_DEFS, LIVING_CELL_TYPES};
 use evosim_core::config::CellAttrs;
 use evosim_core::world::World;
 
@@ -41,22 +47,27 @@ fn defaults(id: u8) -> CellAttrs {
 }
 
 pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
-    // ── 细胞选择：4×4 色块 ──
+    // ── 细胞选择 ──
+    //
+    // 只列**身体细胞**（`LIVING_CELL_TYPES` 那 9 种）。地形/空/墙/食物没有每细胞参数，
+    // 列在这里选中也是空窗——它们的设置是全局的，每种地形一组，在「全局参数」里。
     ui.label(
         egui::RichText::new("选一种细胞")
             .color(TEXT_DIM)
             .size(11.0),
     );
     ui.add_space(2.0);
-    let cols = 4;
-    let btn_w = 104.0;
-    for row in 0..4 {
+    let cols = 3;
+    let btn_w = 142.0;
+    let n = LIVING_CELL_TYPES.len();
+    for row in 0..(n + cols - 1) / cols {
         ui.horizontal(|ui| {
             for c in 0..cols {
-                let id = (row * cols + c) as u8;
-                if id as usize >= CELL_DEFS.len() {
+                let k = row * cols + c;
+                if k >= n {
                     continue;
                 }
+                let id = LIVING_CELL_TYPES[k];
                 let d = &CELL_DEFS[id as usize];
                 let on = *selected == id;
                 let (rect, resp) = ui.allocate_exact_size(
@@ -163,16 +174,10 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
     let mut cur = before;
 
     if d.params.is_empty() {
-        // 地形 / 空 / 墙 / 食物：这些格子没有"每细胞"参数
-        let why = if d.terrain {
-            "地形效果在右侧「参数」面板里，每种地形一组（岩浆 / 沼泽 / 辐射 / 腐殖质）"
-        } else if d.id == cell_type::ct::FOOD {
-            "食物没有每格参数，腐败速率和能量换算在右侧「参数」面板里"
-        } else {
-            "这类格子没有可调参数"
-        };
+        // 兜底：正常走不到（列表里只有身体细胞，而测试保证它们都有参数）。
+        // 留着是为了以后加新细胞忘了填 `params` 时不至于让窗口崩掉。
         ui.label(
-            egui::RichText::new(why)
+            egui::RichText::new("这种细胞还没声明参数——去 `CELL_DEFS` 里补上 `params`")
                 .color(Color32::from_rgb(251, 191, 36))
                 .size(10.0),
         );
@@ -235,20 +240,22 @@ pub fn draw(ui: &mut egui::Ui, world: &mut World, selected: &mut u8) {
         }
         if ui
             .button("全部重置")
-            .on_hover_text("16 种细胞全部恢复出厂默认值")
+            .on_hover_text("所有身体细胞恢复出厂默认值")
             .clicked()
         {
-            for i in 0..CELL_DEFS.len() {
-                world.config.cells[i] = defaults(i as u8);
+            for &i in LIVING_CELL_TYPES.iter() {
+                world.config.cells[i as usize] = defaults(i);
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // right_to_left 里先加的排在最右，所以先垫一格空白，
             // 否则计数会紧贴窗口右边框（看着像被裁了一半）。
             ui.add_space(6.0);
-            // 显示"改没改过"，省得用户忘了自己动过手
-            let changed = (0..CELL_DEFS.len())
-                .filter(|&i| world.config.cells[i] != defaults(i as u8))
+            // 显示"改没改过"，省得用户忘了自己动过手。
+            // 只统计身体细胞：地形的 CellAttrs 不参与模拟，算进来会莫名其妙多出几项。
+            let changed = LIVING_CELL_TYPES
+                .iter()
+                .filter(|&&i| world.config.cells[i as usize] != defaults(i))
                 .count();
             ui.label(
                 egui::RichText::new(if changed == 0 {
@@ -396,6 +403,24 @@ mod tests {
                     assert_eq!(d.id, owner, "{} 不该有「{}」", d.key, f.label());
                 }
             }
+        }
+    }
+
+    /// 选择列表里只该出现身体细胞。
+    ///
+    /// 这个窗口叫「细胞参数」，地形/空/墙/食物列进来选中就是空窗——
+    /// 它们的设置是全局的，归「全局参数」。用户就是这么反馈的。
+    #[test]
+    fn cell_picker_lists_only_body_cells() {
+        for &id in LIVING_CELL_TYPES.iter() {
+            let d = cell_type::def(id).expect("LIVING_CELL_TYPES 里不该有未知 id");
+            assert!(d.is_body_cell, "{} 不是身体细胞，不该出现在细胞参数列表里", d.key);
+            assert!(!d.params.is_empty(), "{} 没有参数，选中会是空窗", d.key);
+        }
+        // 反过来：所有身体细胞都要在列表里，否则有细胞永远调不到
+        let listed: Vec<u8> = LIVING_CELL_TYPES.to_vec();
+        for d in CELL_DEFS.iter().filter(|d| d.is_body_cell) {
+            assert!(listed.contains(&d.id), "{} 是身体细胞但不在选择列表里", d.key);
         }
     }
 

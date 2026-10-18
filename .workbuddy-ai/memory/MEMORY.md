@@ -104,7 +104,7 @@
   **禁止**：`tools/click.ps1` / `drag.ps1` / `wheel.ps1` 之类的注入输入、长时间跑满 CPU 的扫描。
 - **长跑扫描要控功耗**：单次 `body_scan` 这类扫描控制在 1 分钟内（~15000 tick × 少量组合）。
   多组合 × 多种子 × 4 万 tick 那种（实测 18 分钟满载）会触发过热。
-- `cargo test --release`（当前 85 项：app 38 / core 37 / golden 2 / render 8）
+- `cargo test --release`（当前 86 项：app 39 / core 37 / golden 2 / render 8）
 - `node tools/parity-check.mjs`（对 JS 基线）
 - 打包：`node rust/tools/package.mjs` → `dist/evosim2.exe`（~7.07 MB）
 - 截图/压测：`evosim-app --screenshot out.png --ticks N [--mode temp|rad]`、`--bench --seconds 4 --speed 50`
@@ -140,6 +140,10 @@
   测"吃了多少能量"必须先抬繁殖阈值，否则测到的是"吃到的减去繁殖成本"。
   **教训三：默认值 1.0 的倍率，乘错地方/压根没乘，编译器和 golden 都不会报错**——
   必须把倍率调离 1.0 写端到端测试。
+- **批次 6.5 完成**：两个参数窗口按职责拆开 —— **细胞参数**（只列 9 种身体细胞，每格独立）
+  / **全局参数**（世界·生命·变异·感知 + 每种地形一组，整个模拟一份）。
+  `Config.terrain` 的 6 个字段以前**根本没在 UI 上**，这次补进全局参数的地形分组。
+  **教训：说"某个参数已经分开了、只是 UI 没分组"之前，先 grep 一遍它到底有没有被渲染。**
 - **下一步候选**：
   - 给大体型**实质收益**（储能 / 抗捕食 / 分摊开销），让体型真成为一条演化轴——前提是先解决
     「出生要求整块空地，身体越大越难落脚」这个反向选择
