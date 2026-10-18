@@ -64,6 +64,19 @@ pub struct LifeCfg {
     pub starvation_ticks: i32,
     pub storage_food_bonus: f64,
     pub regen_rate: f64,
+    /// 繁殖成本的体型指数 p：`food_needed = cell_count^p`。
+    ///
+    /// 1.0 = 线性，也就是旧行为（黄金快照用的就是它）。p > 1 让大体型**超线性**
+    /// 地贵，体型就不再是"收益和成本同倍增长"的中性漂移，而会收敛到一个最优值。
+    ///
+    /// 默认必须是 1.0：`tests/golden.rs` 拿 `Config::default()` 跟 JS 基线逐位比对，
+    /// 改这个数就等于有意让 2.0 和 1.x 分叉。
+    pub breed_cost_exponent: f64,
+    /// 体型上限（细胞数）。0 = 不限，旧行为。
+    ///
+    /// 变异里的"加细胞"算子在达到上限后直接放弃。这个上限只挡变异，
+    /// 不影响读档/工坊里手工造的超大个体——那是用户明确画出来的东西。
+    pub max_body_cells: usize,
 }
 
 impl Default for LifeCfg {
@@ -80,6 +93,8 @@ impl Default for LifeCfg {
             starvation_ticks: 60,
             storage_food_bonus: 1.0,
             regen_rate: 0.1,
+            breed_cost_exponent: 1.0,
+            max_body_cells: 0,
         }
     }
 }

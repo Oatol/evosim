@@ -501,6 +501,46 @@ pub fn draw(
                         .text("寿命倍率")
                         .step_by(1.0),
                 );
+                ui.separator();
+
+                // ── 体型 ──
+                //
+                // 这两项**会改变模拟**，而且默认值（1.0 / 0）正被黄金快照锁着，
+                // 所以面板上改它们等于"有意让这次运行偏离 1.x 基线"，是给人做对照实验用的。
+                //
+                // 写法照 cells.rs 的老规矩：先读进局部变量、画完再比对，只在**真的变了**
+                // 才写回。egui 的 Slider 会在绘制时按 `step_by` 吸附值，无条件写回等于
+                // 让"打开参数面板"变成一个会改配置的动作——1.0 会被吸成 1.0000000000000002。
+                let before_p = cfg.life.breed_cost_exponent;
+                let mut p = before_p;
+                ui.add(
+                    egui::Slider::new(&mut p, 0.5..=2.0)
+                        .text("繁殖成本指数 p")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "繁殖成本 = 体型^p。1.00 = 线性（默认，与 1.x 一致）\n\
+                     < 1 让大体型更便宜 → 体型往上漂；> 1 反过来把体型压小。",
+                );
+                if (p - before_p).abs() > 1e-9 {
+                    cfg.life.breed_cost_exponent = p;
+                }
+
+                let before_cap = cfg.life.max_body_cells;
+                let mut cap = before_cap;
+                ui.add(
+                    egui::Slider::new(&mut cap, 0..=40)
+                        .text("体型上限")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "细胞数上限，0 = 不限（默认）。\n\
+                     只挡变异里的「加细胞」算子，不影响工坊里手画的个体。",
+                );
+                if cap != before_cap {
+                    cfg.life.max_body_cells = cap;
+                }
             });
         st.show_params = params_open;
     }

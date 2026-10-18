@@ -101,13 +101,16 @@ impl Organism {
     }
 
     /// 繁殖实际扣掉的**基础成本**
+    ///
+    /// `cell_count^p`，p 来自 `LifeCfg::breed_cost_exponent`，见 [`breed_cost`]。
     pub fn food_needed(&self, cfg: &Config) -> f64 {
+        let base = breed_cost(self.cell_count(), cfg.life.breed_cost_exponent);
         let extra = if self.anatomy.has(Flags::MOVER) {
             cfg.life.extra_mover_food_cost
         } else {
             0.0
         };
-        self.cell_count() as f64 + extra
+        base + extra
     }
 
     /// 触发繁殖的**阈值**（储食细胞抬高它，差额变成储备）
@@ -388,5 +391,68 @@ impl Organism {
     pub fn step_target(&self) -> (i32, i32) {
         let v = DIR_VECTORS[(self.direction & 3) as usize];
         (self.col + v.0, self.row + v.1)
+    }
+}
+
+/// 繁殖成本里跟体型有关的那部分：`cell_count^p`。
+///
+/// 抽成自由函数是为了能直接单测——`food_needed` 挂在 `Organism` 上，造一个实例要
+/// 整个网格和 RNG，测一个纯算术公式不值当。
+///
+/// **p = 1.0 走分支，不调 `powf(1.0)`**：黄金快照要求与 JS 版逐位一致。虽然
+/// `x.powf(1.0)` 实际上就等于 x，但没必要为一个纯线性的情况去赌 libm 的实现细节。
+/// p <= 0 视为"非法值，退回线性"，免得配置被写成 0 之后成本恒为 1 把种群炸了。
+pub fn breed_cost(cells: usize, p: f64) -> f64 {
+    let n = cells as f64;
+    if (p - 1.0).abs() < 1e-12 || !(p > 0.0) {
+        n
+    } else {
+        n.powf(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 黄金快照的前提：默认配置下成本必须**精确等于**细胞数。
+    ///
+    /// `tests/golden.rs` 拿 `Config::default()` 跟 JS 基线逐位比对，所以这里不能
+    /// 只断言"约等于"——浮点差一位，几千 tick 之后摘要就全变了。
+    #[test]
+    fn default_exponent_is_exactly_linear() {
+        let cfg = Config::default();
+        assert_eq!(cfg.life.breed_cost_exponent, 1.0, "默认 p 必须是 1.0");
+        assert_eq!(cfg.life.max_body_cells, 0, "默认体型上限必须是 0（不限）");
+        for n in 1..=40 {
+            assert_eq!(
+                breed_cost(n, 1.0),
+                n as f64,
+                "p=1 时 {} 格的成本必须精确等于 {}",
+                n,
+                n
+            );
+        }
+    }
+
+    /// p < 1 让大体型便宜，p > 1 让它变贵——这是整个"大体型"实验的杠杆方向。
+    #[test]
+    fn exponent_moves_cost_in_the_right_direction() {
+        let n = 6;
+        let linear = breed_cost(n, 1.0);
+        assert!(breed_cost(n, 0.8) < linear, "p<1 应该让 {} 格更便宜", n);
+        assert!(breed_cost(n, 1.3) > linear, "p>1 应该让 {} 格更贵", n);
+
+        // 1 格个体在超线性成本下也应该保持 1.0（1^x = 1），否则最小体型会被额外惩罚
+        for p in [0.5, 0.8, 1.0, 1.5, 2.0] {
+            assert!((breed_cost(1, p) - 1.0).abs() < 1e-12, "1 格在 p={} 时成本应为 1", p);
+        }
+    }
+
+    /// 非法 p（0 或负数）退回线性，而不是让成本恒为 1 把种群炸掉。
+    #[test]
+    fn bogus_exponent_falls_back_to_linear() {
+        assert_eq!(breed_cost(7, 0.0), 7.0);
+        assert_eq!(breed_cost(7, -1.0), 7.0);
     }
 }
