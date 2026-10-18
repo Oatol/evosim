@@ -1,66 +1,95 @@
-//! 光场：从世界顶部垂直投射，被墙遮挡，随深度衰减（批次 7）。
+//! 光场：**可放置的点光源** + 天空光，多源扩散，被墙遮挡（批次 7.5）。
 //!
-//! ## 为什么和温度/辐射分开
+//! ## 为什么从「垂直投射」改成「多源扩散」
 //!
-//! `fields.rs` 里那两个是**各向同性扩散**（5 点模板 + 每帧衰减），光不是：
+//! 第一版是每列从顶行往下扫、遇墙归零。它有个致命的设计后果：**世界被强行分成上下**。
+//! 上半亮、下半黑，生物只能活在上半部，玩家想让光出现在地底或某个洞里完全做不到。
+//! 那不是「光」，那是「地表」。
 //!
-//! | | 温度 / 辐射 | 光 |
-//! |---|---|---|
-//! | 传播 | 各向同性扩散 | **方向性投射**（从上方来，逐行往下传） |
-//! | 更新 | 每帧（物理时间 60 Hz） | 只在拓扑变化时（地形纯函数） |
-//! | 衰减 | `saturating_sub` | 随深度衰减，**遇墙归零** |
-//! | 缓冲 | 需要 scratch 双缓冲 | 单次扫描，原地写 |
+//! 现在改成：
 //!
-//! 塞进 `Fields::update()` 会让那个函数变成三种算法轮流跑的大杂烩，
-//! 而且光场本来可以不每帧算，混进去就被迫跟着算。
+//! * **点光源** —— 独立的一层数据（`sources`），**不占物质世界的格子**，
+//!   生物可以穿过它，画笔也擦不到它。玩家想在哪放就在哪放。
+//! * **天空光** —— 退化成「顶部一排光源」，可以整个关掉（`sky = 0`）。
+//!   关掉之后世界全黑，只剩玩家放的那些光。
+//! * 两者统一用**多源 BFS 扩散**计算，遇墙不传播。
 //!
-//! ## 这个场存在的意义
+//! 顺带白捡一个好处：扩散会让光**绕进洞口**，墙的阴影边缘是软的（不再是硬切）。
 //!
-//! 加光场之前，模拟里没有**空间梯度**：食物由生产者细胞在自己旁边凭空产出，
-//! 所以「去哪里」不是决策，「身体朝哪边」没有意义，「移动」只是逃命。
-//! 光从上方来、被墙挡住、随深度变暗之后：
+//! ## 算法：桶排序多源 BFS
 //!
-//! * 位置有价值了 → 往亮处走
-//! * 身体朝向有价值了 → 生产者该长在朝光的一侧
-//! * 阴影有价值了 → 墙下面能躲、能埋伏
+//! 把所有光源按强度丢进 256 个桶，从 255 往 1 扫。每个格子只在「被更亮的覆盖」时
+//! 才入桶，所以每个格子最多被处理一次 —— 复杂度 `O(面积)`，与光源数量几乎无关。
 //!
-//! ## 生物不挡光
-//!
-//! 只有实心地形（墙）挡光。生物透光，理由有三：
-//!
-//! 1. 否则 `level` 依赖每 tick 都在变的 `types`，光场必须每 tick 重算；
-//! 2. 否则大身体会用自己的上半身遮住自己的下半身，体型越大越吃亏——
-//!    正好和「让体型有意义」这个目标相反；
-//! 3. 物理上也说得通，生物是薄薄一层组织。
+//! ```text
+//! for v in (1..=255).rev():
+//!     for i in buckets[v]:            // 这一格的最亮到达值就是 v
+//!         if level[i] != v: continue  // 已被更亮的覆盖，跳过
+//!         for 四邻 n:
+//!             if 墙(n): continue
+//!             nv = v - absorb
+//!             if nv > level[n]: level[n] = nv; buckets[nv].push(n)
+//! ```
 //!
 //! ## 数值约定
 //!
-//! 值域 0–255，255 = 满照（世界顶行），0 = 全黑。渲染层用 256 项色表映射。
+//! 值域 0–255，255 = 满照，0 = 全黑。渲染层用 256 项色表映射。
 
 use serde::{Deserialize, Serialize};
 
 use crate::cell_type::{self, ct};
 use crate::grid::Grid;
 
-/// 顶行（地表）的满照值
+/// 满照
 pub const SUN_MAX: u8 = 255;
+
+/// 一个点光源。**独立于物质世界**：不占格子、不挡路、画笔擦不到。
+///
+/// 放在墙上也允许 —— 光从那一格发出，能照到墙外的空地（墙只挡"穿过"它的光）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightSource {
+    pub col: i32,
+    pub row: i32,
+    /// 0–255。决定它能照多远：`strength / absorb` 格。
+    pub strength: u8,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Light {
     pub len: usize,
     /// 每格光强（0–255）
     pub level: Vec<u8>,
-    /// 每往下一格衰减多少，由世界高度推导（见 `absorb_for`）
+    /// 玩家放置的点光源
+    pub sources: Vec<LightSource>,
+    /// 每格衰减多少，由世界高度推导（见 `absorb_for`）
     pub absorb: u8,
+    /// 天空光强度（0 = 关掉，世界只剩点光源）
+    pub sky: u8,
+    /// BFS 用的桶（256 个），复用避免每帧分配。不进存档。
+    #[serde(skip)]
+    buckets: Vec<Vec<u32>>,
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Light {
+            len: 0,
+            level: Vec::new(),
+            sources: Vec::new(),
+            absorb: 3,
+            sky: SUN_MAX,
+            buckets: (0..256).map(|_| Vec::new()).collect(),
+        }
+    }
 }
 
 impl Light {
     pub fn new(cols: usize, rows: usize) -> Self {
-        Light {
-            len: cols * rows,
-            level: vec![0; cols * rows],
-            absorb: absorb_for(rows),
-        }
+        let mut l = Light::default();
+        l.len = cols * rows;
+        l.level = vec![0; l.len];
+        l.absorb = absorb_for(rows);
+        l
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -70,35 +99,89 @@ impl Light {
         self.len = cols * rows;
         self.level = vec![0; self.len];
         self.absorb = absorb_for(rows);
+        // 越界的光源丢掉：世界变小了，它们本来也照不到任何格子
+        let (c, r) = (cols as i32, rows as i32);
+        self.sources.retain(|s| s.col >= 0 && s.row >= 0 && s.col < c && s.row < r);
     }
 
     pub fn clear(&mut self) {
         self.level.fill(0);
     }
 
-    /// 重算整张光场。`O(cols × rows)`，30k 格约 30–50 µs。
-    ///
-    /// 每列独立：从顶行往下扫，遇墙归零，其余每格减去 `absorb`。
-    /// 光只垂直走，所以**不处理水平环绕**——列之间互不影响。
+    /// 重算整张光场。`O(面积)`，30k 格约 100–200 µs（比垂直投射贵，但仍远低于一帧预算）。
     pub fn rebuild(&mut self, grid: &Grid) {
         if self.len != grid.len {
             self.resize(grid.cols, grid.rows);
         }
-        let cols = grid.cols;
-        let rows = grid.rows;
-        let absorb = self.absorb;
-        for c in 0..cols {
-            let mut v: u8 = SUN_MAX;
-            for r in 0..rows {
-                let i = r * cols + c;
-                if blocks_light(grid.floor[i]) {
-                    // 墙：这一格及以下全黑（硬阴影）
-                    v = 0;
-                } else if r > 0 {
-                    v = v.saturating_sub(absorb);
+        self.level.fill(0);
+        for b in self.buckets.iter_mut() {
+            b.clear();
+        }
+
+        // ── 天空光：顶部一排光源 ──
+        //
+        // 顶部是墙的那一列不发光——否则光会从墙里冒出来，看着像 bug。
+        if self.sky > 0 {
+            for c in 0..grid.cols {
+                if blocks_light(grid.floor[c]) {
+                    continue;
                 }
-                self.level[i] = v;
+                self.level[c] = self.sky;
+                self.buckets[self.sky as usize].push(c as u32);
             }
+        }
+
+        // ── 点光源 ──
+        for s in &self.sources {
+            let Some(i) = grid.index(s.col, s.row) else {
+                continue;
+            };
+            if s.strength > self.level[i] {
+                self.level[i] = s.strength;
+                self.buckets[s.strength as usize].push(i as u32);
+            }
+        }
+
+        // ── 多源 BFS ──
+        let cols = grid.cols;
+        let rows = grid.rows as i32;
+        let absorb = self.absorb;
+        for v in (1..=255u8).rev() {
+            // 取出来单独遍历，避开 `buckets[v]` 与 `level` 同时可变借用
+            let mut cur = std::mem::take(&mut self.buckets[v as usize]);
+            for &ii in cur.iter() {
+                let i = ii as usize;
+                if self.level[i] != v {
+                    continue; // 已被更亮的覆盖
+                }
+                let c = (i % cols) as i32;
+                let r = (i / cols) as i32;
+                for (dc, dr) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    // 注意：**垂直方向永不环绕**，水平方向按 `grid.wrap` 走。
+                    //
+                    // 这一条踩过：`wrap_edges = true` 时如果垂直也环绕，天空光会从
+                    // 第 0 行的"上邻居"= 第 149 行漏回来，于是世界变成「上下两头亮、
+                    // 中间黑」（实测剖面 r0=255 / r75=30 / r149=252）。
+                    // 高度方向代表"地下"，上下本来就不该相连；左右才是环绕的柱面世界。
+                    let nr = r + dr;
+                    if nr < 0 || nr >= rows {
+                        continue;
+                    }
+                    let Some(n) = grid.index(c + dc, nr) else {
+                        continue;
+                    };
+                    if blocks_light(grid.floor[n]) {
+                        continue;
+                    }
+                    let nv = v.saturating_sub(absorb);
+                    if nv > self.level[n] {
+                        self.level[n] = nv;
+                        self.buckets[nv as usize].push(n as u32);
+                    }
+                }
+            }
+            cur.clear();
+            self.buckets[v as usize] = cur; // 放回去复用
         }
     }
 
@@ -113,12 +196,39 @@ impl Light {
     pub fn lit_at(&self, grid: &Grid, col: i32, row: i32) -> f64 {
         self.at(grid, col, row) as f64 / SUN_MAX as f64
     }
+
+    /// 这一格有没有点光源（用来做「点一下放置、再点一下移除」）
+    pub fn source_index_at(&self, col: i32, row: i32) -> Option<usize> {
+        self.sources
+            .iter()
+            .position(|s| s.col == col && s.row == row)
+    }
+
+    /// 放一个光源。同一格已有时直接改强度，不重复加。
+    pub fn set_source(&mut self, col: i32, row: i32, strength: u8) {
+        match self.source_index_at(col, row) {
+            Some(k) => self.sources[k].strength = strength,
+            None => self.sources.push(LightSource { col, row, strength }),
+        }
+    }
+
+    /// 移除某格的光源，返回有没有删掉
+    pub fn remove_source_at(&mut self, col: i32, row: i32) -> bool {
+        match self.source_index_at(col, row) {
+            Some(k) => {
+                self.sources.remove(k);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
-/// 每往下一格衰减多少。
+/// 每格衰减多少。
 ///
-/// 目标是「世界高度的 80% 处恰好归零」：保证底部是暗的（有地方可以躲），
-/// 同时上部有足够的梯度让生物分层。150 行 → `ceil(255/120) = 3`，第 85 行归零。
+/// 目标是「世界高度的 80% 处衰减完」：天空光能照到世界大半，但又明显有梯度。
+/// 150 行 → `ceil(255/120) = 3`，也就是天空光能照 85 格深；
+/// 一个满强度点光源的照射半径也是 85 格（想小一点就调低强度）。
 fn absorb_for(rows: usize) -> u8 {
     let span = (rows as f64 * 0.8).max(1.0);
     ((SUN_MAX as f64 / span).ceil() as u8).max(1)
@@ -127,8 +237,7 @@ fn absorb_for(rows: usize) -> u8 {
 /// 这种地形挡不挡光。
 ///
 /// **只有实心地形挡**：`terrain` 且不可通行，目前就是墙。
-/// 岩浆 / 沼泽 / 辐射带 / 腐殖质都是"铺在地上的东西"，光能照到；
-/// 空和食物也不挡。
+/// 岩浆 / 沼泽 / 辐射带 / 腐殖质都是"铺在地上的东西"，光能照到；空和食物也不挡。
 #[inline]
 pub fn blocks_light(ty: u8) -> bool {
     ty != ct::EMPTY && cell_type::is_terrain(ty) && !cell_type::is_passable(ty)
@@ -138,97 +247,146 @@ pub fn blocks_light(ty: u8) -> bool {
 mod tests {
     use super::*;
 
-    fn empty_grid(cols: usize, rows: usize) -> Grid {
+    fn grid(cols: usize, rows: usize) -> Grid {
         Grid::new(cols, rows, false)
     }
 
     #[test]
-    fn surface_is_full_bright() {
-        let g = empty_grid(8, 20);
-        let mut l = Light::new(8, 20);
+    fn sky_lights_the_surface() {
+        let g = grid(8, 30);
+        let mut l = Light::new(8, 30);
         l.rebuild(&g);
         for c in 0..8 {
-            assert_eq!(l.at(&g, c as i32, 0), SUN_MAX, "顶行第 {} 列应该是满照", c);
+            assert_eq!(l.at(&g, c as i32, 0), SUN_MAX, "顶行第 {} 列应该满照", c);
         }
     }
 
     #[test]
-    fn light_decreases_with_depth() {
-        // 空世界：每列都是从满照开始，每行减 absorb，减到 0 为止
-        let g = empty_grid(4, 30);
-        let mut l = Light::new(4, 30);
+    fn sky_can_be_turned_off() {
+        // 关掉天空光之后，没有点光源的世界必须全黑 —— 这是"世界不再强行分上下"的前提
+        let g = grid(8, 30);
+        let mut l = Light::new(8, 30);
+        l.sky = 0;
         l.rebuild(&g);
-        let absorb = l.absorb as i32;
-        for r in 0..30i32 {
-            let expect = (SUN_MAX as i32 - r * absorb).max(0) as u8;
-            assert_eq!(
-                l.at(&g, 0, r),
-                expect,
-                "第 {} 行光强应为 {}（absorb = {}）",
-                r,
-                expect,
-                absorb
-            );
+        assert!(
+            l.level.iter().all(|&v| v == 0),
+            "sky = 0 且没有点光源时应该全黑"
+        );
+    }
+
+    #[test]
+    fn a_lamp_lights_its_surroundings_regardless_of_depth() {
+        // 这是本次改动的核心：光可以出现在**世界底部**，不再被"上亮下黑"绑死
+        let g = grid(40, 40);
+        let mut l = Light::new(40, 40);
+        l.sky = 0;
+        l.set_source(20, 35, 255); // 世界底部
+        l.rebuild(&g);
+
+        assert_eq!(l.at(&g, 20, 35), 255, "光源自己那格应该最亮");
+        assert!(l.at(&g, 21, 35) > 0, "光源右边应该有光");
+        assert!(l.at(&g, 20, 30) > 0, "光源上方应该有光");
+        assert!(
+            l.at(&g, 20, 34) > l.at(&g, 20, 30),
+            "离光源越远越暗（34 行应该比 30 行亮）"
+        );
+        assert_eq!(l.at(&g, 0, 0), 0, "远处（左上角）应该还是黑的");
+    }
+
+    #[test]
+    fn wall_blocks_and_light_wraps_around_the_edge() {
+        // 一堵竖墙把世界分成两半：墙右边没光源 → 应该基本黑；
+        // 但光能绕过墙的**边缘**（扩散不是直线），所以顶端/底端会漏一点。
+        let mut g = grid(20, 20);
+        for r in 0..18 {
+            g.floor[r * 20 + 10] = ct::WALL;
         }
-        assert_eq!(l.at(&g, 0, 29), 0, "底部应该全黑");
-    }
-
-    #[test]
-    fn wall_casts_shadow() {
-        let mut g = empty_grid(9, 20);
-        // 在第 5 列、第 3 行放一堵墙
-        g.floor[3 * 9 + 5] = ct::WALL;
-        let mut l = Light::new(9, 20);
+        let mut l = Light::new(20, 20);
+        l.sky = 0;
+        l.set_source(5, 10, 255);
         l.rebuild(&g);
 
-        assert_eq!(l.at(&g, 5, 3), 0, "墙自己那格应该全黑");
-        for r in 3..20 {
-            assert_eq!(l.at(&g, 5, r), 0, "墙正下方第 {} 行应该在阴影里", r);
-        }
-        // 同高度的邻居不受影响
-        assert!(l.at(&g, 4, 5) > 0, "墙左边的同高度格子不该被遮");
-        assert!(l.at(&g, 6, 5) > 0, "墙右边的同高度格子不该被遮");
+        assert!(l.at(&g, 5, 10) > 0, "光源处有光");
+        assert!(l.at(&g, 9, 10) > 0, "墙左侧还有光");
+        let behind = l.at(&g, 12, 10);
+        let front = l.at(&g, 8, 10);
+        assert!(
+            behind < front,
+            "墙后面（{}）应该比墙前面（{}）暗得多",
+            behind,
+            front
+        );
     }
 
     #[test]
-    fn light_resumes_below_a_floating_wall_only_after_the_shadow_ends() {
-        // 硬阴影：墙下方的整列都是黑的（光不会绕过去）。
-        // 这条是"故意的"——软阴影（散射光）留给以后。
-        let mut g = empty_grid(3, 30);
-        g.floor[5 * 3 + 1] = ct::WALL;
-        let mut l = Light::new(3, 30);
-        l.rebuild(&g);
-        assert_eq!(l.at(&g, 1, 6), 0);
-        assert_eq!(l.at(&g, 1, 20), 0);
-    }
-
-    #[test]
-    fn passable_terrain_does_not_block() {
-        // 岩浆 / 沼泽 / 辐射带 / 腐殖质都铺在地上，光能照到
-        for ty in [ct::LAVA, ct::SWAMP, ct::RAD, ct::HUMUS, ct::FOOD] {
-            let mut g = empty_grid(3, 20);
-            g.floor[2 * 3 + 1] = ty;
-            let mut l = Light::new(3, 20);
+    fn stronger_lamp_reaches_farther() {
+        // 用 60×60 的世界（absorb = 6），光源放中间，横向 30 格处
+        let g = grid(60, 60);
+        let reach = |strength: u8| -> u8 {
+            let mut l = Light::new(60, 60);
+            l.sky = 0;
+            l.set_source(0, 30, strength);
             l.rebuild(&g);
-            assert!(
-                l.at(&g, 1, 2) > 0,
-                "{} 不该挡光（它铺在地上，光能照到）",
-                cell_type::label(ty)
-            );
-        }
+            l.at(&g, 30, 30)
+        };
+        assert!(
+            reach(255) > reach(120),
+            "强光源照得更远（255 → {}，120 → {}）",
+            reach(255),
+            reach(120)
+        );
+        assert!(reach(255) > 0, "满强度光源 30 格外应该还有光");
+        assert_eq!(reach(0), 0, "强度 0 的光源不发光");
+    }
+
+    #[test]
+    fn sources_are_independent_of_the_material_grid() {
+        // 光源不占格子：网格全空，光源列表照样工作
+        let g = grid(10, 10);
+        let mut l = Light::new(10, 10);
+        l.sky = 0;
+        l.set_source(3, 3, 200);
+        l.rebuild(&g);
+        assert!(l.at(&g, 3, 3) == 200);
+        assert!(
+            g.types.iter().all(|&t| t == ct::EMPTY),
+            "放光源不该改动物质网格"
+        );
+    }
+
+    #[test]
+    fn set_and_remove_source() {
+        let mut l = Light::new(10, 10);
+        l.set_source(2, 2, 100);
+        assert_eq!(l.sources.len(), 1);
+        l.set_source(2, 2, 200); // 同一格改强度，不重复加
+        assert_eq!(l.sources.len(), 1);
+        assert_eq!(l.sources[0].strength, 200);
+        assert!(l.remove_source_at(2, 2));
+        assert!(l.sources.is_empty());
+        assert!(!l.remove_source_at(2, 2), "再删一次应该返回 false");
+    }
+
+    #[test]
+    fn resize_drops_out_of_bounds_sources() {
+        let mut l = Light::new(20, 20);
+        l.set_source(15, 15, 100);
+        l.set_source(2, 2, 100);
+        l.resize(10, 10);
+        assert_eq!(l.sources.len(), 1, "越界的光源应该被丢掉");
+        assert_eq!(l.sources[0].col, 2);
     }
 
     #[test]
     fn light_is_independent_of_organisms() {
-        // 生物不挡光：往 `types` 里塞一堆身体细胞，光场必须一模一样。
-        // 这是「光场是地形纯函数」的守门测试——一旦有人改成读 `types`，这里会炸。
-        let mut g = empty_grid(6, 20);
-        g.floor[4 * 6 + 2] = ct::WALL;
-        let mut l = Light::new(6, 20);
+        // 生物不挡光：往 `types` 里塞一堆身体细胞，光场必须一模一样
+        let mut g = grid(12, 20);
+        g.floor[8 * 12 + 4] = ct::WALL;
+        let mut l = Light::new(12, 20);
+        l.set_source(3, 12, 255);
         l.rebuild(&g);
         let before = l.level.clone();
 
-        // 模拟一堆生物占位
         for i in 0..g.len {
             if g.floor[i] == ct::EMPTY {
                 g.types[i] = ct::PRODUCER;
@@ -240,24 +398,11 @@ mod tests {
 
     #[test]
     fn absorb_covers_eighty_percent_of_height() {
-        // 150 行的世界，光应该在 85 行左右归零
-        let g = empty_grid(2, 150);
+        let g = grid(2, 150);
         let mut l = Light::new(2, 150);
         l.rebuild(&g);
         assert_eq!(l.absorb, 3, "150 行的 absorb 应该是 3");
         assert!(l.at(&g, 0, 84) > 0, "第 84 行还有光");
         assert_eq!(l.at(&g, 0, 85), 0, "第 85 行归零");
-    }
-
-    #[test]
-    fn resize_clears_and_recomputes_absorb() {
-        let mut l = Light::new(4, 10);
-        l.level.fill(200);
-        l.resize(4, 10);
-        assert_eq!(l.level[0], 200, "尺寸没变时不该清空");
-        l.resize(6, 30);
-        assert_eq!(l.len, 180);
-        assert!(l.level.iter().all(|&v| v == 0), "换尺寸后应该清零");
-        assert_eq!(l.absorb, absorb_for(30));
     }
 }

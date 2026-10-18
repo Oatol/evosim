@@ -82,10 +82,20 @@ fn rng_matches_js_sequence() {
 #[test]
 fn light_field_has_vertical_gradient() {
     let w = run(0, 0.0);
-    let bottom = w.grid.rows as i32 - 1;
     assert_eq!(w.light.at(&w.grid, 0, 0), 255, "顶行应该满照");
-    assert_eq!(w.light.at(&w.grid, 0, bottom), 0, "底行应该全黑");
     assert!(w.light.absorb >= 1, "absorb 至少是 1，否则光传不下去");
+
+    // 底部不再保证**精确为 0**：光是多源 BFS 扩散的，会从侧面渗进深处
+    // （这正是软阴影，比第一版的硬切更真实）。所以只断言"深处明显更暗"。
+    let mid = w.grid.rows as i32 / 2;
+    let surface = w.light.at(&w.grid, 0, 0) as i32;
+    let deep = w.light.at(&w.grid, 0, mid) as i32;
+    assert!(
+        deep < surface / 2,
+        "世界中线（{}）应该比地表（{}）暗一半以上",
+        deep,
+        surface
+    );
 }
 
 /// 2000 tick 后生态还活着，体型落在合理区间。

@@ -500,6 +500,27 @@ impl App {
         }
     }
 
+    /// 「光源」工具：点一下放、再点一下移除。
+    ///
+    /// 光源**独立于物质世界**——不改 `grid.types`，生物可以直接穿过，
+    /// 画笔和橡皮擦也碰不到它。所以这里只动 `world.light.sources`。
+    fn toggle_light_at_cursor(&mut self) {
+        let Some((col, row)) = self.hover_cell else {
+            return;
+        };
+        let strength = self.ui.light_strength;
+        let Some(world) = self.world.as_mut() else {
+            return;
+        };
+        if world.light_source_at(col, row).is_some() {
+            world.remove_light_source(col, row);
+        } else {
+            world.set_light_source(col, row, strength);
+        }
+        // 光照着色模式下要立刻看到效果
+        self.upload_field();
+    }
+
     /// 悬停读数：光标所在格子的类型 / 归属个体 / 能量
     fn update_hover(&mut self) {
         let Some(world) = self.world.as_ref() else {
@@ -535,6 +556,10 @@ impl App {
         // 光照**总是显示**（0 也是信息：全黑 = 生产者在这里没有产出）
         let lit = world.light.at(&world.grid, col, row);
         text.push_str(&format!(" · 光照 {}%", lit as u32 * 100 / 255));
+        // 点光源：不占格子，所以只能这样告诉用户"这里有个灯"
+        if let Some(sv) = world.light_source_at(col, row) {
+            text.push_str(&format!(" · 光源 {}%", sv as u32 * 100 / 255));
+        }
         if owner >= 0 {
             if let Some(org) = world.organism(owner as u32) {
                 let sp = org
@@ -1155,6 +1180,7 @@ impl ApplicationHandler for App {
                                     self.paint_at_cursor();
                                 }
                                 ui::LeftAction::Inspect => self.inspect_at_cursor(),
+                                ui::LeftAction::Light => self.toggle_light_at_cursor(),
                                 ui::LeftAction::Pan => {
                                     // 平移工具：左键拖动即可平移（右键/中键任何时候都能拖）
                                     self.dragging = true;

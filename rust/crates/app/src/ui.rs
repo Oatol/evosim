@@ -19,6 +19,8 @@ pub enum Tool {
     Paint,
     Pan,
     Inspect,
+    /// 放置点光源。光源**独立于物质世界**：不占格子、不挡路、画笔擦不到。
+    Light,
 }
 
 /// 左键按下时要做什么
@@ -28,6 +30,8 @@ pub enum LeftAction {
     Paint,
     Inspect,
     Pan,
+    /// 放置/移除点光源（点一下放、再点一下移除）
+    Light,
 }
 
 /// **放置模式优先于一切工具**。
@@ -43,12 +47,15 @@ pub fn left_action(placing: bool, tool: Tool) -> LeftAction {
         Tool::Paint => LeftAction::Paint,
         Tool::Inspect => LeftAction::Inspect,
         Tool::Pan => LeftAction::Pan,
+        Tool::Light => LeftAction::Light,
     }
 }
 
 pub struct UiState {
     pub brush: u8,
     pub brush_size: i32,
+    /// 「光源」工具放下时光源的强度（1–255，决定照射半径 = 强度/absorb 格）
+    pub light_strength: u8,
     pub brush_shape: BrushShape,
     pub tool: Tool,
     pub hover: String,
@@ -72,6 +79,7 @@ impl Default for UiState {
         UiState {
             brush: ct::WALL,
             brush_size: 1,
+            light_strength: 255,
             brush_shape: BrushShape::Square,
             tool: Tool::Paint,
             hover: String::new(),
@@ -406,7 +414,35 @@ pub fn draw(
                     if ui.selectable_label(st.tool == Tool::Inspect, "检视").clicked() {
                         st.tool = Tool::Inspect;
                     }
+                    if ui
+                        .selectable_label(st.tool == Tool::Light, "光源")
+                        .on_hover_text(
+                            "在画布上点一下放一个点光源，再点一下移除。\n\
+                             光源独立于物质世界：不占格子、不挡路、画笔擦不到。",
+                        )
+                        .clicked()
+                    {
+                        st.tool = Tool::Light;
+                    }
                 });
+                // 光源工具的两条提示：强度决定照射半径，且它不在物质层里
+                if st.tool == Tool::Light {
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Slider::new(&mut st.light_strength, 8..=255)
+                            .text("强度")
+                            .step_by(1.0),
+                    )
+                    .on_hover_text(
+                        "照射半径 ≈ 强度 / 衰减步长。满强度能照到世界大半，\
+                         调低就是一个小范围的光斑。",
+                    );
+                    ui.label(
+                        egui::RichText::new("左键放置 / 移除 · 不占格子，生物可以穿过")
+                            .color(TEXT_DIM)
+                            .size(10.0),
+                    );
+                }
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("笔刷").color(TEXT_DIM));
 
@@ -494,19 +530,21 @@ pub fn draw(
                 .on_hover_text("一份食物能提供多少能量（默认 1）。");
                 // ── 光与光合 ──
                 //
-                // 这两项是批次 7 新增的。生产者不再是永动机：它把**所在格的光**转成能量，
-                // 所以「太阳强度」直接决定整个生态的丰饶度，拨到 0 就是永夜。
+                // 批次 7 新增。生产者不再是永动机：它把**所在格的光**转成能量。
+                // 批次 7.5 起天空光只是「世界顶部的一排光源」，可以整个关掉——
+                // 关掉之后世界里只剩玩家用「光源」工具放的点光源，
+                // 于是「光从哪来」完全由玩家决定，世界不再被强行分成上亮下黑。
                 let before_sun = cfg.world.sun_intensity;
                 let mut sun = before_sun;
                 ui.add(
-                    egui::Slider::new(&mut sun, 0.0..=2.0)
-                        .text("太阳强度")
+                    egui::Slider::new(&mut sun, 0.0..=1.0)
+                        .text("天空光")
                         .step_by(0.05)
                         .fixed_decimals(2),
                 )
                 .on_hover_text(
-                    "光场的全局乘数，采样时乘上去，不重算光场。\n\
-                     0 = 永夜（光合全部停摆），1 = 正常，2 = 双倍。",
+                    "世界顶部那一排光源的强度。\n\
+                     0 = 永夜：只剩你自己放的点光源（用左侧「光源」工具放）。",
                 );
                 if (sun - before_sun).abs() > 1e-9 {
                     cfg.world.sun_intensity = sun;
@@ -656,12 +694,45 @@ pub fn draw(
         }
     }
 
+    // ── 点光源标记 ──
+    //
+    // 光源不占物质格子，所以**画面上没有任何格子能表示它**——不画的话用户放了灯
+    // 却看不见，只能靠"这块地方莫名变亮"猜。这里画一个小圆点 + 光晕。
+    //
+    // 和网格对齐到格心（+0.5），这样缩小时它看起来就是"某一格上的一个亮点"，
+    // 而不是漂在格子缝里。
+    if !world.light.sources.is_empty() {
+        let canvas = ctx.available_rect();
+        let painter = ctx
+            .layer_painter(hl_layer)
+            .with_clip_rect(canvas.intersect(ctx.screen_rect()));
+        let z = view.zoom;
+        for s in &world.light.sources {
+            let cx = (s.col as f32 + 0.5 - view.cam_x) * z;
+            let cy = (s.row as f32 + 0.5 - view.cam_y) * z;
+            if cx < -24.0 || cy < -24.0 || cx > view.width + 24.0 || cy > view.height + 24.0 {
+                continue;
+            }
+            // 亮度越高点越大，一眼看出这个灯有多强
+            let base = (z * 0.5).clamp(2.0, 12.0);
+            let r = base * (0.55 + 0.45 * s.strength as f32 / 255.0);
+            let c = egui::pos2(cx, cy);
+            painter.circle_filled(
+                c,
+                r * 2.2,
+                Color32::from_rgba_unmultiplied(255, 236, 140, 34),
+            );
+            painter.circle_filled(c, r, Color32::from_rgb(255, 238, 150));
+            painter.circle_stroke(c, r, Stroke::new(1.0_f32, Color32::from_rgb(120, 88, 20)));
+        }
+    }
+
     // ── 左下：场滤镜图例 ──
     if hud.mode >= 2 {
-        let lut = if hud.mode == 2 {
-            evosim_render::colors::temp_colormap()
-        } else {
-            evosim_render::colors::rad_colormap()
+        let (lut, name) = match hud.mode {
+            2 => (evosim_render::colors::temp_colormap(), "温度"),
+            3 => (evosim_render::colors::rad_colormap(), "辐射"),
+            _ => (evosim_render::colors::light_colormap(), "光照"),
         };
         egui::Area::new("field-legend".into())
             .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(10.0, -10.0))
@@ -674,9 +745,7 @@ pub fn draw(
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(if hud.mode == 2 { "温度" } else { "辐射" })
-                                    .size(11.0)
-                                    .color(TEXT),
+                                egui::RichText::new(name).size(11.0).color(TEXT),
                             );
                             let (rect, _) = ui.allocate_exact_size(
                                 egui::vec2(120.0, 10.0),
@@ -908,7 +977,7 @@ mod tests {
     /// 所以用户拿着「检视」或「平移」时，装了蓝图也点不出东西。
     #[test]
     fn placement_wins_over_every_tool() {
-        for tool in [Tool::Paint, Tool::Pan, Tool::Inspect] {
+        for tool in [Tool::Paint, Tool::Pan, Tool::Inspect, Tool::Light] {
             assert_eq!(
                 left_action(true, tool),
                 LeftAction::Place,

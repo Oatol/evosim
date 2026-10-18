@@ -72,6 +72,16 @@ pub struct World {
     /// 现在只是统计量；批次 10 做守恒审计时，它要和「热池」一起进能量账。
     pub energy_wasted: f64,
 
+    /// 光场需要重算吗。
+    ///
+    /// 光场是「地形 + 光源 + 天空光」的纯函数，这三样都变得远比 60 Hz 慢，
+    /// 所以没必要每帧算。多源 BFS 在 debug 下要 3–4 ms，每帧跑一次会把
+    /// `field_update_is_cheap` 直接顶穿。
+    ///
+    /// 置位的地方：挡光地形变了（`set_cell_at`）、批量填充、光源增删、改尺寸。
+    /// 天空光的变化不靠这个标记——`update_fields` 里直接比对 `light.sky`。
+    light_dirty: bool,
+
     /// 阶段 B 的随机结算顺序（复用，避免每 tick 分配）
     order: Vec<usize>,
 }
@@ -93,15 +103,16 @@ impl World {
             fields: Fields::new(len),
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
+            light_dirty: true,
             order: Vec::new(),
             config,
             rng,
         };
         w.init_food_index();
         w.init_terrain_index();
-        // 建世界时地形是空的，但 `light` 的初值全 0（全黑）。这里先投一次，
+        // 建世界时地形是空的，但 `light` 的初值全 0（全黑）。这里先算一次，
         // 否则要等到第一次 `update_fields()` 才亮起来——中间那几帧光合会白算。
-        w.light.rebuild(&w.grid);
+        w.refresh_light();
         w
     }
 
@@ -218,11 +229,18 @@ impl World {
                 let old = self.grid.floor[index];
                 self.grid.floor[index] = ty;
                 self.retag_terrain(index, old, ty);
+                // 只有「挡光 / 不挡光」的转换才影响光场（岩浆换成沼泽不影响）
+                if crate::light::blocks_light(old) != crate::light::blocks_light(ty) {
+                    self.light_dirty = true;
+                }
             }
         } else if ty == ct::EMPTY && owner < 0 && self.grid.floor[index] != ct::EMPTY {
             let old = self.grid.floor[index];
             self.grid.floor[index] = ct::EMPTY;
             self.retag_terrain(index, old, ct::EMPTY);
+            if crate::light::blocks_light(old) {
+                self.light_dirty = true;
+            }
         }
 
         if ty == ct::FOOD {
@@ -264,6 +282,8 @@ impl World {
         self.grid.fill(ty, keep_terrain);
         self.init_food_index();
         self.init_terrain_index();
+        // 整张地形都换了，光场必重算
+        self.light_dirty = true;
     }
 
     // ────────────────────────────── 生物集合 ──────────────────────────────
@@ -822,10 +842,12 @@ impl World {
                 if lit <= 0.0 {
                     return;
                 }
+                // 注意：**不要再乘 `sun_intensity`**：`lit` 已经是最终光强，
+                // 天空光和点光源都在里面了（`sun_intensity` 只决定天空光注入多亮）。
+                // 乘第二次的后果是「关掉天空光 → 点光源也一起熄」，实测直接把生态打死。
                 let gain = lit
                     * self.config.life.photosynthesis_rate
-                    * self.config.attr(cell.type_id, AttrField::ProdMult)
-                    * self.config.world.sun_intensity;
+                    * self.config.attr(cell.type_id, AttrField::ProdMult);
                 if gain <= 0.0 {
                     return;
                 }
@@ -1057,7 +1079,7 @@ impl World {
         self.clear_organisms();
         self.grid.wrap = self.config.world.wrap_edges;
         self.grid.fill(ct::EMPTY, keep_terrain);
-        self.light.rebuild(&self.grid);
+        self.refresh_light();
         self.init_food_index();
         self.init_terrain_index();
         self.species = SpeciesRegistry::default();
@@ -1074,7 +1096,7 @@ impl World {
         self.fields.resize(self.grid.len);
         self.fields.clear();
         self.light.resize(cols, rows);
-        self.light.rebuild(&self.grid);
+        self.refresh_light();
         self.init_food_index();
         self.init_terrain_index();
         self.species = SpeciesRegistry::default();
@@ -1091,11 +1113,62 @@ impl World {
     /// 60 Hz 下占 0.24% CPU。换成「地形变了才重算」要找出所有改 `floor` 的路径
     /// （画/擦/填充/重置/读档/工坊放置……），漏一个就是光场和地形不同步的怪 bug。
     pub fn update_fields(&mut self) {
-        let World {
-            grid, fields, light, ..
-        } = self;
+        // 光场只在必要时重算：它是地形/光源/天空光的纯函数，这三样都变得很慢。
+        // 天空光单独比对，因为它由滑块驱动，随时可能变。
+        let sky = self.sky_level();
+        if self.light_dirty || self.light.sky != sky {
+            self.refresh_light();
+        }
+        let World { grid, fields, .. } = self;
         fields.update(grid);
+    }
+
+    /// 天空光强度（0–255），由 `config.world.sun_intensity`（0–1）换算。
+    ///
+    /// 拨到 0 就是「永夜」：世界里只剩玩家放的点光源。这是「世界不再强行分上下」
+    /// 的关键——光从哪来完全由玩家决定。
+    fn sky_level(&self) -> u8 {
+        let v = self.config.world.sun_intensity.clamp(0.0, 1.0);
+        (v * crate::light::SUN_MAX as f64).round() as u8
+    }
+
+    /// 重算光场（改了光源或天空光之后调）。
+    fn refresh_light(&mut self) {
+        let sky = self.sky_level();
+        self.light_dirty = false;
+        let World { grid, light, .. } = self;
+        light.sky = sky;
         light.rebuild(grid);
+    }
+
+    // ────────────────────────────── 点光源 ──────────────────────────────
+
+    /// 在 (col,row) 放一个点光源。`strength = 0` 等于删除。
+    ///
+    /// 光源**独立于物质世界**：不占格子、不挡路、画笔擦不到。生物可以直接穿过它。
+    pub fn set_light_source(&mut self, col: i32, row: i32, strength: u8) {
+        if strength == 0 {
+            self.light.remove_source_at(col, row);
+        } else {
+            self.light.set_source(col, row, strength);
+        }
+        self.refresh_light();
+    }
+
+    /// 删掉 (col,row) 的光源，返回有没有删掉
+    pub fn remove_light_source(&mut self, col: i32, row: i32) -> bool {
+        let removed = self.light.remove_source_at(col, row);
+        if removed {
+            self.refresh_light();
+        }
+        removed
+    }
+
+    /// 这一格有没有点光源（UI 的「点一下放置、再点一下移除」用）
+    pub fn light_source_at(&self, col: i32, row: i32) -> Option<u8> {
+        self.light
+            .source_index_at(col, row)
+            .map(|k| self.light.sources[k].strength)
     }
 
     // ────────────────────────────── 统计 ──────────────────────────────
@@ -1424,18 +1497,23 @@ mod tests {
         );
     }
 
-    /// 太阳强度是采样时的乘数，拨到 0 就是永夜。
+    /// 光合只看**光场**，不额外乘天空光系数。
+    ///
+    /// 这条钉的是一个踩过的坑：`sun_intensity` 曾经同时当「天空光强度」和
+    /// 「光合乘数」用，结果关掉天空光之后连玩家放的点光源也一起熄了。
+    /// 正确的关系是：`sun_intensity` → 天空光注入强度 → 光场 → 光合。
     #[test]
-    fn sun_intensity_scales_photosynthesis() {
-        let run = |sun: f64| -> f64 {
-            let mut w = photo_world();
-            w.config.world.sun_intensity = sun;
-            w.act_organism(0);
+    fn photosynthesis_follows_the_light_field_not_a_multiplier() {
+        let mut w = photo_world();
+        w.config.world.sun_intensity = 0.0; // 天空光全关
+        w.light.sky = 0;
+        w.light.level.fill(255); // 但这一格被点光源照亮
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-9,
+            "有点光源时，天空光为 0 也该正常光合，实测 {:.4}",
             w.organisms[0].energy
-        };
-        assert!((run(1.0) - 0.5).abs() < 1e-9);
-        assert!((run(2.0) - 1.0).abs() < 1e-9, "双倍太阳应该产出双倍");
-        assert_eq!(run(0.0), 0.0, "太阳拨到 0 = 永夜，不该有产出");
+        );
     }
 
     /// 维持成本必须每 tick 从能量里扣掉。

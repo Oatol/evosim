@@ -108,13 +108,33 @@ fn main() {
         .nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
+    // 第四个参数：天空光强度（0 = 永夜）。第五个参数写 `lamp` 就在世界**下半部**
+    // 摆几个点光源，用来验证「世界不再强行分上下」。
+    let sky: f64 = std::env::args()
+        .nth(4)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
+    let lamps = std::env::args().nth(5).as_deref() == Some("lamp");
 
     let mut cfg = Config::default();
     cfg.life.metabolism_scale = metabolism;
+    cfg.world.sun_intensity = sky;
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
     seed_origin_of_life(&mut w);
     spawn_population(&mut w, 8, 3);
+
+    // 「玩家在下半部放灯」——这一步证明光源是独立的一层：
+    // 关掉天空光之后，生物只能围着这几盏灯活，和世界"上半亮下半黑"彻底解耦。
+    if lamps {
+        // 在每只初始个体身上点一盏灯 —— 模拟"玩家想在哪照就在哪照"。
+        // 灯跟着生物走不了（它们是静态的），但足够验证：光合在任何深度都工作。
+        let spots: Vec<(i32, i32)> = w.organisms.iter().map(|o| (o.col, o.row)).collect();
+        for (c, r) in &spots {
+            w.set_light_source(*c, *r, 255);
+        }
+        println!("已放置 {} 盏灯（跟着初始个体）", w.light.sources.len());
+    }
 
     // 光场是地形纯函数，`World::new` 已经投过一次；这里再确认一下顶底差异
     let top = w.light.at(&w.grid, 0, 0);
@@ -123,6 +143,12 @@ fn main() {
         "世界 {}×{} · absorb {} · 顶部光强 {} · 底部光强 {}",
         w.grid.cols, w.grid.rows, w.light.absorb, top, bottom
     );
+    // 光场的垂直剖面：确认它真的随深度衰减（而不是哪里出了问题全亮）
+    let prof: Vec<String> = [0, 25, 50, 75, 100, 125, 149]
+        .iter()
+        .map(|&r| format!("r{}={}", r, w.light.at(&w.grid, 100, r)))
+        .collect();
+    println!("光场剖面（第 100 列）：{}", prof.join(" "));
     println!();
     println!("   tick   个体  平均体型  生产者行  全体行  种群行  生产者光强  全局光强  比值  眼%  杀%  移%");
 
