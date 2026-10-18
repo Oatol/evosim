@@ -69,8 +69,9 @@
   位置一变所有按截图算的坐标全废；④ **Read 显示图片时会缩放**（1600 宽显示成 1080），
   照显示图估坐标会差 1.5 倍 —— 最可靠的是「移动鼠标 → 截图读右下角 hover 读数」反推格子映射。
   现成脚本：`tools/shot.ps1 -Out x.png [-Crop x,y,w,h] [-Scale n]`（`Scale` 走最近邻，
-  验 1px 线条必须放大看）、`tools/click.ps1 -Points "x,y;x,y"`（相对客户区）。
-  **内联 `Add-Type` 会被安全策略拦**，所以只能落盘成 .ps1 再 `powershell -File` 跑。
+  验 1px 线条必须放大看）、`tools/click.ps1 -Points "x,y;x,y"`、`tools/drag.ps1 -From "x,y" -To "x,y"`
+  （按下→分步移动→抬起，egui 需要中间帧才认拖拽）、`tools/wheel.ps1 -At "x,y" -Notches n`
+  （相对客户区）。**内联 `Add-Type` 会被安全策略拦**，所以只能落盘成 .ps1 再 `powershell -File` 跑。
 - **顶栏坐标（1600×950 客户区，`right_to_left` 从右往左排）**：世界 1573 · 物种工坊 1517 ·
   工具 1461 · 参数 1417 · 细胞 1373 · 适应窗口 1317。猜错一次就会误关邻居窗口。
 - **egui 的 Slider 会在绘制时 clamp/吸附值**：`step_by` 大于默认值量级会把值吸附成 0
@@ -82,6 +83,13 @@
   提亮这一项 + `visuals.slider_trailing_fill = true` 一起用，值贴近 0 时才读得出位置。
 - **`Slider::text()` 把名字排在数值框之后**（「滑块 1.0 血量」）。要「名字在左、滑块对齐」
   得用 `Grid` 两列，别指望 `text()`。
+- **`ScrollArea::show_rows` 的行高约定**：传的行高是"不含 item_spacing"，内容每行必须真的是
+  `行高 + item_spacing.y`，否则可见行区间会算歪。
+- **拖拽类交互不能在 `dragged()` 里读"当前状态"当基准**：`dragged()` 每帧都触发，
+  每帧都在上一次结果上再算一次会指数式收敛（谱系树的时间轴 3 帧就从 19 万 tick 缩到 38 tick）。
+  按下时快照一份基准（`*_drag: Option<...>`），全程用它。
+- **Windows PowerShell 5.1 按 ANSI 读 .ps1**：UTF-8 中文注释的字节会被 GBK 解码吞掉后面的
+  换行/引号，把 `param()` 块读坏。**tools 下的 .ps1 一律只用 ASCII 注释。**
 
 ## 操作映射
 
@@ -90,9 +98,9 @@
 
 ## 验证与打包
 
-- `cargo test --release`（当前 65 项：app 29 / core 26 / golden 2 / render 6 / colors 2）
+- `cargo test --release`（当前 71 项：app 35 / core 26 / golden 2 / render 6 / colors 2）
 - `node tools/parity-check.mjs`（对 JS 基线）
-- 打包：`node rust/tools/package.mjs` → `dist/evosim2.exe`（~7.03 MB）
+- 打包：`node rust/tools/package.mjs` → `dist/evosim2.exe`（~7.06 MB）
 - 截图/压测：`evosim-app --screenshot out.png --ticks N [--mode temp|rad]`、`--bench --seconds 4 --speed 50`
 - **编译必须零警告**：`Stroke::new(1.0, ..)` 这类浮点字面量会回退到 `f32`
   （`future_incompatible`，未来变硬错误），统一写 `1.0_f32`。
@@ -109,8 +117,11 @@
   滚轮缩放 / 拖动平移；采样改为**自适应抽稀**（满 1200 点间隔翻倍、隔一个丢一个）。
 - **批次 3 完成**（`4bfc955`）：细胞参数（`app/cells.rs`）—— 16 种 × 5 属性，Grid 布局 +
   出厂值小字 + 「N 项被改过」；量程/步长/写回三条守门（详见当日日志）。
+- **批次 4 完成**：谱系树（`app/lineage.rs` + 物种面板重做）—— DFS 排序 + 父子竖线 /
+  过滤补全祖先链 / 时间轴拖拽·滚轮缩放 / `show_rows` 只铺可见行（详见 2026-10-18 日志）。
 - **下一步**：
-  4. 谱系树（叠加在时间轴上）
   - 独立项：大体型（体型上限 + 繁殖成本指数 p，先跑 CLI 扫描）
-- **⚠️ 待决策**：物种判定粒度过细（长跑后物种数 ≈ 种群数，tick 63487 时 980 只 / 2029 物种）。
-  它会让谱系树退化成"每个个体一根枝条"，**建议排在批次 4 前面修**——已向用户提过，尚未定。
+  - **优先**：修物种判定粒度过细（见下）
+- **⚠️ 待修（已向用户提过，用户选择先做谱系树）**：物种判定粒度过细，长跑后物种数 ≈ 种群数
+  （tick 63487 时 980 只 / 2029 物种）。做完谱系树后症状更明显：树退化成一维长链，
+  "分支"其实是"代际"。修法是从指纹判定规则入手（允许身体差 N 格仍算同种）。

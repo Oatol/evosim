@@ -14,6 +14,7 @@ mod panels;
 mod cells;
 mod chart;
 mod inspector;
+mod lineage;
 mod ui;
 mod workshop;
 mod world_panel;

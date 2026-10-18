@@ -57,6 +57,16 @@ pub struct Panels {
     pub chart_follow: bool,
     /// 采样间隔（tick）。历史满了会翻倍并抽稀，见 `sample()`
     pub sample_interval: u64,
+    /// 物种面板：谱系树模式（DFS 排序 + 父子连线）。关掉就是老的按种群数平铺
+    pub species_tree: bool,
+    /// 物种面板：只留活着的物种（以及它们的祖先）
+    pub species_alive_only: bool,
+    /// 物种面板：最少累计个体数，滤掉"一次性突变"噪声
+    pub species_min_cum: u32,
+    /// 物种面板：时间轴窗口（tick 范围）。`None` = 全览 0..now
+    pub species_view: Option<(f64, f64)>,
+    /// 拖拽选区时按下那一刻的视图快照（拖拽全程以它为基准，见 `species_body`）
+    species_drag: Option<(f64, f64)>,
 }
 
 impl Default for Panels {
@@ -77,6 +87,11 @@ impl Default for Panels {
             chart_view: None,
             chart_follow: true,
             sample_interval: 20,
+            species_tree: true,
+            species_alive_only: false,
+            species_min_cum: 2,
+            species_view: None,
+            species_drag: None,
         }
     }
 }
@@ -102,6 +117,9 @@ impl Panels {
         self.last_sample_tick = 0;
         self.sample_interval = 20;
         self.chart_view = None;
+        // 时间轴窗口是 tick 范围，换了世界就完全对不上了
+        self.species_view = None;
+        self.species_drag = None;
     }
 
     /// 采样一个点。
@@ -215,7 +233,7 @@ impl Panels {
 
         if self.show_species {
             let mut open = self.show_species;
-            egui::Window::new("物种（时间轴）")
+            egui::Window::new("物种（谱系 · 时间轴）")
                 .resizable(true)
                 .default_size([430.0, 400.0])
                 .open(&mut open)
@@ -262,41 +280,155 @@ fn species_body(
         .color(TEXT_DIM)
         .size(11.0),
     );
-    ui.label(
-        egui::RichText::new("每条横条是一个物种的存续区间：左端=出现，右端=灭绝（还活着的顶到最右）")
-            .color(TEXT_DIM)
-            .size(10.0),
-    );
-    ui.separator();
 
-    // 排序：还活着的排前面（按当前个体数降序），灭绝的按出现时间排在后面
-    let mut rows: Vec<&evosim_core::species::Species> = reg.list.iter().collect();
-    rows.sort_by(|a, b| {
-        (b.population > 0)
-            .cmp(&(a.population > 0))
-            .then(b.population.cmp(&a.population))
-            .then(a.start_tick.cmp(&b.start_tick))
+    // ── 控制行 ──
+    //
+    // 用 `selectable_label` 而不是 `checkbox`：egui 的 checkbox 点方框不生效、
+    // 只有点到文字才算，很容易被当成坏了。
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        if ui
+            .selectable_label(panels.species_tree, "谱系树")
+            .on_hover_text("按祖先关系排序：同一支的后代紧挨在父物种下面，竖线是分叉点")
+            .clicked()
+        {
+            panels.species_tree = !panels.species_tree;
+        }
+        if ui
+            .selectable_label(panels.species_alive_only, "只留活着的血统")
+            .on_hover_text("只显示现在还活着的物种，加上它们的祖先")
+            .clicked()
+        {
+            panels.species_alive_only = !panels.species_alive_only;
+        }
+        ui.label(egui::RichText::new("最少累计").color(TEXT_DIM).size(10.0));
+        for k in [1u32, 2, 5, 10] {
+            if ui
+                .selectable_label(panels.species_min_cum == k, k.to_string())
+                .on_hover_text("累计出现过的个体数低于这个值的物种会被滤掉（一次性突变噪声）")
+                .clicked()
+            {
+                panels.species_min_cum = k;
+            }
+        }
     });
 
-    // 时间轴刻度
+    let tree = crate::lineage::build(
+        reg,
+        &crate::lineage::Opts {
+            tree: panels.species_tree,
+            alive_only: panels.species_alive_only,
+            min_cum: panels.species_min_cum,
+        },
+    );
+
+    // ── 时间轴窗口 ──
+    //
+    // 为什么需要它：谱系的分叉几乎全发生在前几千 tick 里（根物种先分裂出一串
+    // 中间种，然后才稳定下来），而时间轴是 0..now 线性铺开。跑十万 tick 之后，
+    // 所有分叉点挤在最左边十几个像素里，树看着就是一根竖线 —— 结构是对的，
+    // 但读不出来。所以允许在时间轴上拖一段放大。
+    let now_f = now as f64;
+    let (mut t0, mut t1) = match panels.species_view {
+        Some((a, b)) => (a.max(0.0), b.min(now_f)),
+        None => (0.0, now_f),
+    };
+    // 读档 / 新建世界之后 now 可能变小，旧窗口整个跑到范围外 —— 直接回全览
+    if !(t1 > t0) || t1 - t0 < 1.0 {
+        t0 = 0.0;
+        t1 = now_f;
+        panels.species_view = None;
+    }
+    let zoomed = panels.species_view.is_some();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            egui::RichText::new(format!("显示 {} / {} 个物种", tree.rows.len(), reg.size()))
+                .color(TEXT_DIM)
+                .size(10.0),
+        );
+        if tree.hidden > 0 {
+            ui.label(
+                egui::RichText::new(format!("（滤掉 {}）", tree.hidden))
+                    .color(Color32::from_rgb(120, 108, 70))
+                    .size(10.0),
+            );
+        }
+        if zoomed {
+            ui.label(
+                egui::RichText::new(format!("窗口 {:.0} → {:.0}", t0, t1))
+                    .color(ACCENT)
+                    .size(10.0),
+            );
+            if ui
+                .selectable_label(false, "全览")
+                .on_hover_text("回到 0 → 现在")
+                .clicked()
+            {
+                panels.species_view = None;
+                t0 = 0.0;
+                t1 = now_f;
+            }
+        } else {
+            ui.label(
+                egui::RichText::new(if panels.species_tree {
+                    "竖线 = 分叉 tick"
+                } else {
+                    "按个体数排序"
+                })
+                .color(TEXT_DIM)
+                .size(10.0),
+            );
+        }
+    });
+    ui.separator();
+
+    // 时间轴条带：拖一段放大、滚轮缩放、双击复位。
+    //
+    // 高度给到 22：12px 的细条既难点中，也完全看不出"这里可以拖"。
     let axis_w = (ui.available_width() - 6.0).max(180.0);
-    let (axis_rect, _) = ui.allocate_exact_size(egui::vec2(axis_w, 12.0), Sense::hover());
+    let (axis_rect, axis_resp) =
+        ui.allocate_exact_size(egui::vec2(axis_w, 22.0), Sense::click_and_drag());
+    let axis_resp = axis_resp
+        .on_hover_text("拖一段放大到那个时间范围 · 滚轮缩放 · 双击复位");
     {
         let p = ui.painter();
+        // 底色：让它看起来是一条"可以操作的条带"，而不是一行字
+        p.rect_filled(
+            axis_rect,
+            CornerRadius::ZERO,
+            if axis_resp.hovered() {
+                Color32::from_rgb(32, 40, 54)
+            } else {
+                Color32::from_rgb(24, 30, 42)
+            },
+        );
         p.text(
-            axis_rect.left_top(),
+            axis_rect.left_top() + egui::vec2(2.0, 1.0),
             Align2::LEFT_TOP,
-            "0",
+            format!("{:.0}", t0),
             FontId::proportional(9.0),
             TEXT_DIM,
         );
         p.text(
-            axis_rect.right_top(),
+            axis_rect.right_top() + egui::vec2(-2.0, 1.0),
             Align2::RIGHT_TOP,
-            format!("{}", now),
+            format!("{:.0}", t1),
             FontId::proportional(9.0),
             TEXT_DIM,
         );
+        // 四分之一刻度，给"拖多长"一个参照
+        for k in 1..4 {
+            let x = axis_rect.left() + axis_rect.width() * (k as f32 / 4.0);
+            p.line_segment(
+                [
+                    egui::pos2(x, axis_rect.bottom() - 4.0),
+                    egui::pos2(x, axis_rect.bottom()),
+                ],
+                Stroke::new(1.0_f32, Color32::from_rgb(44, 54, 70)),
+            );
+        }
         p.line_segment(
             [
                 egui::pos2(axis_rect.left(), axis_rect.bottom()),
@@ -306,106 +438,232 @@ fn species_body(
         );
     }
 
+    // 把光标位置换算成 tick（0..1 的比例 → 当前窗口内）
+    if axis_resp.drag_started() {
+        // 拖拽期间每一帧都会触发 `dragged()`。如果每帧都拿**当前**视图去换算选区，
+        // 就会在上一次的结果上继续缩，几帧之内窗口就缩到几个 tick（这个坑真踩过）。
+        // 所以按下时先快照视图，整个拖拽过程都用这份快照做基准。
+        panels.species_drag = Some((t0, t1));
+    }
+    if axis_resp.double_clicked() {
+        panels.species_view = None;
+        panels.species_drag = None;
+        t0 = 0.0;
+        t1 = now_f;
+    } else if axis_resp.dragged() {
+        // 拖动期间直接改视图：松手才生效会让人以为没反应
+        if let (Some((d0, d1)), Some(a), Some(b)) = (
+            panels.species_drag,
+            ui.input(|i| i.pointer.press_origin()),
+            ui.input(|i| i.pointer.interact_pos()),
+        ) {
+            let f = |x: f32| (((x - axis_rect.left()) / axis_rect.width()).clamp(0.0, 1.0)) as f64;
+            let (fa, fb) = (f(a.x), f(b.x));
+            let (lo, hi) = (fa.min(fb), fa.max(fb));
+            // 选区太窄会缩进"看不见的刻度"里，留个下限
+            if hi - lo > 0.004 {
+                panels.species_view = Some((d0 + lo * (d1 - d0), d0 + hi * (d1 - d0)));
+            }
+        }
+    }
+    if axis_resp.drag_stopped() {
+        panels.species_drag = None;
+    }
+
+    // 滚轮缩放（以光标为锚）。轴条不在滚动区里，所以不会和列表滚动抢事件。
+    if axis_resp.hovered() {
+        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll != 0.0 {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let f = (((pos.x - axis_rect.left()) / axis_rect.width()).clamp(0.0, 1.0)) as f64;
+                // 和曲线窗口同样的处理：delta 单位随平台变，除了系数还要 clamp，
+                // 不然一次滚轮就能把窗口缩没
+                let factor = (-(scroll as f64) * 0.002).exp().clamp(0.4, 2.5);
+                let span = ((t1 - t0) * factor).clamp(1.0, now_f);
+                let anchor = t0 + f * (t1 - t0);
+                let mut n0 = anchor - f * span;
+                let mut n1 = n0 + span;
+                if n0 < 0.0 {
+                    n0 = 0.0;
+                    n1 = span;
+                }
+                if n1 > now_f {
+                    n1 = now_f;
+                    n0 = (now_f - span).max(0.0);
+                }
+                if n1 - n0 > 1.0 {
+                    panels.species_view = Some((n0, n1));
+                }
+            }
+        }
+    }
+
     let mut clicked: Option<String> = None;
 
-    egui::ScrollArea::vertical()
-        .max_height(300.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for sp in rows.iter().take(150) {
-                let selected = panels
-                    .selected_species
-                    .as_deref()
-                    .map(|fp| fp == sp.fingerprint.as_ref())
-                    .unwrap_or(false);
+    // 行高固定，用 `show_rows` 只铺可见的那几行：物种数能到四位数，
+    // 全量 allocate 会让面板滚动卡成幻灯片。
+    const ROW_H: f32 = 15.0;
+    // 名字列宽度：要容得下 3px 内边距 + 最深缩进 18px + "S1234"
+    const NAME_W: f32 = 64.0;
+    // 右端留给当前个体数
+    const POP_W: f32 = 30.0;
 
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(axis_w, 15.0), Sense::click());
-                let painter = ui.painter();
+    if tree.rows.is_empty() {
+        ui.label(
+            egui::RichText::new("没有符合条件的物种 —— 把「最少累计」调回 1 试试")
+                .color(TEXT_DIM)
+                .size(11.0),
+        );
+    } else {
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, ROW_H, tree.rows.len(), |ui, range| {
+                for i in range {
+                    let row = &tree.rows[i];
+                    let sp = &reg.list[row.idx];
+                    let selected = panels
+                        .selected_species
+                        .as_deref()
+                        .map(|fp| fp == sp.fingerprint.as_ref())
+                        .unwrap_or(false);
 
-                // 行底色（悬停时提亮一点，能看出可点）
-                if resp.hovered() || selected {
-                    painter.rect_filled(
-                        rect,
-                        CornerRadius::ZERO,
-                        Color32::from_rgb(26, 33, 45),
-                    );
-                }
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(axis_w, ROW_H), Sense::click());
+                    let painter = ui.painter();
 
-                // 左：名字
-                painter.text(
-                    rect.left_center() + egui::vec2(3.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    &sp.name,
-                    FontId::proportional(10.0),
-                    if selected { ACCENT } else { TEXT },
-                );
+                    // 行底色（悬停时提亮一点，能看出可点）
+                    if resp.hovered() || selected {
+                        painter.rect_filled(
+                            rect,
+                            CornerRadius::ZERO,
+                            Color32::from_rgb(26, 33, 45),
+                        );
+                    }
 
-                // 右：时间条
-                let bar_x0 = rect.left() + 46.0;
-                let bar_x1 = rect.right() - 30.0;
-                let span = (bar_x1 - bar_x0).max(10.0);
-                let end = if sp.end_tick >= 0 {
-                    sp.end_tick as u64
-                } else {
-                    now
-                };
-                let t0 = (sp.start_tick.min(now) as f32 / now as f32).clamp(0.0, 1.0);
-                let t1 = (end.min(now) as f32 / now as f32).clamp(0.0, 1.0);
-                let x0 = bar_x0 + span * t0;
-                let x1 = (bar_x0 + span * t1).max(x0 + 2.0);
+                    let bar_x0 = rect.left() + NAME_W;
+                    let bar_x1 = rect.right() - POP_W;
+                    let span = (bar_x1 - bar_x0).max(10.0);
+                    // tick → x，按当前时间窗口映射（全览时就是 0..now）
+                    let x_of = |t: f64| {
+                        let f = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+                        bar_x0 + span * f as f32
+                    };
 
-                let rgb = species_rgb(sp.fingerprint.as_ref());
-                let alpha = if sp.alive { 210 } else { 90 };
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(x0, rect.top() + 4.0),
-                        egui::pos2(x1, rect.bottom() - 4.0),
-                    ),
-                    CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], alpha),
-                );
-
-                // 右端：当前个体数（条宽表示存续时长，数字表示规模）
-                if sp.population > 0 {
-                    painter.text(
-                        rect.right_center() - egui::vec2(3.0, 0.0),
-                        Align2::RIGHT_CENTER,
-                        format!("{}", sp.population),
-                        FontId::proportional(9.0),
-                        TEXT_DIM,
-                    );
-                }
-
-                if selected {
-                    painter.rect_stroke(
-                        rect,
-                        CornerRadius::ZERO,
-                        Stroke::new(1.0_f32, ACCENT),
-                        StrokeKind::Inside,
-                    );
-                }
-
-                if resp.clicked() {
-                    clicked = Some(sp.fingerprint.to_string());
-                }
-                resp.on_hover_text(format!(
-                    "{}（{} 格）\n出现 tick {} → {}\n存续 {} tick · 当前 {} · 峰值 {} · 累计 {}",
-                    sp.name,
-                    sp.cell_count,
-                    sp.start_tick,
-                    if sp.alive {
-                        "存活中".to_string()
+                    let start = sp.start_tick as f64;
+                    let end = if sp.end_tick >= 0 {
+                        sp.end_tick as f64
                     } else {
-                        format!("灭绝 tick {}", sp.end_tick)
-                    },
-                    sp.lifespan(),
-                    sp.population,
-                    sp.peak_population,
-                    sp.cumulative_pop
-                ));
-            }
-        });
+                        now_f
+                    };
+                    // 整条落在窗口外就什么都不画（横条和连线都不画，
+                    // 否则 x_of 会把它们夹到边缘，看起来像一堆假物种）
+                    let on_screen = end >= t0 && start <= t1;
+
+                    // ── 谱系连线 ──
+                    //
+                    // 一个非根物种只需要**一根竖线**：从父物种那一行、在"自己出现的
+                    // 那个 tick"上竖下来，正好落到自己横条的左端。这是 DFS 排序换来的
+                    // ——父子行挨得近，竖线只跨自己这一支，永远不会交叉。
+                    //
+                    // 父行可能在视口外，`dy` 会算出很大的负数；egui 会按滚动区裁剪，
+                    // 于是看起来就是"线从上方延续下来"，正是想要的。
+                    // 分叉点若在窗口左侧，`x_of` 会把它夹到左边缘：看起来是一条
+                    // 沿着边界竖下来的"主干"，比整段连线消失要好——后者会让放大之后
+                    // 的树看起来支离破碎。完全在窗口外的物种不画线（否则会在边界
+                    // 堆出一列毫无意义的假分叉）。
+                    if let (Some(pi), true) = (row.parent, on_screen) {
+                        let x = x_of(start);
+                        let y_me = rect.center().y;
+                        let y_par = y_me + (pi as f32 - i as f32) * ROW_H;
+                        painter.line_segment(
+                            [egui::pos2(x, y_par), egui::pos2(x, y_me)],
+                            Stroke::new(1.0_f32, Color32::from_rgb(56, 68, 86)),
+                        );
+                    }
+
+                    // 左：名字（按代数缩进，封顶——深链能到上千层，
+                    // 真按代数缩进会把名字挤出面板）
+                    //
+                    // 存续区间完全在当前时间窗口之外的物种仍然列出来（树的拓扑需要
+                    // 它们当中间节点），但名字调暗，免得用户以为"这一行没画出来"。
+                    let indent = (row.depth.min(6) as f32) * 3.0;
+                    painter.text(
+                        rect.left_center() + egui::vec2(3.0 + indent, 0.0),
+                        Align2::LEFT_CENTER,
+                        &sp.name,
+                        FontId::proportional(10.0),
+                        if selected {
+                            ACCENT
+                        } else if on_screen {
+                            TEXT
+                        } else {
+                            Color32::from_rgb(78, 88, 104)
+                        },
+                    );
+
+                    // 右：时间条（超出窗口的部分夹到边缘，视觉上表示"延续到窗口外"）
+                    if on_screen {
+                        let x0 = x_of(start.max(t0));
+                        let x1 = x_of(end.min(t1)).max(x0 + 2.0);
+
+                        let rgb = species_rgb(sp.fingerprint.as_ref());
+                        let alpha = if sp.alive { 210 } else { 90 };
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(x0, rect.top() + 4.0),
+                                egui::pos2(x1, rect.bottom() - 4.0),
+                            ),
+                            CornerRadius::ZERO,
+                            Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], alpha),
+                        );
+                    }
+
+                    // 右端：当前个体数（条宽表示存续时长，数字表示规模）
+                    if sp.population > 0 {
+                        painter.text(
+                            rect.right_center() - egui::vec2(3.0, 0.0),
+                            Align2::RIGHT_CENTER,
+                            format!("{}", sp.population),
+                            FontId::proportional(9.0),
+                            TEXT_DIM,
+                        );
+                    }
+
+                    if selected {
+                        painter.rect_stroke(
+                            rect,
+                            CornerRadius::ZERO,
+                            Stroke::new(1.0_f32, ACCENT),
+                            StrokeKind::Inside,
+                        );
+                    }
+
+                    if resp.clicked() {
+                        clicked = Some(sp.fingerprint.to_string());
+                    }
+                    resp.on_hover_text(format!(
+                        "{}（{} 格）\n祖先 {}\n出现 tick {} → {}\n存续 {} tick · 当前 {} · 峰值 {} · 累计 {}",
+                        sp.name,
+                        sp.cell_count,
+                        match sp.ancestor_id {
+                            Some(a) => format!("S{}", a),
+                            None => "—（根）".to_string(),
+                        },
+                        sp.start_tick,
+                        if sp.alive {
+                            "存活中".to_string()
+                        } else {
+                            format!("灭绝 tick {}", sp.end_tick)
+                        },
+                        sp.lifespan(),
+                        sp.population,
+                        sp.peak_population,
+                        sp.cumulative_pop
+                    ));
+                }
+            });
+    }
 
     if let Some(fp) = clicked {
         if panels.selected_species.as_deref() == Some(fp.as_str()) {
@@ -464,35 +722,31 @@ mod tests {
         w
     }
 
-    /// 物种面板要真的画出时间轴（横条），不能只剩一行计数。
-    #[test]
-    fn species_timeline_draws_bars() {
-        let world = live_world();
-        assert!(world.species.size() > 0, "这个种子应该已经出现物种");
-
+    /// 跑两帧并把所有形状摊平（egui 的窗口第一帧是淡入，形状会被剔成 Noop）
+    fn species_shapes(
+        world: &World,
+        panels: &mut Panels,
+    ) -> (Vec<egui::epaint::RectShape>, Vec<egui::epaint::TextShape>) {
         let ctx = egui::Context::default();
         crate::ui::configure(&ctx);
-        let mut panels = Panels::default();
-        panels.show_inspector = false;
-        panels.show_chart = false;
-        panels.show_species = true;
-
         let mut hl: Vec<(egui::Rect, Color32)> = Vec::new();
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(1600.0, 950.0),
         ));
-
-        // 两帧：egui 的窗口第一帧是淡入，形状会被剔成 Noop
         let _ = ctx.run(input.clone(), |ctx| {
-            let _ = panels.draw(ctx, &world, &mut hl);
+            let _ = panels.draw(ctx, world, &mut hl);
         });
         let out = ctx.run(input, |ctx| {
-            let _ = panels.draw(ctx, &world, &mut hl);
+            let _ = panels.draw(ctx, world, &mut hl);
         });
 
-        fn walk<'a>(shapes: &'a [egui::Shape], rects: &mut Vec<&'a egui::epaint::RectShape>, texts: &mut Vec<&'a egui::epaint::TextShape>) {
+        fn walk<'a>(
+            shapes: &'a [egui::Shape],
+            rects: &mut Vec<&'a egui::epaint::RectShape>,
+            texts: &mut Vec<&'a egui::epaint::TextShape>,
+        ) {
             for s in shapes {
                 match s {
                     egui::Shape::Rect(r) => rects.push(r),
@@ -505,9 +759,20 @@ mod tests {
         let flat: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
         let (mut rects, mut texts) = (Vec::new(), Vec::new());
         walk(&flat, &mut rects, &mut texts);
+        (rects.into_iter().cloned().collect(), texts.into_iter().cloned().collect())
+    }
 
-        // 时间轴横条：细长、有填充色（物种指纹色），且不是窗口底色
-        let bars = rects
+    fn species_panels() -> Panels {
+        let mut panels = Panels::default();
+        panels.show_inspector = false;
+        panels.show_chart = false;
+        panels.show_species = true;
+        panels
+    }
+
+    /// 时间轴横条的判据：细长、有填充色（物种指纹色），且不是窗口底色
+    fn count_bars(rects: &[egui::epaint::RectShape]) -> usize {
+        rects
             .iter()
             .filter(|r| {
                 r.rect.height() <= 10.0
@@ -515,8 +780,22 @@ mod tests {
                     && r.fill.a() > 0
                     && r.fill != crate::ui::BG
             })
-            .count();
-        assert!(bars > 0, "物种面板没有画出任何时间轴横条（rects={}）", rects.len());
+            .count()
+    }
+
+    /// 物种面板要真的画出时间轴（横条），不能只剩一行计数。
+    #[test]
+    fn species_timeline_draws_bars() {
+        let world = live_world();
+        assert!(world.species.size() > 0, "这个种子应该已经出现物种");
+
+        let mut panels = species_panels();
+        let (rects, texts) = species_shapes(&world, &mut panels);
+        assert!(
+            count_bars(&rects) > 0,
+            "物种面板没有画出任何时间轴横条（rects={}）",
+            rects.len()
+        );
 
         // 刻度上要有当前 tick 的数字
         let now = world.tick.to_string();
@@ -524,6 +803,35 @@ mod tests {
             texts.iter().any(|t| t.galley.text() == now),
             "时间轴右端应标出当前 tick（{}）",
             now
+        );
+    }
+
+    /// 放大时间窗口之后，横条必须按窗口裁剪。
+    ///
+    /// 这条守的是"假横条"：如果 `x_of` 把窗口外的 tick 直接夹到边界，
+    /// 每个物种的条都会从左边拉到右边，整张图变成一片横贯全宽的色块，
+    /// 看着像"所有物种同时存在"——比不画还误导。
+    #[test]
+    fn zoomed_timeline_clips_bars() {
+        let world = live_world();
+        let now = world.tick as f64;
+        let mut panels = species_panels();
+        // 只留最后 10% 的时间窗
+        panels.species_view = Some((now * 0.9, now));
+
+        let (rects, _) = species_shapes(&world, &mut panels);
+        let bars: Vec<_> = rects
+            .iter()
+            .filter(|r| r.rect.height() <= 10.0 && r.rect.width() >= 2.0 && r.fill.a() > 0)
+            .collect();
+        assert!(!bars.is_empty(), "放大之后仍然要画得出横条");
+
+        // 窗口是"最后 10%"，那么任何一条横条都不该宽到覆盖整条时间轴
+        let widest = bars.iter().map(|r| r.rect.width()).fold(0.0_f32, f32::max);
+        assert!(
+            widest < 500.0,
+            "放大到 10% 窗口后仍出现宽 {} px 的横条，说明没按窗口裁剪",
+            widest
         );
     }
 }
