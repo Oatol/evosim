@@ -197,11 +197,11 @@ impl WorldPanel {
             );
             ui.label(
                 RichText::new(format!(
-                    "tick {} · {} 只 · 食物 {} · 物种 {}",
+                    "tick {} · {} 只 · 食物 {} · 存活物种 {}",
                     world.tick,
                     stats.organisms,
                     stats.food,
-                    world.species.size()
+                    world.species.alive_count
                 ))
                 .color(TEXT_DIM)
                 .size(11.0),

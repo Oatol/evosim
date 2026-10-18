@@ -177,14 +177,14 @@ fn screenshot(path: &str, seed: u32, pop: usize, ticks: u64, width: u32, height:
 
     let stats = world.snapshot_stats();
     println!(
-        "已写出 {}（{}×{}）· tick {} · 个体 {} · 食物 {} · 物种 {} · 模拟 {:.0} ms",
+        "已写出 {}（{}×{}）· tick {} · 个体 {} · 食物 {} · 存活物种 {} · 模拟 {:.0} ms",
         path,
         width,
         height,
         world.tick,
         stats.organisms,
         stats.food,
-        world.species.size(),
+        world.species.alive_count,
         sim_ms
     );
 }
@@ -209,7 +209,7 @@ fn bench(seed: u32, pop: usize, seconds: f64, speed: f64) {
     let stats = world.snapshot_stats();
 
     println!(
-        "压测 {:.1} 秒（目标 {:.0} tps）· 实际 {:.0} tps（{:.0}%）· {:.3} ms/tick · 种群 {} · 食物 {} · 物种 {}",
+        "压测 {:.1} 秒（目标 {:.0} tps）· 实际 {:.0} tps（{:.0}%）· {:.3} ms/tick · 种群 {} · 食物 {} · 存活物种 {}",
         elapsed,
         target,
         tps,
@@ -217,7 +217,7 @@ fn bench(seed: u32, pop: usize, seconds: f64, speed: f64) {
         elapsed * 1000.0 / ticks as f64,
         stats.organisms,
         stats.food,
-        world.species.size()
+        world.species.alive_count
     );
 }
 

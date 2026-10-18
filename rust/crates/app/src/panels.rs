@@ -89,7 +89,10 @@ impl Default for Panels {
             sample_interval: 20,
             species_tree: true,
             species_alive_only: false,
-            species_min_cum: 2,
+            // 默认 5 而不是 2：实测累计个体 < 5 的物种占全部登记物种的 ~69%，
+            // 它们是"变异出来一代就没了"的中间态。这些留在树上只会把真正的
+            // 分叉结构挤成一条竖链，树读不出谱系。
+            species_min_cum: 5,
             species_view: None,
             species_drag: None,
         }
@@ -138,7 +141,12 @@ impl Panels {
             tick: world.tick,
             pop: stats.organisms as f32,
             food: stats.food as f32,
-            species: world.species.size() as f32,
+            // 存活物种，不是累计物种。
+            //
+            // `size()` 是**累计**创建过多少物种，单调爬升、撞 MAX_SPECIES 后变平，
+            // 画在曲线上一路爬到顶就横着，跟种群曲线毫无关系，看着像坏了。
+            // JS 版（main.js:431 / ui/Stats.js:100）一直用的是 aliveCount，这里是移植时写错。
+            species: world.species.alive_count as f32,
             body: org.avg_cells as f32,
             mutability: org.avg_mutability as f32,
             age: org.avg_age as f32,
@@ -509,10 +517,20 @@ fn species_body(
     const POP_W: f32 = 30.0;
 
     if tree.rows.is_empty() {
+        // 默认「最少累计」是 5，刚开的世界物种还很小，很容易一棵树都剩不下。
+        // 不解释一句的话，用户会以为面板坏了。
+        let mut why = format!("最少累计 {}", panels.species_min_cum);
+        if panels.species_alive_only {
+            why.push_str("、只留存活");
+        }
         ui.label(
-            egui::RichText::new("没有符合条件的物种 —— 把「最少累计」调回 1 试试")
-                .color(TEXT_DIM)
-                .size(11.0),
+            egui::RichText::new(format!(
+                "没有符合条件的物种（累计 {} 个，过滤：{}）—— 把「最少累计」调小试试",
+                reg.size(),
+                why
+            ))
+            .color(TEXT_DIM)
+            .size(11.0),
         );
     } else {
         egui::ScrollArea::vertical()
@@ -767,6 +785,9 @@ mod tests {
         panels.show_inspector = false;
         panels.show_chart = false;
         panels.show_species = true;
+        // 这里测的是**绘制**逻辑，不是默认过滤强度。`live_world()` 只跑 150 tick，
+        // 物种的累计个体数都还没到默认的 5，按默认过滤会一棵树都剩不下。
+        panels.species_min_cum = 1;
         panels
     }
 
@@ -781,6 +802,41 @@ mod tests {
                     && r.fill != crate::ui::BG
             })
             .count()
+    }
+
+    /// 曲线采样的「物种」必须是**存活**物种，不是累计。
+    ///
+    /// 累计数是单调爬升的，撞 `MAX_SPECIES` 之后变平，画在曲线上就是一条爬到顶
+    /// 就横着的线，跟种群曲线毫无关系——看着像"物种曲线坏了"。JS 版
+    /// （`main.js:431` / `ui/Stats.js:100`）一直用的 `aliveCount`，2.0 移植时写成了
+    /// `size()`，这条测试守着别再写回去。
+    #[test]
+    fn sample_records_alive_species_not_cumulative() {
+        let mut world = live_world();
+        // 跑到出现灭绝物种为止：只有那时两个数才分开，测试才有判别力
+        for _ in 0..4000 {
+            if world.species.size() > world.species.alive_count {
+                break;
+            }
+            world.step();
+        }
+        assert!(
+            world.species.size() > world.species.alive_count,
+            "这个种子跑不出灭绝物种，测试失去判别力（累计 {} / 存活 {}）",
+            world.species.size(),
+            world.species.alive_count
+        );
+
+        let mut panels = Panels::default();
+        panels.sample(&world);
+        let s = panels.history.back().expect("应该采到一个点");
+        assert_eq!(
+            s.species,
+            world.species.alive_count as f32,
+            "采样要记存活物种（{}），不是累计（{}）",
+            world.species.alive_count,
+            world.species.size()
+        );
     }
 
     /// 物种面板要真的画出时间轴（横条），不能只剩一行计数。

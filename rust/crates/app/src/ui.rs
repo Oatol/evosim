@@ -290,7 +290,16 @@ pub fn draw(
                 ui.separator();
                 ui.label(format!("食物 {}", stats.food));
                 ui.separator();
-                ui.label(format!("物种 {}", world.species.size()));
+                // 存活物种（与 JS 版 aliveCount 对齐）。累计数在悬停里，
+                // 两个数并排站着最容易让人以为"物种数≈个体数"是判定崩了。
+                ui.label(format!("物种 {}", world.species.alive_count))
+                    .on_hover_text(format!(
+                        "存活物种 {} · 累计出现 {} · 峰值存活 {} · 已灭绝 {}",
+                        world.species.alive_count,
+                        world.species.size(),
+                        world.species.peak_alive_count,
+                        world.species.total_extinct
+                    ));
                 ui.separator();
                 ui.label(if hud.paused { "已暂停" } else { "运行中" });
                 ui.separator();
