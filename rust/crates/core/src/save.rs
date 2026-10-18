@@ -57,7 +57,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// `storage_mult` / `armor_resist`），让参数按细胞类型分化。同理。
 /// v5：`SaveFile` 加了 `light`（光场，批次 7）。同理。
 /// v6：`Light` 加了 `sources`（可放置的点光源）/ `sky`（天空光开关），批次 7.5。同理。
-pub const VERSION: u32 = 6;
+/// v7：`Grid` 加了 `food`（每格食物能量），`WorldCfg` 加了 `food_decay_floor`，
+/// `World` 加了 `heat_pool`，批次 8。同理。
+pub const VERSION: u32 = 7;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

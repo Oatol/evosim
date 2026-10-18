@@ -553,6 +553,10 @@ impl App {
                 rad as u32 * 100 / 255
             ));
         }
+        // 食物现在带能量存量：同一格"一份食物"可能是满的也可能是快烂完的
+        if ty == ct::FOOD {
+            text.push_str(&format!(" · 能量 {:.2}", world.grid.food[idx]));
+        }
         // 光照**总是显示**（0 也是信息：全黑 = 生产者在这里没有产出）
         let lit = world.light.at(&world.grid, col, row);
         text.push_str(&format!(" · 光照 {}%", lit as u32 * 100 / 255));

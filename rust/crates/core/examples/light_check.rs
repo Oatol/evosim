@@ -242,4 +242,20 @@ fn main() {
         "细胞构成：生产者 {} · 眼睛 {} · 杀手 {} · 移动器 {}",
         r.producers, r.eyes, r.killers, r.movers
     );
+
+    // 食物存量（批次 8）：食物不再是二值的，这里能看出"肥尸体"到底存不存在
+    let food_cells = w.food_cells.len();
+    let food_energy: f64 = w.food_cells.iter().map(|&k| w.grid.food[k] as f64).sum();
+    let avg_food = if food_cells > 0 {
+        food_energy / food_cells as f64
+    } else {
+        0.0
+    };
+    println!(
+        "食物 {} 格 · 总能量 {:.1} · 平均每格 {:.2} · 热池 {:.1}",
+        food_cells, food_energy, avg_food, w.heat_pool
+    );
+    println!(
+        "（平均每格 > 1.0 说明存在「肥尸体」——残骸携带了死者体内能量；         热池 > 0 说明腐败在流失能量）"
+    );
 }

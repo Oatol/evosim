@@ -72,6 +72,12 @@ pub struct World {
     /// 现在只是统计量；批次 10 做守恒审计时，它要和「热池」一起进能量账。
     pub energy_wasted: f64,
 
+    /// 从生物圈流失掉的能量累计（腐败、溢出丢弃）。
+    ///
+    /// 批次 8 只记账不参与模拟；批次 10 做守恒审计时，
+    /// `生物可用总能量 + heat_pool` 才应该等于「注入总量」。
+    pub heat_pool: f64,
+
     /// 光场需要重算吗。
     ///
     /// 光场是「地形 + 光源 + 天空光」的纯函数，这三样都变得远比 60 Hz 慢，
@@ -103,6 +109,7 @@ impl World {
             fields: Fields::new(len),
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
+            heat_pool: 0.0,
             light_dirty: true,
             order: Vec::new(),
             config,
@@ -246,9 +253,14 @@ impl World {
         if ty == ct::FOOD {
             if !was_food {
                 self.add_food(index);
+                // 新食物默认装满一份（`food_energy_scale`）。
+                // 尸体/腐殖质这种"要指定能量"的路径走 `set_food_at` 覆盖它。
+                self.grid.food[index] = self.config.food_energy_gain() as f32;
             }
         } else if was_food {
             self.remove_food(index);
+            // 格子不再是食物 → 剩下的能量不能留着（否则以后再变成食物会"复活"）
+            self.grid.food[index] = 0.0;
         }
     }
 
@@ -259,6 +271,19 @@ impl World {
     }
 
     /// 把地板重新铺回顶层（生物离开 / 食物被吃掉时用）
+    /// 把一格变成食物，并指定它携带多少能量。
+    ///
+    /// 尸体和额外投放走这条路；普通画笔/腐殖质走 `set_cell_at` 的默认值。
+    pub fn set_food_at(&mut self, index: usize, energy: f64) {
+        if index >= self.grid.len {
+            return;
+        }
+        self.set_cell_at(index, ct::FOOD, -1);
+        if self.grid.types[index] == ct::FOOD {
+            self.grid.food[index] = energy.max(0.0) as f32;
+        }
+    }
+
     pub fn reveal_floor(&mut self, index: usize) {
         if index >= self.grid.len {
             return;
@@ -389,26 +414,36 @@ impl World {
 
     // ────────────────────────────── 环境规则 ──────────────────────────────
 
+    /// 食物腐败：**能量一点点流失**，不是整格突然消失。
+    ///
+    /// 每格每 tick 掉 `max(e × rel, floor)`：
+    ///
+    /// * `rel`（相对项）让**大块尸体慢慢烂**——这是"守尸 / 抢食"能成立的前提；
+    /// * `floor`（绝对项）让**小块食物干脆消失**，避免 0.001 点能量赖着不走、占着格子。
+    ///
+    /// 流失的能量进 `heat_pool`。旧实现是"每 tick 按比例随机删格子"，
+    /// 断崖式：同一块肉要么在、要么突然没了，看不出腐败的过程。
     pub fn apply_food_decay(&mut self) {
-        let rate = self.config.world.food_decay_rate;
-        if rate <= 0.0 {
+        let rel = self.config.world.food_decay_rate / 100.0;
+        let floor = self.config.world.food_decay_floor;
+        if rel <= 0.0 && floor <= 0.0 {
             return;
         }
-        let expected = (self.food_cells.len() as f64 * rate) / 100.0;
-        if expected <= 0.0 {
-            return;
-        }
-        let mut n = expected.floor() as usize;
-        if self.rng.float() < expected - n as f64 {
-            n += 1;
-        }
-        for _ in 0..n {
-            if self.food_cells.is_empty() {
-                break;
+        // 遍历时可能删格（swap-remove 会打乱数组），所以用 while 手动控制下标：
+        // 删掉的格子会让当前位换成原末尾元素，必须**原地重看**，不能 i += 1。
+        let mut i = 0;
+        while i < self.food_cells.len() {
+            let index = self.food_cells[i];
+            let e = self.grid.food[index] as f64;
+            let decay = (e * rel).max(floor).min(e);
+            let left = e - decay;
+            self.heat_pool += decay;
+            if left <= 1e-6 {
+                self.reveal_floor(index); // 会从 food_cells 里 swap-remove
+            } else {
+                self.grid.food[index] = left as f32;
+                i += 1;
             }
-            let j = self.rng.int(self.food_cells.len());
-            let index = self.food_cells[j];
-            self.reveal_floor(index);
         }
     }
 
@@ -807,16 +842,16 @@ impl World {
             Behavior::Mouth => {
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
-                // 全局「食物量倍率」× 这张嘴自己的摄取倍率。倍率出厂 1.0，
-                // 所以默认配置下与旧行为逐位相同。
-                let gain = self.config.food_energy_gain()
-                    * self.config.attr(cell.type_id, AttrField::BiteMult);
+                // 摄取倍率只乘**这一格剩下的能量**——食物本身带存量之后，
+                // 「一份食物值多少」不再由全局常数决定，而是看它被吃时还剩多少。
+                let mult = self.config.attr(cell.type_id, AttrField::BiteMult);
                 for k in 0..4 {
                     let n = NEIGHBORS_4[k];
                     if let Some(index) = self.grid.index(col + n.0, row + n.1) {
                         if self.grid.types[index] == ct::FOOD {
+                            let e = self.grid.food[index] as f64;
                             self.reveal_floor(index);
-                            self.organisms[i].energy += gain;
+                            self.organisms[i].energy += e * mult;
                         }
                     }
                 }
@@ -959,26 +994,51 @@ impl World {
         }
         self.organisms[i].alive = false;
 
+        // ── 残骸携带死者**体内攒下的能量** ──
+        //
+        // 这是「狩猎才有意义」的地基：肥的死了留肥尸体，捕食者吃到的就是它
+        // 生前攒的那一份。旧实现按细胞类型给固定的 `food_value`，
+        // 体内 energy 直接蒸发——攒得越多死得越亏，但亏掉的那部分凭空消失。
+        //
+        // 每格容量是 `food_value`（细胞属性，类型参数里可调），装不下的部分
+        // 撒到周围空格，再装不下就记进热池（不算凭空消失）。
+        let total = self.organisms[i].energy.max(0.0);
         let n = self.organisms[i].anatomy.cells.len();
+        let per = if n > 0 { total / n as f64 } else { 0.0 };
+        let mut leftover = 0.0;
         for k in 0..n {
             let cell = self.organisms[i].anatomy.cells[k];
             let col = self.organisms[i].real_col(&cell);
             let row = self.organisms[i].real_row(&cell);
+            let cap = self.config.attr(cell.type_id, AttrField::FoodValue).max(0.0);
+            let here = per.min(cap);
+            leftover += per - here;
             if let Some(index) = self.grid.index(col, row) {
-                self.set_cell_at(index, ct::FOOD, -1);
+                if here > 1e-6 {
+                    self.set_food_at(index, here);
+                } else {
+                    // 一点能量都没有的格子就别变成食物了（否则立刻被腐败清掉）
+                    self.set_cell_at(index, ct::EMPTY, -1);
+                }
             }
         }
-
-        let total = self.organisms[i].food_value_total(&self.config);
-        let extra = total.round() as i64 - n as i64;
-        if extra > 0 {
+        if leftover > 1e-6 {
             let (col, row) = (self.organisms[i].col, self.organisms[i].row);
-            self.drop_extra_food(col, row, extra as usize);
+            self.drop_extra_food(col, row, leftover);
         }
     }
 
-    /// 在 (col,row) 周围的空格里投放 `count` 份额外食物
-    fn drop_extra_food(&mut self, col: i32, row: i32, count: usize) {
+    /// 在 (col,row) 周围的空格里撒 `energy` 这么多能量，按每格一份摊开。
+    ///
+    /// 尸体装不下的部分走这里。如果周围全满，剩下的进热池——
+    /// 能量不会凭空消失，只是离开了生物圈。
+    fn drop_extra_food(&mut self, col: i32, row: i32, energy: f64) {
+        if energy <= 1e-6 {
+            return;
+        }
+        let cap = self.config.food_energy_gain().max(1e-6);
+        let count = (energy / cap).ceil().max(1.0) as usize;
+        let each = energy / count as f64;
         let max_r = self.grid.cols.max(self.grid.rows) as i32;
         let mut placed = 0usize;
         let mut r = 1i32;
@@ -993,7 +1053,7 @@ impl World {
                     }
                     if let Some(index) = self.grid.index(col + dx, row + dy) {
                         if self.grid.types[index] == ct::EMPTY {
-                            self.set_cell_at(index, ct::FOOD, -1);
+                            self.set_food_at(index, each);
                             placed += 1;
                         }
                     }
@@ -1003,6 +1063,8 @@ impl World {
             }
             r += 1;
         }
+        // 周围塞不下的部分离开生物圈
+        self.heat_pool += each * (count - placed) as f64;
     }
 
     // ────────────────────────────── 繁殖 ──────────────────────────────
@@ -1405,6 +1467,132 @@ mod tests {
         org.anatomy.recompute();
         let id = w.add_organism(org);
         (w, id)
+    }
+
+    /// 新食物默认装满一份（`food_energy_scale`）。
+    #[test]
+    fn new_food_carries_one_portion() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.food_energy_scale = 2.5;
+        let idx = w.grid.index(5, 5).unwrap();
+        w.set_cell_at(idx, ct::FOOD, -1);
+        assert!(
+            (w.grid.food[idx] - 2.5).abs() < 1e-6,
+            "新食物应该装满一份，实测 {}",
+            w.grid.food[idx]
+        );
+    }
+
+    /// 腐败是**渐进**的：能量一点点掉，不是整格突然消失。
+    ///
+    /// 旧实现是「每 tick 有 N% 概率随机删一格」，同一块肉要么在、要么突然没了，
+    /// 看不出过程，也没法做"守尸 / 抢食"这种依赖时间的行为。
+    #[test]
+    fn food_decays_gradually() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.world.food_decay_rate = 10.0; // 10% / tick
+        w.config.world.food_decay_floor = 0.0;
+        let idx = w.grid.index(5, 5).unwrap();
+        w.set_food_at(idx, 1.0);
+
+        w.apply_food_decay();
+        assert_eq!(w.grid.types[idx], ct::FOOD, "一格不该在第一次衰减就消失");
+        assert!(
+            (w.grid.food[idx] - 0.9).abs() < 1e-5,
+            "应该掉 10%，实测 {}",
+            w.grid.food[idx]
+        );
+        assert!(
+            (w.heat_pool - 0.1).abs() < 1e-5,
+            "流失的能量必须进热池（不能凭空消失），实测 {}",
+            w.heat_pool
+        );
+
+        // 一直衰减到能量耗尽才清格
+        for _ in 0..200 {
+            w.apply_food_decay();
+        }
+        assert_eq!(w.grid.types[idx], ct::EMPTY, "能量耗尽后应该清格");
+        assert!(
+            (w.heat_pool - 1.0).abs() < 1e-3,
+            "整份能量最终都该记进热池，实测 {}",
+            w.heat_pool
+        );
+    }
+
+    /// 绝对下限：小块食物不会拖着 0.001 点能量赖着不走。
+    #[test]
+    fn decay_floor_kills_tiny_food() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.world.food_decay_rate = 0.0; // 只留绝对项
+        w.config.world.food_decay_floor = 0.05;
+        let idx = w.grid.index(5, 5).unwrap();
+        w.set_food_at(idx, 0.02);
+        w.apply_food_decay();
+        assert_eq!(
+            w.grid.types[idx],
+            ct::EMPTY,
+            "低于绝对下限的小食物应该一次就消失"
+        );
+    }
+
+    /// 嘴吃掉的是**这一格剩下的全部能量**，不是固定的「一份」。
+    #[test]
+    fn mouth_takes_whatever_is_left_in_the_cell() {
+        let run = |e: f64| -> f64 {
+            // 带一个储食细胞 + 超高的 storage_food_bonus，把繁殖判定隔离掉
+            // （`act_organism` 末尾会扣繁殖成本，不隔离就测不准）
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::STORAGE, 0, -1)]);
+            w.config.life.storage_food_bonus = 1000.0;
+            let idx = w.grid.index(4, 3).unwrap();
+            w.set_food_at(idx, e);
+            w.organisms[0].energy = 0.0;
+            w.act_organism(0);
+            w.organisms[0].energy
+        };
+        assert!(
+            (run(3.0) - 3.0).abs() < 1e-6,
+            "满能量食物应该给 3.0，实测 {}",
+            run(3.0)
+        );
+        assert!(
+            (run(0.2) - 0.2).abs() < 1e-6,
+            "快烂完的食物只值剩下的 0.2，实测 {}",
+            run(0.2)
+        );
+    }
+
+    /// 死亡残骸携带死者**体内攒下的能量**，而不是按细胞类型给的固定值。
+    ///
+    /// 这是「狩猎才有意义」的地基：肥的死了留肥尸体。
+    #[test]
+    fn corpse_carries_the_organisms_energy() {
+        let (mut w, id) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let i = w.id_index[&id];
+        w.organisms[i].energy = 4.0;
+        w.kill_organism(i);
+
+        let total: f64 = w.food_cells.iter().map(|&k| w.grid.food[k] as f64).sum();
+        assert!(
+            (total - 4.0).abs() < 1e-3,
+            "尸体总能量应该等于死者体内能量 4.0，实测 {}",
+            total
+        );
+        assert!(!w.food_cells.is_empty(), "死了至少该留下一格尸体");
+    }
+
+    /// 体内没能量时不该留下"空食物格"（否则立刻被腐败清掉，白折腾）。
+    #[test]
+    fn broke_corpse_leaves_no_food() {
+        let (mut w, id) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let i = w.id_index[&id];
+        w.organisms[i].energy = 0.0;
+        w.kill_organism(i);
+        assert!(
+            w.food_cells.is_empty(),
+            "零能量尸体不该留下食物格，实测 {} 格",
+            w.food_cells.len()
+        );
     }
 
     /// 嘴的「摄取倍率」要乘在食物能量上。

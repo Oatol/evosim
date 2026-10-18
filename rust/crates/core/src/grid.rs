@@ -3,6 +3,7 @@
 //!   types  : Vec<u8>    顶层类型（可能被生物的身体盖住）
 //!   owners : Vec<i32>   所属生物 id，-1 = 独立格
 //!   floor  : Vec<u8>    地板层：这一格的地形是什么
+//!   food   : Vec<f32>   **食物格里的能量**（只有 types == FOOD 时有意义）
 //!
 //! 为什么要有 floor：生物写格子会把 types 覆盖成自己的细胞类型。
 //! 地形只存 types 的话，一只生物从岩浆上走过就把岩浆抹掉了。
@@ -21,6 +22,14 @@ pub struct Grid {
     pub types: Vec<u8>,
     pub owners: Vec<i32>,
     pub floor: Vec<u8>,
+    /// 每格食物里还剩多少能量（批次 8）。
+    ///
+    /// 以前食物是**二值**的：一格 FOOD 就是一个固定值，表达不了"吃了一半"，
+    /// 也没法做渐进腐败。现在食物带存量，腐败是能量一点点流失，
+    /// 尸体则携带死者生前的能量（见 `World::kill_organism`）。
+    ///
+    /// 只有 `types[i] == FOOD` 时这个值才有意义；其他格子恒为 0。
+    pub food: Vec<f32>,
 }
 
 impl Grid {
@@ -34,6 +43,7 @@ impl Grid {
             types: vec![ct::EMPTY; len],
             owners: vec![-1; len],
             floor: vec![ct::EMPTY; len],
+            food: vec![0.0; len],
         }
     }
 
@@ -78,6 +88,8 @@ impl Grid {
 
     /// 整张网格填成同一类型。`keep_terrain` 为真时保留 floor 层里的地形。
     pub fn fill(&mut self, ty: u8, keep_terrain: bool) {
+        // 无论哪条路径，食物能量都要清掉：填完之后那些格子已经不是食物了
+        self.food.fill(0.0);
         if !keep_terrain {
             self.types.fill(ty);
             self.owners.fill(-1);
@@ -90,6 +102,12 @@ impl Grid {
             self.types[i] = if TERRAIN_MASK[f as usize] { f } else { ty };
             self.owners[i] = -1;
         }
+    }
+
+    /// 这一格食物还剩多少能量（非食物格恒为 0）
+    #[inline]
+    pub fn food_at(&self, col: i32, row: i32) -> f32 {
+        self.index(col, row).map(|i| self.food[i]).unwrap_or(0.0)
     }
 
     /// 统计各类型格子数量

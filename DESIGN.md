@@ -1432,6 +1432,49 @@ for v in (1..=255).rev() {
 
 这条对照直接说明：**没有维持成本，守恒就只是个说法**。批次 8/10 要把这条接上。
 
+#### 9.7.7 食物能量与渐进腐败（批次 8）
+
+**问题**：食物是**二值**的——一格 `FOOD` 就是一个固定值。它表达不了三件事：
+
+1. 吃了一半的肉还剩多少
+2. 尸体该携带死者攒了多少能量（旧实现按细胞类型给固定的 `food_value`，
+   体内 `energy` 直接蒸发——攒得越多死得越亏，亏掉的那部分凭空消失）
+3. 腐败的过程（旧实现是"每 tick 有 2% 概率整格消失"，断崖式）
+
+**改法**：`Grid` 加 `food: Vec<f32>`（每格食物能量），只有 `types[i] == FOOD` 时有意义。
+
+| 环节 | 行为 |
+|---|---|
+| 新食物（画笔 / 腐殖质） | 装满一份 = `life.food_energy_scale` |
+| 嘴吃 | 拿走**这一格剩下的全部能量** × 摄取倍率 |
+| 死亡 | 每格装 `min(死者energy / 格数, 该格 food_value)`，装不下撒到周围空格，再装不下进热池 |
+| 腐败 | 每格每 tick 掉 `max(e × rate/100, floor)`，流失进热池 |
+
+**腐败用"相对 + 绝对"两条腿**：
+
+* `rel`（默认 1%/tick）让**大块尸体慢慢烂** —— 这是"守尸 / 抢食"能成立的前提；
+* `floor`（默认 0.02/tick）让**小块食物干脆消失** —— 只留相对项的话，指数衰减的尾巴会拖得极长，
+  0.001 点能量赖在格子上不走，既占地方又让"食物格数"这个指标失真。
+
+**热池**（`World.heat_pool`）：腐败流失 + 溢出丢弃的累计。批次 8 只记账，
+批次 10 做守恒审计时 `生物可用总能量 + heat_pool` 才应该等于注入总量。
+
+**验证**（`light_check` 3000 tick）：
+
+```
+食物 244 格 · 总能量 92.1 · 平均每格 0.38 · 热池 8155.5
+```
+
+平均每格 **0.38 < 1.0** 说明食物确实处于"有的满、有的半烂"的渐变状态，
+而不是每格恒等于一份。六条单元测试守着：`new_food_carries_one_portion` /
+`food_decays_gradually`（含"流失必须进热池"）/ `decay_floor_kills_tiny_food` /
+`mouth_takes_whatever_is_left_in_the_cell` / `corpse_carries_the_organisms_energy` /
+`broke_corpse_leaves_no_food`。
+
+> **一个实现细节**：腐败遍历 `food_cells` 时可能删格，而删格是 swap-remove
+> （会打乱数组）。所以用 `while` 手动控制下标，删掉时**原地重看**，不能 `i += 1`
+> ——否则会跳过被换到当前位置的那个元素。
+
 ---
 
 ## 10. 参数默认值
@@ -1440,7 +1483,8 @@ for v in (1..=255).rev() {
 // 世界
 gridCols = 200, gridRows = 150
 foodDropProb = 0            // 全局食物掉落（默认关闭，靠生产者细胞循环）
-foodDecayRate = 2           // 每 tick 腐败掉的食物存量比例（%），见 §6.6
+foodDecayRate = 1.0         // 每 tick 相对腐败速率（%），见 §9.7.7
+foodDecayFloor = 0.02       // 每 tick 绝对衰减下限（能量），防止小块食物赖着不走
 wrapEdges = true            // 边界环绕
 clearWallsOnReset = false   // 重置时是否保留墙
 autoReset = false           // 灭绝时自动重置
@@ -1457,7 +1501,7 @@ sunIntensity = 1.0          // 光场的全局乘数（0 = 永夜）
 moversCanProduce = false    // 移动者是否兼作生产者
 turnCooldown = 4            // 转身后的冷却 tick 数（防止原地打转，见 §6.2）
 metabolismScale = 0         // 全局消耗量倍率（0 = 关闭每 tick 消耗，见 §6.4）
-foodEnergyScale = 1         // 食物量倍率：一份食物能换多少能量（1 = 与旧行为一致）
+foodEnergyScale = 1         // 一份食物的能量（批次 8 起食物带存量，见 §9.7.7）
 starvationTicks = 60        // 能量见底后还能撑多少个 tick 才饿死
 storageFoodBonus = 1        // 每个储食细胞把繁殖阈值抬高多少（× 基础繁殖成本，见 §6.8）
 regenRate = 0.1             // 每个再生细胞每 tick 抹掉的累积伤害
@@ -1486,7 +1530,7 @@ cells.EYE      = { hp: 1, cost: 0.006, damage: 0, senseRange: 0, foodValue: 1 }
 // —— 以下 5 个倍率是 2.0 新增，1.x 没有（见 §9.7.3）——
 // 乘在对应的全局参数上，默认 1.0 = 与 1.x 逐位等价。
 // 只有 `armor_resist` 是比例不是倍率：1.0 = 100% 减免 = 旧的"完全免疫"。
-cells.MOUTH.biteMult       = 1.0   // × life.foodEnergyScale
+cells.MOUTH.biteMult       = 1.0   // × 这一格食物剩下的能量（批次 8 起）
 cells.PRODUCER.prodMult    = 1.0   // × life.photosynthesisRate
 cells.REGEN.regenMult      = 1.0   // × life.regenRate
 cells.STORAGE.storageMult  = 1.0   // × life.storageFoodBonus
@@ -1887,6 +1931,7 @@ baseTicksPerSecond = 60, maxStepsPerFrame = 400, seed = 20261015
 | 批次 6.6b | 顺手修 `fields.rs` 的 `i - cols + 1` 无符号下溢（debug 下 5 条测试必挂，release 靠回绕歪打正着） | ✅ |
 | 批次 7 | **光场** + 光合直充体内 + 能量容量；**黄金快照废弃**，改特征化测试；存档 `VERSION` → 5 | ✅ |
 | 批次 7.5 | 光场改**多源 BFS + 可放置点光源**（不占格子、独立层级），天空光可关；存档 `VERSION` → 6 | ✅ |
+| 批次 8 | **食物带能量存量** + 渐进腐败（相对 + 绝对衰减）+ 残骸携带死者能量 + 热池；存档 `VERSION` → 7 | ✅ |
 
 **批次 5 的结论要单独说**：参数做出来了，默认值锁着黄金快照（`p = 1.0` / `cap = 0`），
 但**扫描证明这两个旋钮推不动体型**——p 从 0.6 到 1.2 平均体型只动 0.12 格，体型上限完全不生效

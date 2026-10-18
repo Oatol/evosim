@@ -93,7 +93,16 @@ pub struct WorldCfg {
     pub rows: usize,
     pub wrap_edges: bool,
     pub food_drop_prob: f64,
+    /// 食物每 tick 的相对腐败速率（百分比，默认 1.0）。
+    ///
+    /// **大块尸体靠它慢慢烂**：`e -= max(e × rate/100, floor)`。
+    /// 旧的 2.0 是"每 tick 有 2% 概率整格消失"，断崖式，看不出过程。
     pub food_decay_rate: f64,
+    /// 食物每 tick 的绝对衰减下限（能量单位，默认 0.02）。
+    ///
+    /// 没有它，小块食物的指数衰减尾巴会拖得极长——0.001 点能量赖在格子上不走，
+    /// 既占地方又让"食物格数"这个指标失真。
+    pub food_decay_floor: f64,
     pub clear_walls_on_reset: bool,
     pub auto_reset: bool,
     /// 天空光强度（0 = 永夜，1 = 满照）。
@@ -110,7 +119,8 @@ impl Default for WorldCfg {
             rows: 150,
             wrap_edges: true,
             food_drop_prob: 0.0,
-            food_decay_rate: 2.0,
+            food_decay_rate: 1.0,
+            food_decay_floor: 0.02,
             clear_walls_on_reset: false,
             auto_reset: false,
             sun_intensity: 1.0,
