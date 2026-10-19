@@ -590,6 +590,28 @@ pub fn draw(
                 if (photo - before_photo).abs() > 1e-9 {
                     cfg.life.photosynthesis_rate = photo;
                 }
+
+                // 遮挡：给「光合生物挤成一道墙」定价。
+                //
+                // 生产者正上方 8 行内每有一个**别的个体**的身体格，天空光就乘 (1-k)。
+                // 墙内部的细胞照不到光、却照样付 upkeep → 墙从内部塌掉。
+                // 只作用于天空光：身体挡得住头顶下来的光，挡不住侧面照进来的灯。
+                let before_shade = cfg.life.shade_strength;
+                let mut shade = before_shade;
+                ui.add(
+                    egui::Slider::new(&mut shade, 0.0..=1.0)
+                        .text("遮挡强度")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "生产者上方每压着一层身体，天空光就衰减这么多（默认 0.25）。
+                     自己的身体也算——光不知道格子归谁。
+                     0 = 关闭。实测 0.25 把有光区的「致密格」从 9.3% 压到 1.9%。",
+                );
+                if (shade - before_shade).abs() > 1e-9 {
+                    cfg.life.shade_strength = shade;
+                }
                 ui.separator();
                 ui.checkbox(&mut cfg.mutation.use_global_mutability, "启用全局变异率");
                 ui.add(

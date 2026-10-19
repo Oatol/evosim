@@ -57,17 +57,22 @@ pub struct LightSource {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Light {
     pub len: usize,
-    /// 每格光强（0–255）
+    /// 每格光强（0–255）= `sky_level + lamp_level`（饱和相加）。
+    ///
+    /// 光合、渲染、悬停读数都读这一层。**它只是两个分量的和**，
+    /// 真正需要分量的地方是遮挡：天空光会被身体挡住，点光源不会
+    /// （方向不同，见 `World::shade_factor`）。
     pub level: Vec<u8>,
+    /// 天空光分量。被生物身体**垂直遮挡**的就是它。
+    pub sky_level: Vec<u8>,
+    /// 点光源分量。不被身体遮挡（近似：灯可以从侧面照进来）。
+    pub lamp_level: Vec<u8>,
     /// 玩家放置的点光源
     pub sources: Vec<LightSource>,
     /// 每格衰减多少，由世界高度推导（见 `absorb_for`）
     pub absorb: u8,
     /// 天空光强度（0 = 关掉，世界只剩点光源）
     pub sky: u8,
-    /// BFS 用的桶（256 个），复用避免每帧分配。不进存档。
-    #[serde(skip)]
-    buckets: Vec<Vec<u32>>,
 }
 
 impl Default for Light {
@@ -75,10 +80,11 @@ impl Default for Light {
         Light {
             len: 0,
             level: Vec::new(),
+            sky_level: Vec::new(),
+            lamp_level: Vec::new(),
             sources: Vec::new(),
             absorb: 3,
             sky: SUN_MAX,
-            buckets: (0..256).map(|_| Vec::new()).collect(),
         }
     }
 }
@@ -88,6 +94,8 @@ impl Light {
         let mut l = Light::default();
         l.len = cols * rows;
         l.level = vec![0; l.len];
+        l.sky_level = vec![0; l.len];
+        l.lamp_level = vec![0; l.len];
         l.absorb = absorb_for(rows);
         l
     }
@@ -98,6 +106,8 @@ impl Light {
         }
         self.len = cols * rows;
         self.level = vec![0; self.len];
+        self.sky_level = vec![0; self.len];
+        self.lamp_level = vec![0; self.len];
         self.absorb = absorb_for(rows);
         // 越界的光源丢掉：世界变小了，它们本来也照不到任何格子
         let (c, r) = (cols as i32, rows as i32);
@@ -106,52 +116,76 @@ impl Light {
 
     pub fn clear(&mut self) {
         self.level.fill(0);
+        self.sky_level.fill(0);
+        self.lamp_level.fill(0);
     }
 
-    /// 重算整张光场。`O(面积)`，30k 格约 100–200 µs（比垂直投射贵，但仍远低于一帧预算）。
+    /// 重算整张光场：天空光和点光源**各跑一次 BFS**，然后相加。
+    ///
+    /// 为什么要分开：遮挡只该作用于天空光——生物的身体挡得住"从头顶下来"的光，
+    /// 挡不住"从侧面照进来"的灯。合成一个场就没法区分了。
+    ///
+    /// 两次 BFS 仍是 `O(面积)`，30k 格约 200–400 µs；靠 `World.light_dirty`
+    /// 只在必要时重算，所以这点开销落在"改地形/放灯"那一下，不在每帧。
     pub fn rebuild(&mut self, grid: &Grid) {
         if self.len != grid.len {
             self.resize(grid.cols, grid.rows);
-        }
-        self.level.fill(0);
-        for b in self.buckets.iter_mut() {
-            b.clear();
         }
 
         // ── 天空光：顶部一排光源 ──
         //
         // 顶部是墙的那一列不发光——否则光会从墙里冒出来，看着像 bug。
+        let mut sky_seeds: Vec<(usize, u8)> = Vec::new();
         if self.sky > 0 {
             for c in 0..grid.cols {
                 if blocks_light(grid.floor[c]) {
                     continue;
                 }
-                self.level[c] = self.sky;
-                self.buckets[self.sky as usize].push(c as u32);
+                sky_seeds.push((c, self.sky));
             }
         }
+        self.sky_level = self.propagate(grid, &sky_seeds);
 
         // ── 点光源 ──
+        let mut lamp_seeds: Vec<(usize, u8)> = Vec::new();
         for s in &self.sources {
+            if s.strength == 0 {
+                continue;
+            }
             let Some(i) = grid.index(s.col, s.row) else {
                 continue;
             };
-            if s.strength > self.level[i] {
-                self.level[i] = s.strength;
-                self.buckets[s.strength as usize].push(i as u32);
+            lamp_seeds.push((i, s.strength));
+        }
+        self.lamp_level = self.propagate(grid, &lamp_seeds);
+
+        for i in 0..self.len {
+            self.level[i] = self.sky_level[i].saturating_add(self.lamp_level[i]);
+        }
+    }
+
+    /// 桶排序多源 BFS，返回一张场。
+    ///
+    /// 每个格子只在「被更亮的覆盖」时入桶，所以每格最多处理一次。
+    fn propagate(&self, grid: &Grid, seeds: &[(usize, u8)]) -> Vec<u8> {
+        let mut level = vec![0u8; self.len];
+        let mut buckets: Vec<Vec<u32>> = (0..256).map(|_| Vec::new()).collect();
+
+        for &(i, v) in seeds {
+            if i < level.len() && v > level[i] {
+                level[i] = v;
+                buckets[v as usize].push(i as u32);
             }
         }
 
-        // ── 多源 BFS ──
         let cols = grid.cols;
         let rows = grid.rows as i32;
         let absorb = self.absorb;
         for v in (1..=255u8).rev() {
-            // 取出来单独遍历，避开 `buckets[v]` 与 `level` 同时可变借用
-            let mut cur = std::mem::take(&mut self.buckets[v as usize]);
+            let mut cur = std::mem::take(&mut buckets[v as usize]);
             for &ii in cur.iter() {
                 let i = ii as usize;
-                if self.level[i] != v {
+                if level[i] != v {
                     continue; // 已被更亮的覆盖
                 }
                 let c = (i % cols) as i32;
@@ -174,21 +208,38 @@ impl Light {
                         continue;
                     }
                     let nv = v.saturating_sub(absorb);
-                    if nv > self.level[n] {
-                        self.level[n] = nv;
-                        self.buckets[nv as usize].push(n as u32);
+                    if nv > level[n] {
+                        level[n] = nv;
+                        buckets[nv as usize].push(n as u32);
                     }
                 }
             }
             cur.clear();
-            self.buckets[v as usize] = cur; // 放回去复用
+            buckets[v as usize] = cur; // 放回去复用
         }
+        level
     }
 
     /// 取某格光强（越界返回 0）
     #[inline]
     pub fn at(&self, grid: &Grid, col: i32, row: i32) -> u8 {
         grid.index(col, row).map(|i| self.level[i]).unwrap_or(0)
+    }
+
+    /// 天空光分量（0–255）。**会被生物身体遮挡**的那一半。
+    #[inline]
+    pub fn sky_at(&self, grid: &Grid, col: i32, row: i32) -> u8 {
+        grid.index(col, row)
+            .map(|i| self.sky_level[i])
+            .unwrap_or(0)
+    }
+
+    /// 点光源分量（0–255）。不被身体遮挡。
+    #[inline]
+    pub fn lamp_at(&self, grid: &Grid, col: i32, row: i32) -> u8 {
+        grid.index(col, row)
+            .map(|i| self.lamp_level[i])
+            .unwrap_or(0)
     }
 
     /// 取某格光强的归一化值（0.0–1.0），光合用这个
@@ -394,6 +445,45 @@ mod tests {
         }
         l.rebuild(&g);
         assert_eq!(l.level, before, "生物占位不该影响光场");
+    }
+
+    /// 天空光和点光源是**两层**，`level` 只是它们的和。
+    ///
+    /// 分开存是为了遮挡：身体挡得住从头顶下来的光，挡不住从侧面照进来的灯。
+    #[test]
+    fn sky_and_lamp_are_separate_components() {
+        let g = grid(20, 20);
+        let mut l = Light::new(20, 20);
+        l.sky = 200;
+        // 灯放在第 5 行：这一行天空光还活着（200 − 5×absorb），两层能同时非零。
+        // 放到最底部就没天空光了——20 行的 absorb 是 16，第 17 行早就归零。
+        l.set_source(10, 5, 255);
+        l.rebuild(&g);
+
+        // 顶部：天空光满额，点光源够不着
+        assert_eq!(l.sky_at(&g, 10, 0), 200, "顶部天空光应该等于设定强度");
+        assert_eq!(
+            l.lamp_at(&g, 0, 19),
+            0,
+            "左下角离灯 24 格（reach 15），点光源分量应该衰减到 0"
+        );
+
+        // 灯旁边：两层都有
+        let near = (10, 5);
+        assert!(l.sky_at(&g, near.0, near.1) > 0, "灯附近也还有天空光");
+        assert!(l.lamp_at(&g, near.0, near.1) > 0, "灯附近有点光源分量");
+        assert_eq!(
+            l.at(&g, near.0, near.1),
+            l.sky_at(&g, near.0, near.1)
+                .saturating_add(l.lamp_at(&g, near.0, near.1)),
+            "level 必须是两个分量的和"
+        );
+
+        // 关掉天空光 → 天空光分量必须全 0，点光源分量不受影响
+        l.sky = 0;
+        l.rebuild(&g);
+        assert!(l.sky_level.iter().all(|&v| v == 0), "sky = 0 时天空光分量应为 0");
+        assert!(l.lamp_at(&g, 10, 5) > 0, "天空光关掉不该影响点光源");
     }
 
     #[test]

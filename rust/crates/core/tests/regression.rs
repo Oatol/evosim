@@ -42,8 +42,14 @@ fn run(ticks: u64, metabolism: f64) -> World {
 
 /// 同上，但可以换种子（用来复核「结论是不是只对某一个种子成立」）。
 fn run_with_seed(seed: u32, ticks: u64, metabolism: f64) -> World {
+    run_with(seed, ticks, metabolism, Config::default().life.shade_strength)
+}
+
+/// 全参数版：`shade = 0` 关掉遮挡，用来单独观察某个机制。
+fn run_with(seed: u32, ticks: u64, metabolism: f64, shade: f64) -> World {
     let mut cfg = Config::default();
     cfg.life.metabolism_scale = metabolism;
+    cfg.life.shade_strength = shade;
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
     seed_origin_of_life(&mut w);
@@ -142,31 +148,32 @@ fn population_prefers_the_lit_half() {
     );
 }
 
-/// 维持成本必须真的把体型压下去。
+/// 维持成本必须真的把体型压下去（**关掉遮挡**之后）。
 ///
 /// 这条钉的是「多一格要不要付账」：`metabolism_scale = 0` 时多一格是免费的，
 /// 所以体型会漂上去（多一个生产者纯赚）。打开成本之后体型必须变小，
 /// 否则说明 upkeep 根本没被扣——那能量守恒就只是个说法。
 ///
-/// **只断言方向，不断言幅度。** 幅度对种子的依赖极大，实测（3000 tick、metab 0.05）：
+/// **为什么要关掉遮挡**：批次 9 加了遮挡之后，「大体型」第一次有了收益
+/// （长得高才抢得到光），于是成本上涨不一定压小体型。实测（3000 tick、metab 0.05）：
 ///
-/// | 种子 | 无成本 | 有成本 | 变化 |
-/// |---|---|---|---|
-/// | 1001 | 5.19 | 5.07 | −2.3% |
-/// | 1002 | 3.45 | 3.09 | −10.4% |
-/// | 1003 | 1.37 | 1.15 | −16.1% |
+/// | 种子 | 体型 无成本→有成本 | 细胞总数 无成本→有成本 |
+/// |---|---|---|
+/// | 1001 | 4.21 → **5.03**（反而更大） | 3471 → 3237 |
+/// | 1002 | 3.24 → 3.02 | 3318 → 3301 |
+/// | 1003 | 2.22 → **2.74**（反而更大） | 3574 → 3124 |
 ///
-/// 三个种子的**绝对体型**差了将近 4 倍（5.19 / 3.45 / 1.37），说明这个生态有多个
-/// 吸引子：有的世界稳定在「大而少」，有的稳定在「小而多」（单细胞生产者也能活）。
-/// 所以在单个种子上写死百分比阈值等于在赌它落在哪个吸引子里——批次 8 之前
-/// 那条 `taxed < free * 0.95` 就是这么挂掉的（食物变富之后成本只占收入的百分之几）。
+/// 所以这条测试**只验"扣费有宏观效果"这件事本身**，方法是把遮挡关掉、
+/// 让体型回到"纯成本"的语境里。两个机制纠缠时，任何单一趋势断言都会变成噪声。
+/// 精确的每 tick 扣费由 `world::tests::metabolism_drains_energy_every_tick` 守。
 ///
-/// 精确的每 tick 扣费由 `world::tests::metabolism_drains_energy_every_tick` 守，
-/// 这里只查「每个种子上方向都一致」。
+/// **只断言方向，不断言幅度。** 幅度对种子的依赖极大（这个生态有多个吸引子），
+/// 在单个种子上写死百分比阈值等于赌它落在哪个吸引子里——批次 8 之前
+/// 那条 `taxed < free * 0.95` 就是这么挂掉的。
 #[test]
 fn metabolism_presses_body_size_down() {
     let avg = |seed: u32, metab: f64| -> f64 {
-        let w = run_with_seed(seed, 3000, metab);
+        let w = run_with(seed, 3000, metab, 0.0);
         let orgs = alive(&w);
         let cells: usize = orgs.iter().map(|o| o.cell_count()).sum();
         cells as f64 / orgs.len() as f64

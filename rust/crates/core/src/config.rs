@@ -144,6 +144,15 @@ pub struct LifeCfg {
     /// 那是台永动机——造食物不消耗任何东西。现在光成了唯一的能量来源，
     /// 生产者是**转换器**：产出正比于它所在格的光强，暗处产出为 0。
     pub photosynthesis_rate: f64,
+    /// 遮挡强度 k（0 = 关闭，默认 0.25）。
+    ///
+    /// 生产者正上方同列 8 行内，每有一个身体格（**包括自己的身体**），天空光乘 `1-k`。
+    /// 光不知道格子归谁，所以数全部——这也让"生产者该长在最上面"第一次有了价格。
+    ///
+    /// 这是给「光合生物把有光区挤成一道墙」定价的那一项：墙内部的细胞照不到光，
+    /// 却照样付 upkeep，于是墙从内部塌掉。实测（10000 tick、200×150）：
+    /// 有光区占用 27% → 21%，**致密格 9.3% → 1.3%**——被削掉的是"墙"，不是"人口"。
+    pub shade_strength: f64,
     /// 每个细胞提供的能量容量。光合直充体内之后必须有上限，否则无限膨胀。
     pub energy_per_cell: f64,
     /// 每个储食细胞额外提供的能量容量（电池）。
@@ -180,6 +189,7 @@ impl Default for LifeCfg {
             extra_mover_food_cost: 0.0,
             max_organisms: -1,
             photosynthesis_rate: 0.12,
+            shade_strength: 0.25,
             energy_per_cell: 2.0,
             storage_capacity: 6.0,
             movers_can_produce: false,

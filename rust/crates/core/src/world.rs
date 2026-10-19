@@ -20,6 +20,12 @@ use crate::config::Config;
 use crate::fields::Fields;
 use crate::grid::Grid;
 use crate::light::Light;
+
+/// 遮挡能见度：生产者正上方最多数几行。
+///
+/// 8 行 ≈ 两个 4 格身体的高度。再深就够不着了——真正厚的墙早就把内部饿死了，
+/// 数更远只是白花时间。
+const SHADE_DEPTH: i32 = 8;
 use crate::mutation::mutate_organism;
 use crate::organism::Organism;
 use crate::rng::Rng;
@@ -826,6 +832,48 @@ impl World {
         }
     }
 
+    /// 遮挡：生产者正上方同列 `SHADE_DEPTH` 行内，有几个身体格（**谁的不重要**）。
+    ///
+    /// 返回天空光的透过率 `(1-k)^n`，`n = 0` 时是 1.0。
+    ///
+    /// **自己的细胞也算。** 第一版只数"别人"（怕惩罚大体型），实测这是个漏洞：
+    /// 一个身体可以在同一列里叠好几个生产者，底下那些"被自己压着"却照样满额产光，
+    /// 于是演化直接去叠高——平均体型从 3.0 涨到 4.3，致密格反而没降。
+    /// 光不知道格子归谁，数全部才是物理上对的，而且它顺带给了**布局**一个价格：
+    /// 生产者要长在最上面，埋在下面的只值 `(1-k)^n`。这是"让体型有意义"想要的东西。
+    ///
+    /// 为什么只算天空光：灯是点光源，方向朝四面八方，用"上方"去近似它是错的。
+    /// 这一条的代价是灯照的世界没有遮挡——可接受，因为灯通常就是玩家手动摆的稀缺资源。
+    fn shade_factor(&self, col: i32, row: i32) -> f64 {
+        let k = self.config.life.shade_strength;
+        if !(k > 0.0) {
+            return 1.0;
+        }
+        let mut n = 0i32;
+        for d in 1..=SHADE_DEPTH {
+            // **垂直方向不能环绕**：`grid.index` 在 `wrap = true` 时会把 `row - d`
+            // 折到世界底部，于是最上面几行的生产者会被底部的生物"挡住"。
+            // 这和光场 BFS 里那条坑是同一个（高度方向代表"地下"，上下不相连）。
+            let rr = row - d;
+            if rr < 0 {
+                break;
+            }
+            let Some(j) = self.grid.index(col, rr) else {
+                continue;
+            };
+            let owner = self.grid.owners[j];
+            if owner < 0 {
+                continue;
+            }
+            n += 1;
+        }
+        if n == 0 {
+            1.0
+        } else {
+            (1.0 - k.clamp(0.0, 1.0)).powi(n)
+        }
+    }
+
     // ────────────────────────────── 细胞功能 ──────────────────────────────
 
     /// 这个个体能存多少能量（见 [`Organism::energy_capacity`]）。
@@ -873,7 +921,13 @@ impl World {
                 // 它是纯负担（占一格、消耗一份 upkeep），这本身就是选择压。
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
-                let lit = self.light.lit_at(&self.grid, col, row);
+                // 光分两种来源，**遮挡只作用于天空光**：
+                // 身体挡得住从头顶下来的光，挡不住从侧面照进来的灯。
+                // 合成一个场就没法区分了，所以 `Light` 里存的是两层。
+                let sky = self.light.sky_at(&self.grid, col, row) as f64;
+                let lamp = self.light.lamp_at(&self.grid, col, row) as f64;
+                let shade = self.shade_factor(col, row);
+                let lit = (sky * shade + lamp) / crate::light::SUN_MAX as f64;
                 if lit <= 0.0 {
                     return;
                 }
@@ -1640,6 +1694,7 @@ mod tests {
         w.config.life.storage_food_bonus = 1000.0;
         w.config.life.photosynthesis_rate = 0.5;
         w.config.world.sun_intensity = 1.0;
+        w.light.sky_level.fill(255);
         w.light.level.fill(255);
         w.organisms[0].energy = 0.0;
         w
@@ -1670,6 +1725,7 @@ mod tests {
     fn photosynthesis_requires_light() {
         let run = |level: u8| -> f64 {
             let mut w = photo_world();
+            w.light.sky_level.fill(level);
             w.light.level.fill(level);
             w.act_organism(0);
             w.organisms[0].energy
@@ -1695,11 +1751,178 @@ mod tests {
         let mut w = photo_world();
         w.config.world.sun_intensity = 0.0; // 天空光全关
         w.light.sky = 0;
-        w.light.level.fill(255); // 但这一格被点光源照亮
+        w.light.sky_level.fill(0);
+        w.light.lamp_level.fill(255); // 但这一格被点光源照亮
+        w.light.level.fill(255);
         w.act_organism(0);
         assert!(
             (w.organisms[0].energy - 0.5).abs() < 1e-9,
             "有点光源时，天空光为 0 也该正常光合，实测 {:.4}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 和 `photo_world` 一样，但世界够大（24×24、个体在 12,12）。
+    ///
+    /// 深度测试需要个体上方至少有 9 行——`tiny_world` 只有 8×8，放不下。
+    fn photo_world_big() -> World {
+        let mut cfg = Config::default();
+        cfg.world.cols = 24;
+        cfg.world.rows = 24;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+        let mut org = Organism::new(&w.config, &mut rng, &w.grid, 12, 12);
+        org.anatomy.add_cell(ct::PRODUCER, 0, 0, 0);
+        org.anatomy.add_cell(ct::STORAGE, 1, 0, 0);
+        org.anatomy.recompute();
+        w.add_organism(org);
+        w.config.life.storage_food_bonus = 1000.0;
+        w.config.life.photosynthesis_rate = 0.5;
+        w.config.world.sun_intensity = 1.0;
+        w.light.sky_level.fill(255);
+        w.light.level.fill(255);
+        w.organisms[0].energy = 0.0;
+        w
+    }
+
+    /// 把一个"别人的身体格"塞到 (col,row)。用来测遮挡，不需要真的造第二个个体。
+    fn put_foreign_body(w: &mut World, col: i32, row: i32) {
+        let i = w.grid.index(col, row).expect("坐标越界");
+        w.grid.owners[i] = 999;
+        w.grid.types[i] = ct::PRODUCER;
+    }
+
+    /// 生产者细胞在世界里的坐标（`tiny_world` 的枢轴位置由它决定）
+    fn producer_pos(w: &World) -> (i32, i32) {
+        let o = &w.organisms[0];
+        let cell = o
+            .anatomy
+            .cells
+            .iter()
+            .find(|c| c.type_id == ct::PRODUCER)
+            .expect("测试个体应该有生产者");
+        (o.real_col(cell), o.real_row(cell))
+    }
+
+    /// 别人挡在上面 → 天空光按 (1-k)^n 衰减。
+    #[test]
+    fn a_foreign_body_above_shades_the_producer() {
+        let mut w = photo_world();
+        let (c, r) = producer_pos(&w);
+        put_foreign_body(&mut w, c, r - 1);
+        w.act_organism(0);
+        let expect = 0.5 * 0.75; // rate 0.5 × (1-0.25)
+        assert!(
+            (w.organisms[0].energy - expect).abs() < 1e-9,
+            "一格遮挡应该只剩 75% 产出（期望 {:.4}，实测 {:.4}）",
+            expect,
+            w.organisms[0].energy
+        );
+
+        // 再叠一格 → (0.75)^2
+        put_foreign_body(&mut w, c, r - 2);
+        w.organisms[0].energy = 0.0;
+        w.act_organism(0);
+        let expect = 0.5 * 0.75 * 0.75;
+        assert!(
+            (w.organisms[0].energy - expect).abs() < 1e-9,
+            "两格遮挡应该剩 56% 产出（期望 {:.4}，实测 {:.4}）",
+            expect,
+            w.organisms[0].energy
+        );
+    }
+
+    /// **自己的身体也挡自己**：光不知道格子归谁。
+    ///
+    /// 第一版只数"别人"，结果演化发现可以把自己叠高、让底下的生产者白嫖光——
+    /// 平均体型从 3.0 涨到 4.3，致密格一点没降。这条测试钉住"自己的细胞也数"。
+    #[test]
+    fn own_body_also_shades_itself() {
+        let mut w = photo_world();
+        let (c, r) = producer_pos(&w);
+        let my_id = w.organisms[0].id as i32;
+        let i = w.grid.index(c, r - 1).unwrap();
+        w.grid.owners[i] = my_id; // 自己的细胞压在头上
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5 * 0.75).abs() < 1e-9,
+            "自己的细胞也该挡光（期望 0.375，实测 {:.4}）",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 遮挡只作用于天空光。灯照的地方不该被"上方有身体"罚。
+    #[test]
+    fn lamp_light_is_not_shaded() {
+        let mut w = photo_world();
+        w.light.sky_level.fill(0);
+        w.light.lamp_level.fill(255);
+        w.light.level.fill(255);
+        let (c, r) = producer_pos(&w);
+        put_foreign_body(&mut w, c, r - 1);
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-9,
+            "灯照的光不该被遮挡（期望 0.5，实测 {:.4}）",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 强度 0 = 关闭遮挡（对照实验用）。
+    #[test]
+    fn shade_strength_zero_disables_shading() {
+        let mut w = photo_world();
+        w.config.life.shade_strength = 0.0;
+        let (c, r) = producer_pos(&w);
+        put_foreign_body(&mut w, c, r - 1);
+        w.act_organism(0);
+        assert!((w.organisms[0].energy - 0.5).abs() < 1e-9);
+    }
+
+    /// 遮挡只数 `SHADE_DEPTH` 行内的身体：再远的光本来就该由光场自己衰减掉。
+    #[test]
+    fn shading_stops_at_the_depth_limit() {
+        let mut w = photo_world_big();
+        let (c, r) = producer_pos(&w);
+        assert!(r > SHADE_DEPTH, "测试个体离顶边太近（r = {}）", r);
+
+        // 边界内：应该挡
+        put_foreign_body(&mut w, c, r - SHADE_DEPTH);
+        w.act_organism(0);
+        assert!(
+            w.organisms[0].energy < 0.5,
+            "深度边界内应该算遮挡，实测 {:.4}",
+            w.organisms[0].energy
+        );
+
+        // 边界外：不该挡
+        let mut w = photo_world_big();
+        put_foreign_body(&mut w, c, r - SHADE_DEPTH - 1);
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-9,
+            "超出深度的身体不该算遮挡，实测 {:.4}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 垂直方向不能环绕：顶行生产者不该被底部的生物"挡住"。
+    ///
+    /// 这条钉的是一个真实踩过的坑：`grid.index` 在 `wrap = true` 时会把
+    /// `row - d` 折到世界底部，于是最上面几行的光合莫名其妙地被减半。
+    #[test]
+    fn shading_does_not_wrap_vertically() {
+        let mut w = photo_world_big();
+        let (c, r) = producer_pos(&w);
+        // 在最底一行放一个别人的身体；它和顶部的生产者在"环绕"下只差 1 行
+        let last_row = w.grid.rows as i32 - 1;
+        put_foreign_body(&mut w, c, last_row);
+        let _ = r;
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-9,
+            "底部的身体不该挡住顶部的光（环绕了），实测 {:.4}",
             w.organisms[0].energy
         );
     }

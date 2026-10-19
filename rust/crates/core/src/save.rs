@@ -59,7 +59,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v6：`Light` 加了 `sources`（可放置的点光源）/ `sky`（天空光开关），批次 7.5。同理。
 /// v7：`Grid` 加了 `food`（每格食物能量），`WorldCfg` 加了 `food_decay_floor`，
 /// `World` 加了 `heat_pool`，批次 8。同理。
-pub const VERSION: u32 = 7;
+/// v8：`Light` 拆成 `sky_level` / `lamp_level` 两层，`LifeCfg` 加了 `shade_strength`，
+/// 批次 9（遮挡）。同理。
+pub const VERSION: u32 = 8;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
