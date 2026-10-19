@@ -73,6 +73,30 @@ pub struct Light {
     pub absorb: u8,
     /// 天空光强度（0 = 关掉，世界只剩点光源）
     pub sky: u8,
+
+    /// **云影强度** 0~1（0 = 关闭，与旧行为逐位相同）。
+    ///
+    /// 天空光乘一张平滑噪声图：亮的成"光岛"，暗的成"暗廊"。
+    /// 目的不是让世界变暗，而是**把明暗交界从一条水平线拉成几千格的锯齿**——
+    /// 异养者需要那条交界（§9.7.11 的结论：光太均匀才是异养的瓶颈）。
+    ///
+    /// 代价必须知道：`mask ≤ 1`，所以开云影**一定降低总光照**。
+    /// `p = 1` 时平均透射率约 0.5，等于世界暗了一半。
+    /// 想保持总能量就同时把「天空光」或「光合速率」提上去。
+    pub patchiness: f32,
+    /// 噪声的种子。**不进存档**：它永远等于世界 RNG 的种子，
+    /// 读档时由 `into_world` 重新灌进去（见 save.rs）。
+    #[serde(skip)]
+    pub mask_seed: u32,
+    /// 每格的天空光透射率 0~1，**不进存档**——它是
+    /// `(cols, rows, patchiness, mask_seed)` 的纯函数，重建时现算并缓存。
+    /// 30k 格的噪声生成约 1 ms，地形画笔每帧都会触发 `rebuild`，所以必须缓存。
+    #[serde(skip)]
+    mask: Vec<f32>,
+    /// 缓存键：`(cols, rows, patchiness.to_bits(), mask_seed)`。
+    /// 任何一项变了才重算——`patchiness` 滑块是逐帧拖的，不能每次都算。
+    #[serde(skip)]
+    mask_key: (u32, u32, u32, u32),
 }
 
 impl Default for Light {
@@ -85,6 +109,10 @@ impl Default for Light {
             sources: Vec::new(),
             absorb: 3,
             sky: SUN_MAX,
+            patchiness: 0.0,
+            mask_seed: 0,
+            mask: Vec::new(),
+            mask_key: (0, 0, 0, 0),
         }
     }
 }
@@ -109,6 +137,9 @@ impl Light {
         self.sky_level = vec![0; self.len];
         self.lamp_level = vec![0; self.len];
         self.absorb = absorb_for(rows);
+        // 尺寸变了，噪声图必须重算
+        self.mask.clear();
+        self.mask_key = (0, 0, 0, 0);
         // 越界的光源丢掉：世界变小了，它们本来也照不到任何格子
         let (c, r) = (cols as i32, rows as i32);
         self.sources.retain(|s| s.col >= 0 && s.row >= 0 && s.col < c && s.row < r);
@@ -145,6 +176,25 @@ impl Light {
             }
         }
         self.sky_level = self.propagate(grid, &sky_seeds);
+
+        // ── 云影：给天空光乘一张平滑噪声图 ──
+        //
+        // **必须作用在传播之后**，不能只改顶部那一排种子的强度：
+        // `absorb = 3` 时横向扩散很强（相邻列只差 3），顶行的逐列调制会被抹平，
+        // 结果是一条几乎均匀的亮带，根本不是"岛"。
+        // 乘在最终场上才是"云在天上挡住了一片天"这个物理图像。
+        //
+        // 只乘天空光：云挡得住太阳，挡不住玩家放的灯。
+        if self.patchiness > 0.0 {
+            self.ensure_mask(grid.cols, grid.rows);
+            for i in 0..self.len {
+                if self.sky_level[i] > 0 {
+                    self.sky_level[i] = (self.sky_level[i] as f32 * self.mask[i])
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
 
         // ── 点光源 ──
         let mut lamp_seeds: Vec<(usize, u8)> = Vec::new();
@@ -220,6 +270,24 @@ impl Light {
         level
     }
 
+    /// 保证噪声图和当前参数匹配。参数没变就直接用缓存。
+    ///
+    /// 为什么要缓存：`rebuild` 在地形画笔的每一帧都会被调用，
+    /// 而 30k 格 × 2 个八度 × 4 次散列约 1 ms —— 每帧重算会让画笔明显卡顿。
+    fn ensure_mask(&mut self, cols: usize, rows: usize) {
+        let key = (
+            cols as u32,
+            rows as u32,
+            self.patchiness.to_bits(),
+            self.mask_seed,
+        );
+        if self.mask_key == key && self.mask.len() == self.len {
+            return;
+        }
+        self.mask = build_cloud_mask(cols, rows, self.patchiness, self.mask_seed);
+        self.mask_key = key;
+    }
+
     /// 取某格光强（越界返回 0）
     #[inline]
     pub fn at(&self, grid: &Grid, col: i32, row: i32) -> u8 {
@@ -292,6 +360,108 @@ fn absorb_for(rows: usize) -> u8 {
 #[inline]
 pub fn blocks_light(ty: u8) -> bool {
     ty != ct::EMPTY && cell_type::is_terrain(ty) && !cell_type::is_passable(ty)
+}
+
+// ────────────────────────────── 云影噪声 ──────────────────────────────
+//
+// 天空光透射率 = 1 − p·(1 − 噪声)。p = 0 时恒为 1（旧行为），p = 1 时完全由噪声决定。
+// 噪声必须**确定性**：同一个 (尺寸, p, 种子) 每次都要生成同一张图，
+// 否则改一次地形（触发 rebuild）云就跳一下。
+
+/// 32 位整数散列 → `[0,1)`。用来生成噪声的格点值。
+#[inline]
+fn hash2(x: i32, y: i32, seed: u32) -> f32 {
+    let mut h = seed
+        ^ (x as u32).wrapping_mul(0x9E37_79B9)
+        ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^= h >> 16;
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+/// 三次平滑（smoothstep），让格点之间不是折线。
+#[inline]
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// 横向**周期**的值噪声。
+///
+/// 必须周期：`wrap_edges = true` 时第 0 列和最后一列是相邻的，
+/// 非周期噪声会在接缝上留一条突兀的直线。
+/// 做法是把 x 方向的格点下标对 `period` 取模，`period` 由"列数 / 格宽"取整而来，
+/// 再把实际格宽校正成 `列数 / period`，于是左右天然对齐。
+fn periodic_noise(col: f32, row: f32, cell: f32, cols: usize, seed: u32, offset: f32) -> f32 {
+    let period = ((cols as f32 / cell).round() as i32).max(1);
+    let cw = cols as f32 / period as f32;
+    // **采样点要避开格线**：如果世界第 0 行/第 0 列正好落在噪声的整数格线上，
+    // 那里只有一条插值切片，取值会被压窄（实测顶行只剩 195~255，
+    // 明明是"云"却看着像一条均匀的亮带）。偏移量对环绕没有影响：
+    // `col` 加常数不改变小数部分，格点下标照样按 `period` 取模。
+    let x = col / cw + offset;
+    let y = row / cell + offset * 1.7;
+    let xi = x.floor();
+    let yi = y.floor();
+    let u = smooth(x - xi);
+    let v = smooth(y - yi);
+    let x0 = (xi as i32).rem_euclid(period);
+    let x1 = (x0 + 1) % period;
+    let y0 = yi as i32;
+    let a = hash2(x0, y0, seed);
+    let b = hash2(x1, y0, seed);
+    let c = hash2(x0, y0 + 1, seed);
+    let d = hash2(x1, y0 + 1, seed);
+    let top = a + (b - a) * u;
+    let bot = c + (d - c) * u;
+    top + (bot - top) * v
+}
+
+/// 生成整张天空光透射率图（0~1，越大越透）。
+///
+/// 两个八度：大的（44 格）定"光岛在哪"，小的（17 格）定"岛的边缘有多碎"。
+/// 权重 0.65 / 0.35 —— 主八度必须明显占优，否则岛会被打散成斑点。
+fn build_cloud_mask(cols: usize, rows: usize, p: f32, seed: u32) -> Vec<f32> {
+    let p = p.clamp(0.0, 1.0);
+    let mut out = vec![1.0f32; cols * rows];
+    if p <= 0.0 {
+        return out;
+    }
+    // (格宽, 权重, 采样偏移)。两个八度的偏移必须不同，否则它们在同一条格线上相关，
+    // 细节会被主八度吃掉，看不出"碎边"。
+    const OCTAVES: [(f32, f32, f32); 2] = [(44.0, 0.65, 0.37), (17.0, 0.35, 0.71)];
+    // 两个八度一平均，取值会往 0.5 挤（实测原始噪声只落在 0.25~0.75），
+    // 直接用的话"最暗的岛"也还有 60% 的光，根本不算暗。这里拉一次对比度并夹紧——
+    // 夹到 0/1 的部分就是"实心暗块 / 实心亮块"，正好是云该有的样子。
+    const CONTRAST: f32 = 3.0;
+
+    // 第一遍：算原始噪声。
+    let mut raw = vec![0.0f32; cols * rows];
+    let mut sum = 0.0f32;
+    for r in 0..rows {
+        for c in 0..cols {
+            let mut n = 0.0;
+            for (cell, w, off) in OCTAVES {
+                n += w * periodic_noise(c as f32, r as f32, cell, cols, seed, off);
+            }
+            raw[r * cols + c] = n;
+            sum += n;
+        }
+    }
+
+    // **先去掉均值偏差再拉对比度**。小世界里主八度只有几个格点，
+    // 实际均值可能偏到 0.35（实测 120×60、p=1 时就是这样），
+    // 那等于"云影"顺带把世界调暗了 30%，A/B 对比就分不清是"碎片化"还是"变暗"的功劳。
+    // 归一化之后 `p` 变成一个**纯粹的碎片化旋钮**：p=1 永远约等于"平均一半的光，
+    // 但一半的地方更亮、一半更暗"。想单独测"变暗"就把「天空光」往下拨。
+    let mean = if raw.is_empty() { 0.5 } else { sum / raw.len() as f32 };
+    for (i, n) in raw.iter().enumerate() {
+        let stretched = ((*n - mean) * CONTRAST + 0.5).clamp(0.0, 1.0);
+        out[i] = 1.0 - p * (1.0 - stretched);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -494,5 +664,135 @@ mod tests {
         assert_eq!(l.absorb, 3, "150 行的 absorb 应该是 3");
         assert!(l.at(&g, 0, 84) > 0, "第 84 行还有光");
         assert_eq!(l.at(&g, 0, 85), 0, "第 85 行归零");
+    }
+
+    // ── 批次 10.5：云影（天空光的空间碎片化）──
+
+    /// `patchiness = 0` 必须**逐位**等于旧行为：云影是可选效果，不能悄悄改基线。
+    #[test]
+    fn patchiness_zero_leaves_the_field_untouched() {
+        let g = grid(40, 30);
+        let mut plain = Light::new(40, 30);
+        plain.rebuild(&g);
+        let before = plain.level.clone();
+
+        let mut cloudy = Light::new(40, 30);
+        cloudy.patchiness = 0.0;
+        cloudy.mask_seed = 12345;
+        cloudy.rebuild(&g);
+        assert_eq!(cloudy.level, before, "云影 0 时不应改变任何一格");
+    }
+
+    /// 云影必须真的**在水平方向**造出明暗：顶行既有接近满照的列，也有接近全黑的列。
+    ///
+    /// 这条是在验"光岛"这件事本身。如果实现成只调制顶行种子的强度，
+    /// 横向扩散（absorb = 3，相邻列只差 3）会把调制抹平，测试会挂在这里。
+    #[test]
+    fn clouds_make_light_patchy() {
+        let g = grid(120, 60);
+        let mut l = Light::new(120, 60);
+        l.patchiness = 1.0;
+        l.mask_seed = 777;
+        l.rebuild(&g);
+
+        let top: Vec<u8> = (0..120).map(|c| l.at(&g, c, 0)).collect();
+        let hi = *top.iter().max().unwrap();
+        let lo = *top.iter().min().unwrap();
+        assert!(hi > 200, "顶行应该有接近满照的列，实测最亮 {}", hi);
+        assert!(lo < 80, "顶行应该有很暗的列，实测最暗 {}", lo);
+        assert!(
+            hi as i32 - lo as i32 > 150,
+            "明暗差应该很大（{} vs {}）",
+            hi,
+            lo
+        );
+
+        // 不是"一条亮带"：顶行的取值必须够分散
+        let mut uniq: Vec<u8> = top.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(uniq.len() > 20, "顶行取值应该很分散，实测只有 {} 种", uniq.len());
+
+        // 归一化：p = 1 时平均透射率应该接近 0.5，而不是被"这个种子恰好很阴"带跑。
+        // 这一条守的是 A/B 对比的可解释性——p 必须只代表"碎片化"，不代表"变暗"。
+        let m = build_cloud_mask(120, 60, 1.0, 777);
+        let avg = m.iter().sum::<f32>() / m.len() as f32;
+        assert!(
+            (avg - 0.5).abs() < 0.06,
+            "p=1 时平均透射率应该约 0.5，实测 {:.3}",
+            avg
+        );
+
+        // 真正的"暗区"要够多：只把光调成一片灰不算稀缺。
+        // 实测 CONTRAST = 3.0 时约 14% 的格子透射率 < 0.15、20% > 0.85。
+        let dark = m.iter().filter(|&&v| v < 0.15).count();
+        let bright = m.iter().filter(|&&v| v > 0.85).count();
+        assert!(
+            dark * 100 / m.len() > 8,
+            "透射率 < 0.15 的格子应该占 8% 以上，实测 {}%",
+            dark * 100 / m.len()
+        );
+        assert!(
+            bright * 100 / m.len() > 8,
+            "透射率 > 0.85 的格子应该占 8% 以上，实测 {}%",
+            bright * 100 / m.len()
+        );
+    }
+
+    /// 同一组 (尺寸, p, 种子) 必须生成同一张图；换种子要换一张图。
+    ///
+    /// 这一条守的是"地形画笔触发 rebuild 时云不能跳"——噪声如果带随机性，
+    /// 每画一格墙云就闪一下。
+    #[test]
+    fn clouds_are_deterministic_and_seeded() {
+        let g = grid(60, 40);
+        let build = |seed: u32| {
+            let mut l = Light::new(60, 40);
+            l.patchiness = 0.8;
+            l.mask_seed = seed;
+            l.rebuild(&g);
+            l.level.clone()
+        };
+        assert_eq!(build(1), build(1), "同种子必须逐位相同");
+        assert_ne!(build(1), build(2), "不同种子应该长出不同的云");
+    }
+
+    /// 云只挡太阳，**不挡玩家放的灯**。
+    #[test]
+    fn clouds_do_not_dim_lamps() {
+        let g = grid(60, 60);
+        let mut clear = Light::new(60, 60);
+        clear.set_source(30, 30, 255);
+        clear.rebuild(&g);
+        let lamp_before = clear.lamp_level.clone();
+
+        let mut cloudy = Light::new(60, 60);
+        cloudy.patchiness = 1.0;
+        cloudy.mask_seed = 999;
+        cloudy.set_source(30, 30, 255);
+        cloudy.rebuild(&g);
+        assert_eq!(cloudy.lamp_level, lamp_before, "云影不该影响点光源分量");
+        assert!(
+            cloudy.level[30 * 60 + 30] >= lamp_before[30 * 60 + 30],
+            "灯下总光强不该比灯本身暗"
+        );
+    }
+
+    /// 噪声在横向必须**首尾相接**：世界是左右环绕的，接缝上不能出现一条硬边。
+    #[test]
+    fn clouds_wrap_horizontally() {
+        let cols = 200;
+        let cell = 44.0;
+        for seed in [0u32, 7, 424242] {
+            let a = periodic_noise(0.0, 13.0, cell, cols, seed, 0.37);
+            let b = periodic_noise(cols as f32, 13.0, cell, cols, seed, 0.37);
+            assert!(
+                (a - b).abs() < 1e-6,
+                "第 0 列与第 {} 列（环绕后是同一格）应该相等：{} vs {}",
+                cols,
+                a,
+                b
+            );
+        }
     }
 }

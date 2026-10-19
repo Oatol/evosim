@@ -19,6 +19,7 @@
 //! - `freewalk` —— 食物不挡移动（踩碎的能量进热池）
 //! - `metab=M` —— 全局消耗量倍率，`metab=0` 是批次 10 之前的基线
 //! - `prodcost=C` —— 生产者细胞每 tick 的消耗（默认 0.010），用来找异养的门槛
+//! - `cloud=P` —— 云影强度（批次 10.5）：把天空光切成光岛 + 暗廊
 
 use evosim_core::cell_type::ct;
 use evosim_core::config::Config;
@@ -45,6 +46,10 @@ fn main() {
             || a.starts_with("metab=")
             || a == "prodcost"
             || a.starts_with("prodcost=")
+            || a == "cloud"
+            || a.starts_with("cloud=")
+            || a == "sun"
+            || a.starts_with("sun=")
         {
             flags.push(a);
         } else {
@@ -117,6 +122,30 @@ fn main() {
     if let Some(c) = prodcost {
         cfg.cells[ct::PRODUCER as usize].cost = c;
     }
+    // `cloud=P`：云影强度（批次 10.5）。把天空光切成光岛 + 暗廊。
+    let mut cloud: Option<f64> = None;
+    for f in &flags {
+        if *f == "cloud" {
+            cloud = Some(1.0);
+        } else if let Some(v) = f.strip_prefix("cloud=") {
+            cloud = v.parse().ok();
+        }
+    }
+    if let Some(p) = cloud {
+        cfg.world.sky_patchiness = p;
+    }
+    // `sun=X`：天空光强度（0~1）。用来做云影的**对照组**：
+    // `cloud=1` 把平均透射率压到 0.5，那"同样暗但不碎"的世界就是 `sun=0.5`。
+    // 没有这组对照，就分不清"碎片化"和"变暗"各自贡献了多少。
+    let mut sun: Option<f64> = None;
+    for f in &flags {
+        if let Some(v) = f.strip_prefix("sun=") {
+            sun = v.parse().ok();
+        }
+    }
+    if let Some(v) = sun {
+        cfg.world.sun_intensity = v;
+    }
     // 世界尺寸（小世界 = 有光区很快被填满）
     if let Some(n) = pos.get(2).and_then(|s| s.parse::<usize>().ok()) {
         cfg.world.cols = n;
@@ -147,11 +176,12 @@ fn main() {
         seed,
         w.config.life.photosynthesis_rate,
         format!(
-            " · 遮挡 k={:.2} · 咬合 {:.2} · 代谢 {:.1} · 生产者消耗 {:.3}{}",
+            " · 遮挡 k={:.2} · 咬合 {:.2} · 代谢 {:.1} · 生产者消耗 {:.3} · 云影 {:.2}{}",
             w.config.life.shade_strength,
             w.config.life.bite_rate,
             w.config.life.metabolism_scale,
             w.config.cells[ct::PRODUCER as usize].cost,
+            w.config.world.sky_patchiness,
             if freewalk { " · 食物不挡路" } else { "" }
         )
     );
@@ -213,7 +243,7 @@ fn profile(w: &World) {
         }
         let n = ((end - r) * cols).max(1) as f64;
         println!(
-            "  行 {:>3}–{:>3}  光强 {:>3}  有光 {:>5} 格  占用 {:>5.1}%",
+            "  行 {:>3}–{:>3}  光强 {:>5.1}  有光 {:>5} 格  占用 {:>5.1}%",
             r,
             end - 1,
             lum as f64 / n,

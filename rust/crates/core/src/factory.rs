@@ -85,12 +85,39 @@ pub fn is_area_empty(world: &World, col: i32, row: i32, radius: i32) -> bool {
     true
 }
 
-/// 在世界中央投放生命起源
+/// 在世界里投放生命起源。
+///
+/// **位置不是写死的**：在"上部三分之一"这个带子里找**实际最亮**的一格。
+///
+/// 这条是批次 10 踩出来的。当时把始祖从世界正中（光强 11/255）挪到
+/// `rows / 4` 就以为够了；结果批次 10.5 加上云影之后，固定的那个点
+/// 可能正好落在暗斑里，1002 的始祖付不起代谢开销，**全灭**。
+///
+/// 只要"光在哪"不再是均匀的，始祖的坐标就不能是常数。
+/// 带子限制在上部是为了保住"生命从地表附近开始"的样子——找全图最亮会跑到第 0 行。
 pub fn seed_origin_of_life(world: &mut World) -> u32 {
-    let col = (world.grid.cols / 2) as i32;
-    let row = (world.grid.rows / 4) as i32;
+    // 先让光场跟上地形（`generate_demo_world` 只置脏标记，不重算）
+    world.update_fields();
 
-    // 先把中心一小块清空
+    let cols = world.grid.cols as i32;
+    let rows = world.grid.rows as i32;
+    let lo = (rows / 8).max(0);
+    let hi = (rows / 2).max(lo + 1);
+
+    let mut best = ((cols / 2).max(0), (rows / 4).max(0));
+    let mut best_light = -1i32;
+    for row in lo..hi {
+        for col in 0..cols {
+            let l = world.light.sky_at(&world.grid, col, row) as i32;
+            if l > best_light {
+                best_light = l;
+                best = (col, row);
+            }
+        }
+    }
+    let (col, row) = best;
+
+    // 先把这一小块清空
     for dr in -3..=3 {
         for dc in -3..=3 {
             if let Some(index) = world.grid.index(col + dc, row + dr) {

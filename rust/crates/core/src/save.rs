@@ -66,7 +66,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v11：`Grid.food` 从 `Vec<f32>` 改成 `Vec<f64>`，`SaveFile` 加了三个能量池
 /// （`heat_pool` / `energy_wasted` / `energy_injected`），批次 10（维持成本 + 守恒审计）。
 /// 三个池子以前**根本没存**——读档之后账目从 0 重新开始，审计会直接红。
-pub const VERSION: u32 = 11;
+/// v12：`WorldCfg` 加了 `sky_patchiness`，`Light` 加了 `patchiness`（批次 10.5 云影）。同理。
+pub const VERSION: u32 = 12;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
@@ -293,6 +294,9 @@ fn into_world(save: SaveFile) -> World {
     world.species = species;
     world.fields = fields;
     world.light = light;
+    // 云影的噪声图**不进存档**（30k 个 f32 太重，而且它是纯函数）：
+    // 种子永远等于世界 RNG 的种子，读档时重新灌一次、重建时现算。
+    world.light.mask_seed = world.rng.seed();
     world.heat_pool = heat_pool;
     world.energy_wasted = energy_wasted;
     world.energy_injected = energy_injected;

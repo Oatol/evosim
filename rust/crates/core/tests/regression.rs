@@ -228,3 +228,72 @@ fn energy_ledger_balances() {
         );
     }
 }
+
+/// 云影（批次 10.5）：开着也要活得下去，而且**能量账照样要平**。
+///
+/// 云影只改 `sky_level` 的数值，不动任何能量流向，所以守恒等式必须仍然成立——
+/// 这条顺带守住"以后给光场加任何滤镜，都不能悄悄改能量"。
+#[test]
+fn ecosystem_survives_clouds_and_the_ledger_still_balances() {
+    let mut cfg = Config::default();
+    cfg.world.sky_patchiness = 1.0;
+    let mut w = World::new(cfg, Rng::new(1002));
+    generate_demo_world(&mut w, 1.0, 1.0);
+    seed_origin_of_life(&mut w);
+    spawn_population(&mut w, 8, 3);
+
+    // 始祖必须落在**真的有光**的地方：批次 10.5 的第一次实测就是栽在这上面，
+    // 固定坐标正好压在暗斑里，1002 全灭。
+    let origin = &w.organisms[0];
+    let lit = w.light.sky_at(&w.grid, origin.col, origin.row);
+    assert!(
+        lit > 100,
+        "始祖所在格光强只有 {}，应该落在光岛里",
+        lit
+    );
+
+    for _ in 0..2000 {
+        w.step();
+    }
+    let n = alive(&w).len();
+    assert!(n > 50, "云影 1.0 下 2000 tick 只剩 {} 个个体——生态崩了", n);
+
+    let a = w.energy_audit();
+    assert!(
+        a.drift().abs() < 1e-9 * a.stored().max(1.0),
+        "云影下能量账对不上：注入 {:.6}，存量 {:.6}，残差 {:.3e}",
+        a.injected,
+        a.stored(),
+        a.drift()
+    );
+}
+
+/// 同样的**平均**光照下，碎片化的光比整体变暗能养活更多生命。
+///
+/// 这是云影存在的正面理由：`cloud = 1` 把平均透射率压到 0.5，
+/// 但保住了"总有一块地方是满照"；`sun = 0.5` 则把每一处都压暗一半。
+/// 实测（10000 tick）前者 743 只、后者 184 只，**差 4 倍**。
+#[test]
+fn fragmented_light_feeds_more_than_uniform_dimness() {
+    let run = |cloud: f64, sun: f64| -> usize {
+        let mut cfg = Config::default();
+        cfg.world.sky_patchiness = cloud;
+        cfg.world.sun_intensity = sun;
+        let mut w = World::new(cfg, Rng::new(1001));
+        generate_demo_world(&mut w, 1.0, 1.0);
+        seed_origin_of_life(&mut w);
+        spawn_population(&mut w, 8, 3);
+        for _ in 0..3000 {
+            w.step();
+        }
+        alive(&w).len()
+    };
+    let patchy = run(1.0, 1.0);
+    let dim = run(0.0, 0.5);
+    assert!(
+        patchy > dim,
+        "碎片化的光（{} 只）应该比同样平均亮度的均匀暗（{} 只）养活更多",
+        patchy,
+        dim
+    );
+}

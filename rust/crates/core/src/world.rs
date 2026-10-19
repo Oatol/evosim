@@ -165,6 +165,9 @@ impl World {
         };
         w.init_food_index();
         w.init_terrain_index();
+        // 云影的噪声种子跟世界种子走：不同种子的世界"云长在不一样的地方"，
+        // 但同一个种子的世界永远长一样（地形画笔触发 rebuild 时云不能跳）。
+        w.light.mask_seed = w.rng.seed();
         // 建世界时地形是空的，但 `light` 的初值全 0（全黑）。这里先算一次，
         // 否则要等到第一次 `update_fields()` 才亮起来——中间那几帧光合会白算。
         w.refresh_light();
@@ -1442,7 +1445,8 @@ impl World {
         // 光场只在必要时重算：它是地形/光源/天空光的纯函数，这三样都变得很慢。
         // 天空光单独比对，因为它由滑块驱动，随时可能变。
         let sky = self.sky_level();
-        if self.light_dirty || self.light.sky != sky {
+        let patch = self.patchiness();
+        if self.light_dirty || self.light.sky != sky || self.light.patchiness != patch {
             self.refresh_light();
         }
         let World { grid, fields, .. } = self;
@@ -1461,10 +1465,17 @@ impl World {
     /// 重算光场（改了光源或天空光之后调）。
     fn refresh_light(&mut self) {
         let sky = self.sky_level();
+        let patch = self.patchiness();
         self.light_dirty = false;
         let World { grid, light, .. } = self;
         light.sky = sky;
+        light.patchiness = patch;
         light.rebuild(grid);
+    }
+
+    /// 云影强度（0~1）。面板上拖动时逐帧比较，所以单独抽出来。
+    fn patchiness(&self) -> f32 {
+        self.config.world.sky_patchiness.clamp(0.0, 1.0) as f32
     }
 
     // ────────────────────────────── 点光源 ──────────────────────────────

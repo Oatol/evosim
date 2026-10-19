@@ -594,6 +594,31 @@ pub fn draw(
                 if (sun - before_sun).abs() > 1e-9 {
                     cfg.world.sun_intensity = sun;
                 }
+
+                // ── 云影（批次 10.5）──
+                //
+                // 把天空光乘一张平滑噪声图：亮的成"光岛"，暗的成"暗廊"。
+                // 目的不是让世界变暗，而是把**明暗交界**从一条水平线拉成几千格的锯齿——
+                // 批次 10 的结论是"光太均匀"才是专性异养的瓶颈。
+                //
+                // 平均透射率被归一化过（p=1 时约 0.5），所以这个旋钮只代表"碎片化"，
+                // 不代表"变暗"。想单独测变暗就把上面的「天空光」往下拨。
+                let before_patch = cfg.world.sky_patchiness;
+                let mut patch = before_patch;
+                ui.add(
+                    egui::Slider::new(&mut patch, 0.0..=1.0)
+                        .text("云影")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "把天空光切成光岛 + 暗廊（默认 0 = 关闭，逐位等于旧行为）。
+                     1.0 时约一半的格子透射率低于 15%、一半高于 85%。
+                     只挡太阳，不挡你自己放的点光源。",
+                );
+                if (patch - before_patch).abs() > 1e-9 {
+                    cfg.world.sky_patchiness = patch;
+                }
                 let before_photo = cfg.life.photosynthesis_rate;
                 let mut photo = before_photo;
                 ui.add(
