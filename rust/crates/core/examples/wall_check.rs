@@ -8,9 +8,14 @@
 //! 1. **有光区的占用率** —— 有光格子里有多少被生物身体压着
 //! 2. **被困住的个体数** —— 四邻里一个空格都没有的个体（动不了 = 进不去）
 //! 3. **食物存量** —— 有光区里还剩多少 FOOD 格（狩猎生物的饭）
-//! 4. **捕食者占比** —— 带杀手/嘴的个体有多少
+//! 4. **捕食者占比** —— 带杀手/嘴的个体有多少，以及**异养**（有嘴、没有生产者）有多少
 //!
-//! 用法：`cargo run --release -p evosim-core --example wall_check -- [ticks] [seed]`
+//! 用法：`cargo run --release -p evosim-core --example wall_check -- [ticks] [seed] [边长] [光合速率] [shade=K] [bite=R] [lamp]`
+//!
+//! 标志位（和位置参数分开认，见下面的解析）：
+//! - `shade=K` / `shade` —— 遮挡强度，`shade=0` 是批次 9 之前的基线
+//! - `bite=R` / `bite` —— 咬合速率，`bite=0` 是批次 9.5 之前的基线
+//! - `lamp` —— 关掉天空光，只放 4 盏灯
 
 use evosim_core::cell_type::ct;
 use evosim_core::config::Config;
@@ -26,7 +31,13 @@ fn main() {
     let mut flags: Vec<&str> = Vec::new();
     let mut pos: Vec<&str> = Vec::new();
     for a in &argv {
-        if a == "lamp" || a == "self" || a == "shade" || a.starts_with("shade=") {
+        if a == "lamp"
+            || a == "self"
+            || a == "shade"
+            || a.starts_with("shade=")
+            || a == "bite"
+            || a.starts_with("bite=")
+        {
             flags.push(a);
         } else {
             pos.push(a);
@@ -52,9 +63,23 @@ fn main() {
         }
     }
 
+    // `bite=R`：咬合速率。`bite=0` 就是批次 9.5 之前的基线（嘴只能吃食物），
+    // 用来做「嘴咬活体到底救不救得回捕食者」的 A/B。
+    let mut bite: Option<f64> = None;
+    for f in &flags {
+        if *f == "bite" {
+            bite = Some(0.3);
+        } else if let Some(v) = f.strip_prefix("bite=") {
+            bite = v.parse().ok();
+        }
+    }
+
     let mut cfg = Config::default();
     if let Some(k) = shade {
         cfg.life.shade_strength = k;
+    }
+    if let Some(r) = bite {
+        cfg.life.bite_rate = r;
     }
     // 世界尺寸（小世界 = 有光区很快被填满）
     if let Some(n) = pos.get(2).and_then(|s| s.parse::<usize>().ok()) {
@@ -85,9 +110,14 @@ fn main() {
         w.grid.rows,
         seed,
         w.config.life.photosynthesis_rate,
-        format!(" · 遮挡 k={:.2}", w.config.life.shade_strength)
+        format!(
+            " · 遮挡 k={:.2} · 咬合 {:.2}",
+            w.config.life.shade_strength, w.config.life.bite_rate
+        )
     );
-    println!("tick   个体  有光格  有光占用%  致密%  被困个体  有光食物  杀手%  嘴%  眼%  移动%  平均体型");
+    println!(
+        "tick   个体  有光格  有光占用%  致密%  被困个体  有光食物  杀手%  嘴%  异养%  眼%  移动%  平均体型"
+    );
 
     for t in 0..=ticks {
         if t % 500 == 0 {
@@ -210,10 +240,18 @@ fn report(w: &World, tick: u64) {
     }
 
     let count = |f: u16| orgs.iter().filter(|o| o.anatomy.has(f)).count() as f64;
+    // 异养：有嘴但**没有**生产者细胞 —— 它必须靠吃别人活着。
+    // 这是「捕食生态位有没有站住」最直接的读数：光合生物自己就是生产者，
+    // 光看「嘴%」会把"顺手长了一张嘴的生产者"也算进去。
+    let hetero = orgs
+        .iter()
+        .filter(|o| o.anatomy.has(evosim_core::anatomy::Flags::MOUTH)
+            && !o.anatomy.has(evosim_core::anatomy::Flags::PRODUCER))
+        .count() as f64;
     let cells: usize = orgs.iter().map(|o| o.cell_count()).sum();
 
     println!(
-        "{:<6} {:>5} {:>7} {:>9.1}% {:>6.1}% {:>9} {:>9} {:>6.1} {:>4.1} {:>4.1} {:>5.1} {:>9.2}",
+        "{:<6} {:>5} {:>7} {:>9.1}% {:>6.1}% {:>9} {:>9} {:>6.1} {:>4.1} {:>5.1} {:>4.1} {:>5.1} {:>9.2}",
         tick,
         orgs.len(),
         lit_cells,
@@ -223,6 +261,7 @@ fn report(w: &World, tick: u64) {
         lit_food,
         count(evosim_core::anatomy::Flags::KILLER) * 100.0 / n,
         count(evosim_core::anatomy::Flags::MOUTH) * 100.0 / n,
+        hetero * 100.0 / n,
         count(evosim_core::anatomy::Flags::EYE) * 100.0 / n,
         count(evosim_core::anatomy::Flags::MOVER) * 100.0 / n,
         cells as f64 / n,

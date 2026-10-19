@@ -593,7 +593,7 @@ pub fn draw(
 
                 // 遮挡：给「光合生物挤成一道墙」定价。
                 //
-                // 生产者正上方 8 行内每有一个**别的个体**的身体格，天空光就乘 (1-k)。
+                // 生产者正上方 8 行内每有一个身体格（**含自己的身体**），天空光就乘 (1-k)。
                 // 墙内部的细胞照不到光、却照样付 upkeep → 墙从内部塌掉。
                 // 只作用于天空光：身体挡得住头顶下来的光，挡不住侧面照进来的灯。
                 let before_shade = cfg.life.shade_strength;
@@ -611,6 +611,48 @@ pub fn draw(
                 );
                 if (shade - before_shade).abs() > 1e-9 {
                     cfg.life.shade_strength = shade;
+                }
+
+                // ── 捕食（批次 9.5：嘴咬活体）──
+                //
+                // 这一对旋钮决定「吃活的」值不值得。批次 9 的诊断结论是：
+                // 杀手能杀人，但尸体撒在死者身上、凶手够不着，于是捕食的实际
+                // 回报低于当生产者，杀手和移动器一起灭绝。把回报接到嘴上之后，
+                // 捕食才第一次有正收益。
+                //
+                // 两个数要一起看：`咬合速率` 是"一口能吃多快"，`消化效率` 是
+                // "吃到嘴的留下多少"。后者 < 1 是生态学里的营养级损耗，
+                // 也是批次 10 守恒审计里唯一允许"离开生物圈"的常设项。
+                let before_bite = cfg.life.bite_rate;
+                let mut bite = before_bite;
+                ui.add(
+                    egui::Slider::new(&mut bite, 0.0..=2.0)
+                        .text("咬合速率")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "每个嘴细胞每 tick 能从相邻活体身上抽走多少能量（默认 0.30）。\n\
+                     抽走量被对方当时剩的能量卡住——咬空壳什么也得不到。\n\
+                     0 = 关闭「咬活体」，嘴只能吃食物和尸体。",
+                );
+                if (bite - before_bite).abs() > 1e-9 {
+                    cfg.life.bite_rate = bite;
+                }
+                let before_eff = cfg.life.bite_efficiency;
+                let mut eff = before_eff;
+                ui.add(
+                    egui::Slider::new(&mut eff, 0.0..=1.0)
+                        .text("消化效率")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "抽走的能量有多少变成自己的，其余散掉（默认 0.80）。\n\
+                     小于 1 是捕食的固有代价：营养级每升一级都会损耗。",
+                );
+                if (eff - before_eff).abs() > 1e-9 {
+                    cfg.life.bite_efficiency = eff;
                 }
                 ui.separator();
                 ui.checkbox(&mut cfg.mutation.use_global_mutability, "启用全局变异率");

@@ -163,7 +163,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::WALL, "WALL", "wall", "墙")
     },
     CellDef {
-        desc: "吃掉四邻域里的食物，每份食物按「食物量倍率」换算能量。",
+        desc: "吃掉四邻域里的食物；也会咬相邻的活体，把对方身上的能量抽过来。",
         is_body_cell: true,
         paintable: true,
         visible: true,

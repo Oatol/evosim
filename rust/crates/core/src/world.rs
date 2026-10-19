@@ -893,14 +893,33 @@ impl World {
                 // 摄取倍率只乘**这一格剩下的能量**——食物本身带存量之后，
                 // 「一份食物值多少」不再由全局常数决定，而是看它被吃时还剩多少。
                 let mult = self.config.attr(cell.type_id, AttrField::BiteMult);
+                let my_id = self.organisms[i].id;
                 for k in 0..4 {
                     let n = NEIGHBORS_4[k];
-                    if let Some(index) = self.grid.index(col + n.0, row + n.1) {
-                        if self.grid.types[index] == ct::FOOD {
-                            let e = self.grid.food[index] as f64;
-                            self.reveal_floor(index);
-                            self.organisms[i].energy += e * mult;
-                        }
+                    let Some(index) = self.grid.index(col + n.0, row + n.1) else {
+                        continue;
+                    };
+                    if self.grid.types[index] == ct::FOOD {
+                        let e = self.grid.food[index] as f64;
+                        self.reveal_floor(index);
+                        self.organisms[i].energy += e * mult;
+                        continue;
+                    }
+                    // ── 咬活体（批次 9.5）──
+                    //
+                    // 批次 9 的诊断：杀手能杀人，但尸体按格撒在死者身上，凶手只贴着
+                    // 其中一格，大部分能量它够不着——捕食的实际回报远低于当生产者，
+                    // 于是杀手和移动器一起灭绝。这里把回报直接接到嘴上：抽多少立刻到账。
+                    //
+                    // 同一格既可能是食物又可能是活体？不可能——`grid.types` 是单层，
+                    // 所以上面 `continue` 掉食物分支之后，剩下有主的一定是活体。
+                    let owner = self.grid.owners[index];
+                    if owner < 0 || owner == my_id as i32 {
+                        continue;
+                    }
+                    let gain = self.bite_from(owner as u32, index, mult);
+                    if gain > 0.0 {
+                        self.organisms[i].energy += gain;
                     }
                 }
             }
@@ -1005,6 +1024,55 @@ impl World {
             }
             Behavior::Eye => {}
         }
+    }
+
+    /// 从 `victim_id` 身上抽走一点能量，返回**实际到账**的量（已扣消化损耗）。
+    ///
+    /// `index` 是被咬的那一格——只有它可能是装甲格，所以减免按格查而不是按个体查。
+    /// 这一点和杀手那边一致：一个个体身上有装甲格不等于全身免疫。
+    ///
+    /// 三条边界：
+    /// - **被对方身上剩的能量卡住**：抽不出超过它有的。咬一口空壳 = 0，
+    ///   不会变成负数，也不会凭空造出能量。
+    /// - **装甲减免按 `ArmorResist` 走**，出厂 1.0 等于这一格咬不动。
+    ///   注意这是"快路径"式的全免（直接返回 0），和杀手那边的 `resist >= 1.0` 对齐。
+    /// - **消化损耗进 `energy_wasted`**：`1 - bite_efficiency` 那部分离开了生物圈。
+    ///   批次 10 的守恒审计要用它，所以现在就得记上，不能让它悄悄消失。
+    fn bite_from(&mut self, victim_id: u32, index: usize, mult: f64) -> f64 {
+        let rate = self.config.life.bite_rate;
+        if !(rate > 0.0) {
+            return 0.0;
+        }
+        let mut cut = 1.0;
+        if self.grid.types[index] == ct::ARMOR {
+            let resist = self.config.attr(ct::ARMOR, AttrField::ArmorResist);
+            if resist >= 1.0 {
+                return 0.0;
+            }
+            if resist > 0.0 {
+                cut = 1.0 - resist;
+            }
+        }
+        let want = rate * mult * cut;
+        if !(want > 0.0) {
+            return 0.0;
+        }
+        let Some(vi) = self.organism_index(victim_id) else {
+            return 0.0;
+        };
+        if !self.organisms[vi].alive {
+            return 0.0;
+        }
+        let have = self.organisms[vi].energy;
+        if !(have > 0.0) {
+            return 0.0;
+        }
+        let taken = want.min(have);
+        self.organisms[vi].energy = have - taken;
+        let eff = self.config.life.bite_efficiency.clamp(0.0, 1.0);
+        let gain = taken * eff;
+        self.energy_wasted += taken - gain;
+        gain
     }
 
     // ────────────────────────────── 伤害与死亡 ──────────────────────────────
@@ -1680,6 +1748,161 @@ mod tests {
             base
         );
         assert_eq!(run(0.0), 0.0, "摄取倍率 0 应该吃不到任何能量");
+    }
+
+    // ── 批次 9.5：嘴咬活体 ──
+
+    /// 捕食者在 (3,3)，猎物在 (4,3)——正好贴着捕食者嘴细胞的右邻。
+    ///
+    /// 两个个体要分开 `add_organism`（同一个 id 的话 `owners` 里就分不出敌我，
+    /// 而"不能咬自己"正是要测的东西之一）。
+    fn predator_and_prey(
+        pred: &[(u8, i32, i32)],
+        prey: &[(u8, i32, i32)],
+    ) -> (World, usize, usize) {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+        let mut a = Organism::new(&w.config, &mut rng, &w.grid, 3, 3);
+        for (t, dx, dy) in pred {
+            a.anatomy.add_cell(*t, *dx, *dy, 0);
+        }
+        a.anatomy.recompute();
+        let pid = w.add_organism(a);
+        let mut b = Organism::new(&w.config, &mut rng, &w.grid, 4, 3);
+        for (t, dx, dy) in prey {
+            b.anatomy.add_cell(*t, *dx, *dy, 0);
+        }
+        b.anatomy.recompute();
+        let vid = w.add_organism(b);
+        let pi = w.organism_index(pid).unwrap();
+        let vi = w.organism_index(vid).unwrap();
+        (w, pi, vi)
+    }
+
+    /// 直接跑嘴细胞的结算，绕过 `act_organism`（它末尾含繁殖判定，
+    /// 会把这口饭扣成繁殖成本——批次 6 踩过）。
+    fn bite_once(w: &mut World, pi: usize) {
+        let cell = w.organisms[pi].anatomy.cells[0];
+        w.run_cell_function(pi, cell);
+    }
+
+    /// 嘴会把相邻活体身上的能量抽过来，到账的只是 `bite_efficiency` 那部分。
+    #[test]
+    fn mouth_drains_a_living_neighbour() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 0.8;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.7).abs() < 1e-9,
+            "猎物应该被抽走 0.3，实测剩 {}",
+            w.organisms[vi].energy
+        );
+        assert!(
+            (w.organisms[pi].energy - 0.24).abs() < 1e-9,
+            "捕食者应该拿到 0.3 × 0.8 = 0.24，实测 {}",
+            w.organisms[pi].energy
+        );
+        assert!(
+            (w.energy_wasted - 0.06).abs() < 1e-9,
+            "消化损耗 0.06 应该进 energy_wasted，实测 {}",
+            w.energy_wasted
+        );
+    }
+
+    /// 抽走量被**对方当时剩的能量**卡住：咬空壳什么也得不到，也不会把对方咬成负数。
+    #[test]
+    fn bite_is_capped_by_what_the_victim_has() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 0.8;
+        w.organisms[vi].energy = 0.05;
+        bite_once(&mut w, pi);
+        assert_eq!(w.organisms[vi].energy, 0.0, "猎物能量不该变成负数");
+        assert!(
+            (w.organisms[pi].energy - 0.04).abs() < 1e-9,
+            "只能拿到 0.05 × 0.8 = 0.04，实测 {}",
+            w.organisms[pi].energy
+        );
+    }
+
+    /// 装甲格按 `ArmorResist` 减免被抽走的能量（出厂 1.0 = 完全免疫）。
+    #[test]
+    fn armor_resists_being_bitten() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::ARMOR, 0, 0)]);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 0.8;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert_eq!(
+            w.organisms[vi].energy, 5.0,
+            "出厂减免 1.0 时装甲格应该完全咬不动"
+        );
+
+        // 调到 0.5：抽走量减半，到账 0.15 × 0.8 = 0.12
+        w.config.cells[ct::ARMOR as usize].armor_resist = 0.5;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.85).abs() < 1e-9,
+            "减免 0.5 应该只抽走 0.15，实测剩 {}",
+            w.organisms[vi].energy
+        );
+        assert!((w.organisms[pi].energy - 0.12).abs() < 1e-9);
+    }
+
+    /// `bite_rate = 0` 等于关掉「咬活体」——但嘴照样吃食物。
+    #[test]
+    fn bite_rate_zero_keeps_mouth_on_food_only() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.0;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert_eq!(w.organisms[vi].energy, 5.0, "关掉之后不该抽走任何能量");
+        assert_eq!(w.organisms[pi].energy, 0.0);
+
+        // 同一套配置下，食物照吃
+        let idx = w.grid.index(3, 2).unwrap();
+        w.set_cell_at(idx, ct::FOOD, -1);
+        bite_once(&mut w, pi);
+        assert!(
+            w.organisms[pi].energy > 0.0,
+            "关掉咬活体不该影响吃食物"
+        );
+    }
+
+    /// 嘴不会咬自己的身体（同一 id 的格子直接跳过）。
+    #[test]
+    fn a_mouth_never_bites_its_own_body() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::STORAGE, 1, 0)]);
+        w.organisms[0].energy = 5.0;
+        let cell = w.organisms[0].anatomy.cells[0];
+        w.run_cell_function(0, cell);
+        assert_eq!(
+            w.organisms[0].energy, 5.0,
+            "嘴不该从自己的身体里抽能量"
+        );
+        assert_eq!(w.energy_wasted, 0.0);
+    }
+
+    /// 摄取倍率同样乘在「咬活体」上——一个嘴细胞越"大"，一口抽得越多。
+    #[test]
+    fn bite_mult_scales_live_biting() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.cells[ct::MOUTH as usize].bite_mult = 2.0;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[pi].energy - 0.6).abs() < 1e-9,
+            "摄取倍率 2.0 应该抽 0.6，实测 {}",
+            w.organisms[pi].energy
+        );
     }
 
     /// 造一个「光合测试个体」：1 个生产者 + 1 个储食，满照，能量清零。
