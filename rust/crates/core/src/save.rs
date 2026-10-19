@@ -73,7 +73,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v14：`WorldCfg` 加了 `ambient_temp` / `temp_span`，`LifeCfg::temp_comfort`
 /// （0–1 比例）改名并换成 `comfort_temp`（摄氏度）。温度场从"绝对 0–255"
 /// 变成"高于环境的温差"。
-pub const VERSION: u32 = 14;
+/// v15：`LifeCfg` 加了 `growth_enabled` / `growth_cost` / `growth_seed_fraction`，
+/// `Organism` 加了 `growth_plan`（批次 12 成长过程）。
+pub const VERSION: u32 = 15;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

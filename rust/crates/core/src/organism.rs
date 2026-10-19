@@ -60,6 +60,14 @@ pub struct Organism {
     pub last_move_ok: bool,
     /// 上一 tick 的能量净收支（正=赚了，负=亏了）
     pub energy_gained_last: f64,
+
+    /// **成长计划**：芽要长成的目标蓝图。`None` = 已经长成（或本来就不是芽）。
+    ///
+    /// 芽出生时只有 1 格，每 tick 从这份蓝图里挑一个「与身体相邻、目标格可放」
+    /// 的细胞长出来，直到长满。**长成之前不能繁殖**——这是「未成年」的全部含义，
+    /// 也是把体型变成"过程中的量"的关键。
+    #[serde(default)]
+    pub growth_plan: Option<Anatomy>,
 }
 
 impl Organism {
@@ -89,6 +97,7 @@ impl Organism {
             turn_cooldown: 0,
             last_move_ok: false,
             energy_gained_last: 0.0,
+            growth_plan: None,
         };
         org.normalize_position(grid);
         org
@@ -170,6 +179,16 @@ impl Organism {
     }
 
     pub fn max_health(&self, cfg: &Config) -> f64 {
+        // **芽按目标蓝图算血量**：真实幼体不是"1 HP 的纸片"，它有储备、有保护，
+        // 只是还没长开。如果按当前格数算，1 格的芽就是 1 HP——
+        // 实测杀手占比会从 14% 暴涨到 50%+，芽刚落地就被吃光，人口从 1359 崩到 117。
+        if let Some(plan) = &self.growth_plan {
+            return plan
+                .cells
+                .iter()
+                .map(|c| cfg.attr(c.type_id, AttrField::Hp))
+                .sum();
+        }
         self.anatomy
             .cells
             .iter()

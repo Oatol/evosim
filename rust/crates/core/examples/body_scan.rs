@@ -70,6 +70,8 @@ fn run(
     photo: f64,
     ambient: f64,
     comfort: f64,
+    growth: bool,
+    gcost: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -96,6 +98,9 @@ fn run(
     // `ambient` / `comfort`：环境温度与舒适温度（摄氏度）
     cfg.world.ambient_temp = ambient;
     cfg.life.comfort_temp = comfort;
+    // `growth` / `gcost`：成长过程与每格生长成本
+    cfg.life.growth_enabled = growth;
+    cfg.life.growth_cost = gcost;
 
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
@@ -207,6 +212,8 @@ fn run_seeds(
     photo: f64,
     ambient: f64,
     comfort: f64,
+    growth: bool,
+    gcost: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -229,7 +236,7 @@ fn run_seeds(
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort,
+            ambient, comfort, growth, gcost,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -272,8 +279,9 @@ fn run_seeds(
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // `free`：繁殖失败不扣能量。两种模式都跑一遍就是这次实验的 A/B。
-    let free = args.iter().any(|a| a == "free");
+    // `free`：繁殖失败不扣能量。**默认就是 true**（跟 `Config` 默认一致），
+    // 要旧行为请显式传 `strict`。
+    let free = !args.iter().any(|a| a == "strict");
     // `tries=N`：每次繁殖尝试的候选位置数（1 = 旧行为）
     let tries: usize = args
         .iter()
@@ -318,6 +326,12 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("comfort=").and_then(|v| v.parse().ok()))
         .unwrap_or(35.0);
+    // `growth`：启用成长过程（芽从 1 格长到目标体型）；`gcost=C`：每格生长成本
+    let growth = args.iter().any(|a| a == "growth");
+    let gcost: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("gcost=").and_then(|v| v.parse().ok()))
+        .unwrap_or(1.0);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -335,7 +349,7 @@ fn main() {
     assert!(!seeds.is_empty(), "至少要一个种子");
 
     println!(
-        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} ──",
+        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} · 成长 {} ──",
         seeds,
         if free { "**不**" } else { "" },
         tries,
@@ -344,7 +358,12 @@ fn main() {
         upkeep_p,
         heat,
         temp_dmg,
-        photo
+        photo,
+        if growth {
+            format!("开(每格 {:.1})", gcost)
+        } else {
+            "关".to_string()
+        }
     );
     println!("（同参数多跑几个种子取平均：这模拟在临界点上，单点差 4 倍很常见）\n");
 
@@ -373,7 +392,7 @@ fn main() {
     for &p in &ps {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort,
+            ambient, comfort, growth, gcost,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -464,7 +483,7 @@ fn main() {
     for cap in [0usize, 8, 16] {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort,
+            ambient, comfort, growth, gcost,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

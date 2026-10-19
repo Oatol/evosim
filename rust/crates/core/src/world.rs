@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::anatomy::{BodyCell, Flags};
+use crate::anatomy::{Anatomy, BodyCell, Flags};
 use crate::cell_type::{
     self, ct, Behavior, EnterFx, StandFx, DIR_VECTORS, TERRAIN_MASK, TICKS_TERRAIN,
     TICKING_TERRAIN_TYPES,
@@ -803,6 +803,17 @@ impl World {
             }
         }
 
+        // 成长（批次 12）：芽把攒下的能量拿去长身体，长满才算成年。
+        //
+        // 放在细胞行为**之后**：光合挣的钱先到账，才谈得上拿去长。
+        // 放在繁殖判定**之前**：成年判定要在这一 tick 就生效。
+        if self.config.life.growth_enabled && self.organisms[i].growth_plan.is_some() {
+            self.grow_organism(i);
+            if !self.organisms[i].alive {
+                return;
+            }
+        }
+
         // 环境温度伤害（批次 11）
         //
         // 放在细胞行为之后、繁殖之前：光合挣的钱先到账，热区把它烧掉一部分，
@@ -815,7 +826,9 @@ impl World {
 
         // 繁殖
         let at = self.organisms[i].reproduce_at(&self.config);
-        if self.organisms[i].energy >= at {
+        // **未成年不能繁殖**：芽攒再多能量也得先长成成体。
+        // 这一条是整个成长机制的意义所在——它让「1 格」不再等于「完整个体」。
+        if self.organisms[i].energy >= at && self.organisms[i].growth_plan.is_none() {
             self.reproduce_organism(i);
         }
     }
@@ -1081,6 +1094,111 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         } else {
             self.organisms[i].energy = cap;
             self.energy_wasted += amount - room;
+        }
+    }
+
+    /// 芽长一格。
+    ///
+    /// 从 `growth_plan` 里挑一个「还没长、且与现有身体四邻相邻、目标格可放」
+    /// 的细胞，花 `growth_cost` 能量把它长出来。
+    ///
+    /// **为什么必须"相邻"**：蓝图里可能同时有左右两个分支，如果允许凭空长，
+    /// 芽会分裂成两块互不相连的身体——那是另一种生物了。
+    /// 逐个相邻长出来，形状才会像母体。
+    ///
+    /// 长满之后把 `growth_plan` 置空，个体才算「成年」、才能繁殖。
+    fn grow_organism(&mut self, i: usize) {
+        let Some(plan) = self.organisms[i].growth_plan.clone() else {
+            return;
+        };
+        let cost = self.config.life.growth_cost.max(0.0);
+        if self.organisms[i].energy < cost {
+            return;
+        }
+        let mut grew = false;
+        for cell in plan.cells.iter() {
+            // 已经长出来了？
+            if self.organisms[i].anatomy.cell_at(cell.dx, cell.dy).is_some() {
+                continue;
+            }
+            // 必须和现有身体相邻
+            let adjacent = self.organisms[i]
+                .anatomy
+                .cells
+                .iter()
+                .any(|c| (c.dx - cell.dx).abs() + (c.dy - cell.dy).abs() == 1);
+            if !adjacent {
+                continue;
+            }
+            let (c, r) = (
+                self.organisms[i].real_col(cell),
+                self.organisms[i].real_row(cell),
+            );
+            let Some(idx) = self.grid.index(c, r) else {
+                continue;
+            };
+            if !self.cell_is_free_for_birth(idx) {
+                continue;
+            }
+            self.organisms[i]
+                .anatomy
+                .add_cell(cell.type_id, cell.dx, cell.dy, cell.dir);
+            self.write_grid(i);
+            grew = true;
+            break;
+        }
+        if !grew {
+            // ── 兜底：目标格全被邻居占了 ──
+            //
+            // 这是实测踩出来的：`growth_plan` 是**母体的形状**，而芽生在母体旁边，
+            // 那片区域的格子很可能已经被别的个体占住。严格按 plan 长的话，
+            // 芽会永远卡在 1 格、永远不能繁殖 —— 实测 1002/1003 两个种子直接灭绝。
+            //
+            // 兜底策略：长到**任意相邻空位**，细胞类型从 plan 里随机取。
+            // 形状会因此偏离母体，但体型（= 目标细胞数）仍然受限，
+            // 而且"能长大"比"长得像"重要得多。
+            let ty = plan.cells[self.rng.int(plan.cells.len())].type_id;
+            let cells = self.organisms[i].anatomy.cells.clone();
+            'outer: for c in cells {
+                for n in NEIGHBORS_4 {
+                    let (ndx, ndy) = (c.dx + n.0, c.dy + n.1);
+                    if self.organisms[i].anatomy.cell_at(ndx, ndy).is_some() {
+                        continue;
+                    }
+                    let probe = BodyCell::new(ty, ndx, ndy, 0);
+                    let (cc, rr) = (
+                        self.organisms[i].real_col(&probe),
+                        self.organisms[i].real_row(&probe),
+                    );
+                    let Some(idx) = self.grid.index(cc, rr) else {
+                        continue;
+                    };
+                    if !self.cell_is_free_for_birth(idx) {
+                        continue;
+                    }
+                    self.organisms[i].anatomy.add_cell(ty, ndx, ndy, 0);
+                    self.write_grid(i);
+                    grew = true;
+                    break 'outer;
+                }
+            }
+        }
+        if grew && cost > 0.0 {
+            let paid: f64;
+            {
+                let org = &mut self.organisms[i];
+                paid = cost.min(org.energy.max(0.0));
+                org.energy -= cost;
+                if org.energy < 0.0 {
+                    org.energy = 0.0;
+                }
+            }
+            // 生长耗能也是"离开生物圈"，进热池——否则账上会多出一块。
+            self.heat_pool += paid;
+        }
+        // 长满了 → 成年
+        if self.organisms[i].anatomy.cells.len() >= plan.cells.len() {
+            self.organisms[i].growth_plan = None;
         }
     }
 
@@ -1455,11 +1573,30 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
 
     // ────────────────────────────── 繁殖 ──────────────────────────────
 
+    /// 这一格能不能站一个**刚出生**的生物（不考虑形状）。
+    ///
+    /// 只在 `growth_enabled` 时用：芽只有 1 格，所以「能不能放」退化成一格判断。
+    /// 语义对齐 `can_place_at`（用 `food_blocks_reproduction` 而不是 movement）。
+    fn cell_is_free_for_birth(&self, idx: usize) -> bool {
+        let ty = self.grid.types[idx];
+        if ty == ct::EMPTY {
+            return true;
+        }
+        // 有主 = 被别的生物占着
+        if self.grid.owners[idx] >= 0 {
+            return false;
+        }
+        if ty == ct::FOOD && !self.config.combat.food_blocks_reproduction {
+            return true;
+        }
+        crate::cell_type::is_passable(ty)
+    }
+
     /// 收一次繁殖成本，记进热池。返回实际付出去的量。
     ///
     /// 抽成函数是因为「失败也要付账」的旧行为要在**每个失败分支**里各调一次，
     /// 复制四遍必然走样。
-    fn charge_repro(&mut self, i: usize) -> f64 {
+    fn charge_repro(&mut self, i: usize, to_child: f64) -> f64 {
         let need = self.organisms[i].food_needed(&self.config);
         // 繁殖成本付出去就没了（新生儿从 0 能量起步），所以这笔也要进热池。
         let paid: f64;
@@ -1471,7 +1608,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 org.energy = 0.0;
             }
         }
-        self.heat_pool += paid;
+        // `to_child` 那部分不是"离开生物圈"，是转给了后代——不进热池。
+        self.heat_pool += paid * (1.0 - to_child.clamp(0.0, 1.0));
         paid
     }
 
@@ -1494,8 +1632,9 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             return false;
         }
 
+        let mut paid = 0.0;
         if strict {
-            self.charge_repro(i);
+            paid = self.charge_repro(i, 0.0);
         }
 
         if !self.can_add_organism() {
@@ -1521,8 +1660,19 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             let nc = self.organisms[i].col + v.0 * distance;
             let nr = self.organisms[i].row + v.1 * distance;
             let rot = self.rng.int(4) as u8;
-            // 第一道预检用母体蓝图（便宜）
-            if !self.organisms[i].is_clear(&self.grid, &self.config, nc, nr, rot) {
+            // 第一道预检（便宜）：
+            // - 旧行为用**母体蓝图**查整块空地；
+            // - 成长模式下芽只有 1 格，就只查这一格——这正是「出生难度掉一个量级」的来源。
+            if self.config.life.growth_enabled {
+                let Some(idx) = self.grid.index(nc, nr) else {
+                    saw_space_fail = true;
+                    continue;
+                };
+                if !self.cell_is_free_for_birth(idx) {
+                    saw_space_fail = true;
+                    continue;
+                }
+            } else if !self.organisms[i].is_clear(&self.grid, &self.config, nc, nr, rot) {
                 saw_space_fail = true;
                 continue;
             }
@@ -1547,21 +1697,49 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 self.repro_blocked_path += 1;
             }
             if strict {
-                self.charge_repro(i);
+                self.charge_repro(i, 0.0);
             }
             return false;
         };
 
         let mut child = Organism::new(&self.config, &mut self.rng, &self.grid, new_col, new_row);
-        child.anatomy.copy_from(&self.organisms[i].anatomy);
         child.brain.copy_from(&self.organisms[i].brain);
         child.rotation = rotation;
         child.direction = self.rng.int(4) as u8;
 
+        let growth = self.config.life.growth_enabled;
+        if growth {
+            // 芽：只有 1 格，外加一份「要长成什么样」的蓝图。
+            child.growth_plan = Some(self.organisms[i].anatomy.clone());
+        } else {
+            child.anatomy.copy_from(&self.organisms[i].anatomy);
+        }
+
         {
             let parent = &self.organisms[i];
             let cfg = &self.config;
-            mutate_organism(&mut child, parent, &mut self.rng, cfg);
+            if growth {
+                // **变异必须作用在目标蓝图上**，不能只变异芽那 1 格——
+                // 否则体型永远变不了，演化直接停摆。
+                // 做法：临时把蓝图塞进 `anatomy` 让 `mutate_organism` 去改，
+                // 改完再把蓝图拆出来、重新取 1 格当种子。
+                child.anatomy = child.growth_plan.take().unwrap();
+                mutate_organism(&mut child, parent, &mut self.rng, cfg);
+                let plan = child.anatomy.clone();
+                if plan.cells.is_empty() {
+                    // 变异把身体删空了：这个后代生不下来
+                    if strict {
+                        self.charge_repro(i, 0.0);
+                    }
+                    return false;
+                }
+                child.anatomy = Anatomy::default();
+                let seed = plan.cell_at(0, 0).copied().unwrap_or(plan.cells[0]);
+                child.anatomy.add_cell(seed.type_id, 0, 0, seed.dir);
+                child.growth_plan = Some(plan);
+            } else {
+                mutate_organism(&mut child, parent, &mut self.rng, cfg);
+            }
         }
 
         if !child.can_place_at(
@@ -1574,14 +1752,26 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         ) {
             self.repro_blocked_mutated += 1;
             if strict {
-                self.charge_repro(i);
+                self.charge_repro(i, 0.0);
             }
             return false;
         }
 
         // 所有检查都过了，这时候才真正收费（非 strict 模式）
+        let seed_frac = if growth {
+            self.config.life.growth_seed_fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if !strict {
-            self.charge_repro(i);
+            paid = self.charge_repro(i, seed_frac);
+        } else if seed_frac > 0.0 {
+            // strict 模式在开头已经按"全款进热池"收过了，
+            // 这里把该给芽的那一份从热池挪回来——不是凭空造，只是改去向。
+            self.heat_pool -= paid * seed_frac;
+        }
+        if seed_frac > 0.0 {
+            child.energy = paid * seed_frac;
         }
         self.repro_ok += 1;
         self.add_organism(child);
@@ -3072,5 +3262,100 @@ mod tests {
         w.config.world.temp_span = 100.0;
         w.fields.temp[0] = 255; // 22 + 100 = 122℃ > 120℃ 上限
         assert_eq!(w.temp_view()[0], 255, "岩浆应该顶满");
+    }
+
+    // ────────────── 批次 12：成长过程（芽 → 成体）──────────────
+
+    /// 芽长一格：体型 +1、扣 `growth_cost`、差额进热池；长满了自动成年。
+    #[test]
+    fn growing_adds_a_cell_and_charges_energy() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_cost = 1.0;
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 5.0;
+
+        w.grow_organism(0);
+        assert_eq!(w.organisms[0].cell_count(), 2, "应该长到 2 格");
+        assert!(
+            (w.organisms[0].energy - 4.0).abs() < 1e-9,
+            "应该扣 1 能量，实测剩 {}",
+            w.organisms[0].energy
+        );
+        assert!((w.heat_pool - 1.0).abs() < 1e-9, "生长耗能要进热池");
+        assert!(
+            w.organisms[0].growth_plan.is_none(),
+            "长满目标体型之后应该成年"
+        );
+    }
+
+    /// **未成年不能繁殖**——这是整个成长机制的意义所在。
+    #[test]
+    fn a_sprout_cannot_breed() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.metabolism_scale = 0.0;
+        // 目标 2 格，但生长成本高到这一 tick 长不动
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.config.life.growth_cost = 100.0;
+        w.organisms[0].energy = 10.0;
+
+        let before = w.organisms.len();
+        w.act_organism(0);
+        assert_eq!(
+            w.organisms.len(),
+            before,
+            "长不动的芽攒再多能量也不该繁殖"
+        );
+    }
+
+    /// 芽的血量按**目标蓝图**算，不是按当前格数。
+    ///
+    /// 如果按当前格数，1 格的芽就是 1 HP，会被捕食者一口一个——
+    /// 实测那种设定下杀手占比从 14% 飙到 50%+，两个种子直接灭绝。
+    #[test]
+    fn a_sprout_has_the_health_of_its_target() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        plan.add_cell(ct::PRODUCER, 0, 1, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        let hp = w.organisms[0].max_health(&w.config);
+        assert!(
+            (hp - 3.0).abs() < 1e-9,
+            "3 格目标的芽应该有 3 HP，实测 {}",
+            hp
+        );
+    }
+
+    /// 目标格全被占时，芽要能**退化成长到相邻空位**，而不是永远卡在 1 格。
+    ///
+    /// 这条是实测救回来的：严格按蓝图长的话，芽生在母体旁边那片拥挤区域，
+    /// 目标格大概率被邻居占着，于是永远长不大、永远不能繁殖——1002/1003 直接灭绝。
+    #[test]
+    fn growth_falls_back_to_any_free_neighbour() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_cost = 1.0;
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 5.0;
+        // 把蓝图指定的那一格 (1,0) 用墙堵死
+        let org = &w.organisms[0];
+        let (c, r) = (org.col + 1, org.row);
+        let idx = w.grid.index(c, r).unwrap();
+        w.set_cell_at(idx, ct::WALL, -1);
+
+        w.grow_organism(0);
+        assert_eq!(
+            w.organisms[0].cell_count(),
+            2,
+            "目标格被堵死时应该退化长到别的相邻空位"
+        );
     }
 }

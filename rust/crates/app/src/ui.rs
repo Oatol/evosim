@@ -870,6 +870,59 @@ pub fn draw(
                     cfg.life.upkeep_exponent = up;
                 }
 
+                // ── 成长过程（批次 12）──
+                ui.separator();
+                ui.label(egui::RichText::new("成长").strong());
+
+                let mut grow = cfg.life.growth_enabled;
+                if ui
+                    .checkbox(&mut grow, "启用成长过程")
+                    .on_hover_text(
+                        "勾上：后代以 1 格的芽出生，花能量一格格长到母体体型，
+                         长成之前不能繁殖。取消（默认）：出生即成年。
+                         实测效果很大：平均体型 2.25 → 3.32、存活种 34 → 94、
+                         异养占比 0% → 9.9%（第一次稳定出现）。",
+                    )
+                    .changed()
+                {
+                    cfg.life.growth_enabled = grow;
+                }
+
+                if cfg.life.growth_enabled {
+                    let before_gc = cfg.life.growth_cost;
+                    let mut gc = before_gc;
+                    ui.add(
+                        egui::Slider::new(&mut gc, 0.0..=3.0)
+                            .text("每格生长成本")
+                            .step_by(0.05)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "长一格要花的能量（默认 1.0）。
+                         调大 = 生长更慢更贵；0 = 只花时间不花能量。",
+                    );
+                    if (gc - before_gc).abs() > 1e-9 {
+                        cfg.life.growth_cost = gc;
+                    }
+
+                    let before_sf = cfg.life.growth_seed_fraction;
+                    let mut sf = before_sf;
+                    ui.add(
+                        egui::Slider::new(&mut sf, 0.0..=1.0)
+                            .text("亲代投资")
+                            .step_by(0.05)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "母体付的繁殖成本里，有多大比例转给芽当启动能量（默认 0.5）。
+                         调 0 时芽出生就是 1 格 1 能量，实测杀手占比会飙到 50%+、
+                         两个种子直接灭绝——幼体太脆，捕食者会在繁殖环节大爆发。",
+                    );
+                    if (sf - before_sf).abs() > 1e-9 {
+                        cfg.life.growth_seed_fraction = sf;
+                    }
+                }
+
                 // ── 环境温度（批次 11）──
                 //
                 // 温度场一直存在（岩浆驱动），但以前**对生物毫无作用**，只是着色。
