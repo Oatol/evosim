@@ -778,6 +778,135 @@ pub fn draw(
                     cfg.life.max_body_cells = cap;
                 }
 
+                // ── 体型与繁殖（批次 11）──
+                //
+                // 这一组是**耦合的实验旋钮**：单独调一个往往看不到效果。
+                // 原因都写在 `LifeCfg` 对应字段的文档里，这里只说操作后果。
+                ui.separator();
+                ui.label(egui::RichText::new("体型与繁殖").strong());
+
+                let mut free = !cfg.life.repro_fail_costs_energy;
+                if ui
+                    .checkbox(&mut free, "繁殖失败不扣能量")
+                    .on_hover_text(
+                        "勾上（默认）：先检查空间，放得下才收费——\"找不到地方就继续攒着\"。
+                         取消：先收费再检查，没地方生也白付一次成本（旧行为）。
+                         实测旧行为下 86% 的尝试失败，繁殖成本实际是名义值的 7 倍，
+                         而且失败会把能量清到 0，几次就饿死——繁殖失败本身成了主要死因。",
+                    )
+                    .changed()
+                {
+                    cfg.life.repro_fail_costs_energy = !free;
+                }
+
+                let before_tries = cfg.life.repro_search_tries;
+                let mut tries = before_tries;
+                ui.add(
+                    egui::Slider::new(&mut tries, 1..=16)
+                        .text("繁殖搜索候选数")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "每次繁殖最多试几个落点（1 = 旧行为，随机挑一个，不行就放弃）。
+                     调大之后个体在放弃前会多试几个位置。
+                     注意：它只提高成功率，**不会**让体型变大——
+                     小身体需要的空地少，搜索越充分小体型越占优。",
+                );
+                if tries != before_tries {
+                    cfg.life.repro_search_tries = tries;
+                }
+
+                let before_min = cfg.life.min_breed_cells;
+                let mut min_cells = before_min;
+                ui.add(
+                    egui::Slider::new(&mut min_cells, 1..=8)
+                        .text("最小可繁殖体型")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "细胞数低于它的个体不能繁殖（1 = 旧行为，任何体型都能生）。
+                     这是唯一实测能把体型稳定推上去的旋钮，
+                     但生物学对应物牵强，而且会产生\"攒满能量却不繁殖\"的僵尸个体。",
+                );
+                if min_cells != before_min {
+                    cfg.life.min_breed_cells = min_cells;
+                }
+
+                let before_up = cfg.life.upkeep_exponent;
+                let mut up = before_up;
+                ui.add(
+                    egui::Slider::new(&mut up, 0.5..=1.5)
+                        .text("维持成本指数")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "总开销 = 各细胞成本之和 × 体型^指数。1.00 = 线性（默认）。
+                     < 1 = Kleiber：单位体重的代谢率随体型下降（大动物吃得少、活得久）。
+                     实测 0.75 能让世界多养活 43% 的个体，但推不动体型——
+                     因为成本只占满照收入的 8%，折扣太小。",
+                );
+                if (up - before_up).abs() > 1e-9 {
+                    cfg.life.upkeep_exponent = up;
+                }
+
+                // ── 环境温度（批次 11）──
+                //
+                // 温度场一直存在（岩浆驱动），但以前**对生物毫无作用**，只是着色。
+                // 这一组把它接进模拟：热区变成一道"体型筛选"的墙。
+                ui.separator();
+                ui.label(egui::RichText::new("环境温度").strong());
+
+                let before_td = cfg.life.temp_damage;
+                let mut td = before_td;
+                ui.add(
+                    egui::Slider::new(&mut td, 0.0..=3.0)
+                        .text("温度伤害")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "0 = 关闭（默认，与旧行为逐位相同）。
+                     每 tick 按所在格温度扣血：超过「舒适阈值」的部分平方放大。
+                     个体身上最热的一格说了算——把一根手指伸进岩浆也要付代价。",
+                );
+                if (td - before_td).abs() > 1e-9 {
+                    cfg.life.temp_damage = td;
+                }
+
+                let before_tc = cfg.life.temp_comfort;
+                let mut tc = before_tc;
+                ui.add(
+                    egui::Slider::new(&mut tc, 0.0..=1.0)
+                        .text("舒适温度阈值")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "温度场超过这个比例才开始受伤（0.15 ≈ 38/255）。
+                     调低 = 热区变大、更毒；调高 = 只有贴着岩浆才疼。",
+                );
+                if (tc - before_tc).abs() > 1e-9 {
+                    cfg.life.temp_comfort = tc;
+                }
+
+                let before_te = cfg.life.temp_size_exponent;
+                let mut te = before_te;
+                ui.add(
+                    egui::Slider::new(&mut te, -0.75..=1.0)
+                        .text("温度伤害指数")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "伤害 ∝ 体型^指数。-0.25（默认）= 热容/散热比：
+                     小个体升温快，10 格能撑 17.8 倍于 1 格的时间。
+                     0 = 与体型无关（大个体只靠血厚）；+0.75 = 伤害按接触面积算（优势只剩 1.78 倍）。",
+                );
+                if (te - before_te).abs() > 1e-9 {
+                    cfg.life.temp_size_exponent = te;
+                }
+
                 // ── 能量账（批次 10）──
                 //
                 // 守恒律只对生命层成立：世界只有三个能量入口（光合 / 腐殖质 /

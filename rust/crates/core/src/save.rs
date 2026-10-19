@@ -67,7 +67,10 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// （`heat_pool` / `energy_wasted` / `energy_injected`），批次 10（维持成本 + 守恒审计）。
 /// 三个池子以前**根本没存**——读档之后账目从 0 重新开始，审计会直接红。
 /// v12：`WorldCfg` 加了 `sky_patchiness`，`Light` 加了 `patchiness`（批次 10.5 云影）。同理。
-pub const VERSION: u32 = 12;
+/// v13：`LifeCfg` 加了 7 个字段——`repro_fail_costs_energy` / `repro_search_tries` /
+/// `min_breed_cells` / `upkeep_exponent` / `temp_damage` / `temp_comfort` /
+/// `temp_size_exponent`（批次 11 体型经济学 + 环境温度）。同理。
+pub const VERSION: u32 = 13;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

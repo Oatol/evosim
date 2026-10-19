@@ -111,6 +111,27 @@ pub struct World {
     /// `生物可用总能量 + heat_pool` 才应该等于「注入总量」。
     pub heat_pool: f64,
 
+    // ── 繁殖受阻统计（诊断用：不参与模拟、不进存档、不影响任何判定）──
+    //
+    // 存在的理由：`reproduce_organism` **先扣能量再检查空间**，所以"想繁殖
+    // 但没地方"的个体是白付一次全款。这个惩罚对大体型更重（要整块连通空地），
+    // 是"体型涨不上去"的头号嫌疑。分项计数才能分清到底卡在哪一步，
+    // 不然只能靠猜。
+    /// 进入 `reproduce_organism` 的次数（= 能量攒够了的次数）
+    pub repro_tries: u64,
+    /// 成功产出后代的次数
+    pub repro_ok: u64,
+    /// 个体总数达到上限
+    pub repro_blocked_cap: u64,
+    /// `is_clear` 失败：要整块空地，没找到
+    pub repro_blocked_space: u64,
+    /// `is_straight_path` 失败：位置空着但中间被挡
+    pub repro_blocked_path: u64,
+    /// 变异后的蓝图放不下（母体能塞进去，但后代身体长歪了）
+    pub repro_blocked_mutated: u64,
+    /// 体型小于 `min_breed_cells`，没资格繁殖
+    pub repro_blocked_too_small: u64,
+
     /// **累计注入生物圈的能量**（批次 10 守恒审计的左半边）。
     ///
     /// 这个世界的能量只有三个入口：
@@ -157,6 +178,13 @@ impl World {
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
             heat_pool: 0.0,
+            repro_tries: 0,
+            repro_ok: 0,
+            repro_blocked_cap: 0,
+            repro_blocked_space: 0,
+            repro_blocked_path: 0,
+            repro_blocked_mutated: 0,
+            repro_blocked_too_small: 0,
             energy_injected: 0.0,
             light_dirty: true,
             order: Vec::new(),
@@ -775,6 +803,16 @@ impl World {
             }
         }
 
+        // 环境温度伤害（批次 11）
+        //
+        // 放在细胞行为之后、繁殖之前：光合挣的钱先到账，热区把它烧掉一部分，
+        // 剩下的才够不够繁殖由后面的判定决定。顺序反过来会让"刚挣到就被烧光"
+        // 的个体连繁殖判定都走不到，等于把热区变成纯粹的坟场。
+        self.apply_heat_damage(i);
+        if !self.organisms[i].alive {
+            return;
+        }
+
         // 繁殖
         let at = self.organisms[i].reproduce_at(&self.config);
         if self.organisms[i].energy >= at {
@@ -1006,6 +1044,81 @@ impl World {
         self.organisms[i].energy_capacity(&self.config)
     }
 
+    /// 给个体加能量，**装不下的部分记进 `energy_wasted`**。
+    ///
+    /// **所有"加能量"的路径都必须走这里**：光合、吃食物、咬活体。
+    ///
+    /// 为什么不能直接 `energy += x`：容量检查只在光合那边做，而它判断的是
+    /// `room = cap - energy`。一旦别的路径把 energy 顶到 cap 以上，
+    /// 下一次光合就会算出 `room = 0` 然后 `energy = cap` —— 把个体**往下 clamp**，
+    /// 那一截既没进 `wasted` 也没进 `heat`，等于凭空蒸发。
+    ///
+    /// 这个 bug 在"繁殖失败不扣钱"之后才暴露：旧行为下个体能量经常被繁殖
+    /// 清到 0，几乎撞不到容量上限；新行为下能量长期贴着上限，
+    /// 每一次越界 clamp 都在偷偷吃掉能量。
+    fn add_energy(&mut self, i: usize, amount: f64) {
+        if !(amount > 0.0) {
+            return;
+        }
+        let cap = self.energy_capacity(i);
+        // 历史遗留的超容量（旧存档 / 早先漏了 clamp 的路径）：先把它记掉，
+        // 否则下面 `energy = cap` 会静默吞掉这一截。
+        if self.organisms[i].energy > cap {
+            self.energy_wasted += self.organisms[i].energy - cap;
+            self.organisms[i].energy = cap;
+        }
+        let room = (cap - self.organisms[i].energy).max(0.0);
+        if amount <= room {
+            self.organisms[i].energy += amount;
+        } else {
+            self.organisms[i].energy = cap;
+            self.energy_wasted += amount - room;
+        }
+    }
+
+    /// 环境温度造成的伤害：**表面积/体积比**决定谁扛得住。
+    ///
+    /// ```text
+    /// excess = (温度 - 舒适阈值) / (1 - 舒适阈值)      // 0..1
+    /// 伤害   = temp_damage × excess² × 体型^temp_size_exponent
+    /// ```
+    ///
+    /// 取个体占据格子里**最热**的一格：身体只要有一角伸进热区就得承受。
+    /// 这是故意的——它让"贴着岩浆取暖"变成一件有代价的事，
+    /// 而不是可以随便把一根手指伸进去白嫖。
+    ///
+    /// 血量 `max_health` ∝ 体积 ∝ n，伤害 ∝ n^0.75，所以**单位体重的抗性
+    /// ∝ n^0.25**：大个体能在热区待更久。`temp_size_exponent = 1` 会让
+    /// 伤害和血量同步增长，体型优势消失；`= 0` 则相反（大个体纯靠血厚）。
+    fn apply_heat_damage(&mut self, i: usize) {
+        let base = self.config.life.temp_damage;
+        if !(base > 0.0) {
+            return;
+        }
+        let comfort = self.config.life.temp_comfort.clamp(0.0, 1.0);
+
+        let mut hottest = 0u8;
+        for cell in &self.organisms[i].anatomy.cells {
+            let c = self.organisms[i].real_col(cell);
+            let r = self.organisms[i].real_row(cell);
+            if let Some(idx) = self.grid.index(c, r) {
+                hottest = hottest.max(self.fields.temp[idx]);
+            }
+        }
+        let t = hottest as f64 / 255.0;
+        if t <= comfort {
+            return;
+        }
+        let excess = ((t - comfort) / (1.0 - comfort).max(1e-6)).clamp(0.0, 1.0);
+        let n = self.organisms[i].anatomy.cells.len().max(1) as f64;
+        let dmg = base * excess * excess * n.powf(self.config.life.temp_size_exponent);
+        if !(dmg > 0.0) {
+            return;
+        }
+        let id = self.organisms[i].id;
+        self.harm_organism(id, dmg, None);
+    }
+
     fn run_cell_function(&mut self, i: usize, cell: BodyCell) {
         let behavior = match cell_type::def(cell.type_id).and_then(|d| d.behavior) {
             Some(b) => b,
@@ -1031,7 +1144,7 @@ impl World {
                         self.grid.food[index] = 0.0;
                         self.reveal_floor(index);
                         let gain = e * mult;
-                        self.organisms[i].energy += gain;
+                        self.add_energy(i, gain);
                         // 摄取倍率不是 1 的时候，吃这一口**改变**了世界里的能量：
                         // > 1 等于凭空放大（记成注入），< 1 等于消化损耗（记成丢弃）。
                         // 不记的话账上会凭空多/少一块，审计立刻红。
@@ -1055,9 +1168,9 @@ impl World {
                         continue;
                     }
                     let gain = self.bite_from(owner as u32, index, mult);
-                    if gain > 0.0 {
-                        self.organisms[i].energy += gain;
-                    }
+                    // 同样要走容量检查：咬到嘴里的能量一旦超过容量，
+                    // 直接 `+=` 会让下一次光合把个体往下 clamp，那一截就蒸发了。
+                    self.add_energy(i, gain);
                 }
             }
             Behavior::Producer => {
@@ -1097,19 +1210,12 @@ impl World {
                     return;
                 }
                 // 容量上限：光合直充体内之后必须有，否则能量无限膨胀。
-                // 超出部分丢弃并记账（批次 10 的守恒审计要用）。
-                let cap = self.energy_capacity(i);
-                let room = (cap - self.organisms[i].energy).max(0.0);
-                // **注入记的是 `gain` 全额**，装不下的那部分记在 `energy_wasted` 里，
-                // 两者相加才等于"这一格造出来的能量"。审计的等式是
-                // `注入 = 生物 + 食物 + 热池 + 丢弃`，所以丢弃必须留在右半边。
+                // **注入记的是 `gain` 全额**，装不下的那部分由 `add_energy`
+                // 记进 `energy_wasted`——两者相加才等于"这一格造出来的能量"。
+                // 审计的等式是 `注入 = 生物 + 食物 + 热池 + 丢弃`，
+                // 所以丢弃必须留在右半边。
                 self.energy_injected += gain;
-                if gain <= room {
-                    self.organisms[i].energy += gain;
-                } else {
-                    self.organisms[i].energy = cap;
-                    self.energy_wasted += gain - room;
-                }
+                self.add_energy(i, gain);
             }
             Behavior::Killer => {
                 let damage = self.config.attr(cell.type_id, AttrField::Damage);
@@ -1289,6 +1395,7 @@ impl World {
             let (col, row) = (self.organisms[i].col, self.organisms[i].row);
             self.drop_extra_food(col, row, leftover);
         }
+
     }
 
     /// 在 (col,row) 周围的空格里撒 `energy` 这么多能量，按每格一份摊开。
@@ -1332,7 +1439,11 @@ impl World {
 
     // ────────────────────────────── 繁殖 ──────────────────────────────
 
-    fn reproduce_organism(&mut self, i: usize) -> bool {
+    /// 收一次繁殖成本，记进热池。返回实际付出去的量。
+    ///
+    /// 抽成函数是因为「失败也要付账」的旧行为要在**每个失败分支**里各调一次，
+    /// 复制四遍必然走样。
+    fn charge_repro(&mut self, i: usize) -> f64 {
         let need = self.organisms[i].food_needed(&self.config);
         // 繁殖成本付出去就没了（新生儿从 0 能量起步），所以这笔也要进热池。
         let paid: f64;
@@ -1345,35 +1456,85 @@ impl World {
             }
         }
         self.heat_pool += paid;
+        paid
+    }
+
+    fn reproduce_organism(&mut self, i: usize) -> bool {
+        self.repro_tries += 1;
+        // 旧行为（默认）：**先扣钱**，之后任何一步失败都白付。
+        // 新行为：等所有空间检查都通过才扣钱——「找不到地方就继续攒着」。
+        //
+        // 这个开关不是口味问题：实测 86.5% 的尝试会失败，所以旧行为下繁殖的
+        // 实际支出是名义值的 7.4 倍，而且大体型付得更多（要更多连通空地）。
+        // 它单独就把体型锁死在 3 格，让 `breed_cost_exponent < 1` 的规模经济失效。
+        let strict = self.config.life.repro_fail_costs_energy;
+
+        // 体型门槛：太小的个体攒再多能量也不能繁殖。
+        //
+        // 这一条是「规模中性」的对症药——见 `LifeCfg::min_breed_cells` 的注释：
+        // 给大体型发奖励赢不了「小身体更好找地方」，只能让太小直接出局。
+        if self.organisms[i].cell_count() < self.config.life.min_breed_cells {
+            self.repro_blocked_too_small += 1;
+            return false;
+        }
+
+        if strict {
+            self.charge_repro(i);
+        }
 
         if !self.can_add_organism() {
+            self.repro_blocked_cap += 1;
             return false;
         }
 
-        let v = DIR_VECTORS[self.rng.int(4)];
-        let distance = self.organisms[i].anatomy.birth_distance + self.rng.int(3) as i32;
-        let new_col = self.organisms[i].col + v.0 * distance;
-        let new_row = self.organisms[i].row + v.1 * distance;
-        let rotation = self.rng.int(4) as u8;
-
-        // 第一道预检用母体蓝图（便宜）
-        if !self
-            .organisms[i]
-            .is_clear(&self.grid, &self.config, new_col, new_row, rotation)
-        {
-            return false;
+        // ── 找地方 ──
+        //
+        // `repro_search_tries = 1`（默认）逐位等于旧行为：随机挑一个方向 + 距离，
+        // 不行就放弃。调大之后会连续试多个候选位置。
+        //
+        // 为什么需要它：实测 86% 的尝试失败，其中 62% 卡在「整块空地找不到」，
+        // 而全局占用只有 5%——这两个数只能同时成立，如果瓶颈是**局部**拥挤：
+        // 候选位置只有 12 个（4 方向 × 距离 4~6），而它们恰好被邻居占了。
+        let tries = self.config.life.repro_search_tries.max(1);
+        let birth_d = self.organisms[i].anatomy.birth_distance;
+        let mut target: Option<(i32, i32, u8)> = None;
+        let mut saw_space_fail = false;
+        for _ in 0..tries {
+            let v = DIR_VECTORS[self.rng.int(4)];
+            let distance = birth_d + self.rng.int(3) as i32;
+            let nc = self.organisms[i].col + v.0 * distance;
+            let nr = self.organisms[i].row + v.1 * distance;
+            let rot = self.rng.int(4) as u8;
+            // 第一道预检用母体蓝图（便宜）
+            if !self.organisms[i].is_clear(&self.grid, &self.config, nc, nr, rot) {
+                saw_space_fail = true;
+                continue;
+            }
+            let (pc, pr, pid) = (
+                self.organisms[i].col,
+                self.organisms[i].row,
+                self.organisms[i].id,
+            );
+            if !self
+                .organisms[i]
+                .is_straight_path(&self.grid, nc, nr, pc, pr, pid)
+            {
+                continue;
+            }
+            target = Some((nc, nr, rot));
+            break;
         }
-        let (pc, pr, pid) = (
-            self.organisms[i].col,
-            self.organisms[i].row,
-            self.organisms[i].id,
-        );
-        if !self
-            .organisms[i]
-            .is_straight_path(&self.grid, new_col, new_row, pc, pr, pid)
-        {
+        let Some((new_col, new_row, rotation)) = target else {
+            if saw_space_fail {
+                self.repro_blocked_space += 1;
+            } else {
+                self.repro_blocked_path += 1;
+            }
+            if strict {
+                self.charge_repro(i);
+            }
             return false;
-        }
+        };
 
         let mut child = Organism::new(&self.config, &mut self.rng, &self.grid, new_col, new_row);
         child.anatomy.copy_from(&self.organisms[i].anatomy);
@@ -1395,9 +1556,18 @@ impl World {
             rotation,
             &child.anatomy,
         ) {
+            self.repro_blocked_mutated += 1;
+            if strict {
+                self.charge_repro(i);
+            }
             return false;
         }
 
+        // 所有检查都过了，这时候才真正收费（非 strict 模式）
+        if !strict {
+            self.charge_repro(i);
+        }
+        self.repro_ok += 1;
         self.add_organism(child);
         true
     }
@@ -2556,5 +2726,203 @@ mod tests {
             (run(0.0) - 2.0).abs() < 1e-9,
             "倍率 0 应退回基础成本（等于没有储食加成）"
         );
+    }
+
+    // ────────────── 批次 11：体型经济学（Kleiber / 最小体型 / 繁殖收费）──────────────
+
+    /// `upkeep_exponent = 1.0` 必须**逐位**等于旧行为。
+    ///
+    /// 这是默认值，一旦漏掉那个分支，全部生态基线都会悄悄偏移。
+    #[test]
+    fn linear_upkeep_is_bit_identical() {
+        let (w, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+        ]);
+        let mut cfg = w.config.clone();
+        cfg.life.metabolism_scale = 1.0;
+        cfg.life.upkeep_exponent = 1.0;
+        let got = w.organisms[0].upkeep_cost(&cfg);
+        let want: f64 = w.organisms[0]
+            .anatomy
+            .cells
+            .iter()
+            .map(|c| cfg.attr(c.type_id, AttrField::Cost))
+            .sum();
+        assert!(
+            (got - want).abs() < 1e-12,
+            "线性模式应该就是 cost 之和：{} vs {}",
+            got,
+            want
+        );
+    }
+
+    /// Kleiber（`upkeep_exponent < 1`）：**单位细胞**的开销随体型下降，
+    /// 但**总**开销仍然上升。
+    ///
+    /// 这两条缺一不可：
+    /// - 只断言"总开销上升" → 分不清它和线性模式；
+    /// - 只断言"单位开销下降" → 分不清它和"越长大越省钱"（那会让体型无限膨胀）。
+    #[test]
+    fn kleiber_lowers_cost_per_cell_but_raises_total() {
+        let (w1, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let (w3, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+        ]);
+        let mut cfg = w1.config.clone();
+        cfg.life.metabolism_scale = 1.0;
+        cfg.life.upkeep_exponent = 0.75;
+
+        let c1 = w1.organisms[0].upkeep_cost(&cfg);
+        let c3 = w3.organisms[0].upkeep_cost(&cfg);
+        assert!(
+            c3 / 3.0 < c1,
+            "3 格的单位细胞开销应该更低：{} / 3 vs {}",
+            c3,
+            c1
+        );
+        assert!(c3 > c1, "总开销应该随体型上升：{} vs {}", c3, c1);
+    }
+
+    /// 体型小于 `min_breed_cells` 的个体不能繁殖，而且**任何模式都不收费**。
+    ///
+    /// "没资格"和"尝试失败"是两件事：前者不该罚钱，否则一个 1 格个体
+    /// 攒够能量就会被反复扣到 0，永远长不大。
+    #[test]
+    fn small_bodies_cannot_breed() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.metabolism_scale = 0.0;
+        w.config.life.min_breed_cells = 3;
+        w.config.life.repro_fail_costs_energy = false;
+        w.organisms[0].energy = 10.0;
+        let before = w.organisms.len();
+        w.act_organism(0);
+        assert_eq!(w.organisms.len(), before, "1 格个体不该产生后代");
+        assert_eq!(w.repro_blocked_too_small, 1, "应该被体型门槛挡住");
+        assert!(
+            (w.organisms[0].energy - 10.0).abs() < 1e-12,
+            "被体型门槛挡住不该扣钱，实测剩 {}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// `repro_fail_costs_energy` 的两面：失败时严格模式付全款、宽松模式分文不取。
+    ///
+    /// 用 `max_organisms = 1` 制造一次**必然失败**的繁殖（个体数到顶），
+    /// 这样两条路径都只走 `can_add_organism` 那个分支，不受地形影响。
+    #[test]
+    fn failed_reproduction_only_charges_in_strict_mode() {
+        let run = |strict: bool| -> (f64, f64) {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+            w.config.life.metabolism_scale = 0.0;
+            w.config.life.repro_fail_costs_energy = strict;
+            w.config.life.max_organisms = 1;
+            w.organisms[0].energy = 10.0;
+            w.act_organism(0);
+            assert_eq!(w.repro_blocked_cap, 1, "应该卡在个体上限");
+            (w.organisms[0].energy, w.heat_pool)
+        };
+        let (e_strict, heat_strict) = run(true);
+        let (e_free, heat_free) = run(false);
+        assert!(e_strict < 10.0, "严格模式失败要付全款，实测剩 {}", e_strict);
+        assert!(heat_strict > 0.0, "付出去的钱要进热池");
+        assert!(
+            (e_free - 10.0).abs() < 1e-12,
+            "宽松模式失败不该扣钱，实测剩 {}",
+            e_free
+        );
+        assert_eq!(heat_free, 0.0);
+    }
+
+    // ────────────── 批次 11：环境温度（表面积/体积比）──────────────
+
+    /// `temp_damage = 0` 时温度完全不参与模拟：默认值必须逐位等于旧行为。
+    #[test]
+    fn zero_temp_damage_is_a_no_op() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.temp_damage = 0.0;
+        for t in w.fields.temp.iter_mut() {
+            *t = 255;
+        }
+        w.apply_heat_damage(0);
+        assert_eq!(w.organisms[0].damage, 0.0);
+    }
+
+    /// 舒适阈值以下不受伤害；以上才开始掉血。
+    #[test]
+    fn heat_only_hurts_above_the_comfort_threshold() {
+        let run = |temp: u8| -> f64 {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+            w.config.life.temp_damage = 1.0;
+            w.config.life.temp_comfort = 0.5;
+            for t in w.fields.temp.iter_mut() {
+                *t = temp;
+            }
+            w.apply_heat_damage(0);
+            w.organisms[0].damage
+        };
+        assert_eq!(run(0), 0.0, "本底温度不该伤人");
+        assert_eq!(run(127), 0.0, "127/255 ≈ 0.498，还在阈值以下");
+        assert!(run(200) > 0.0, "200/255 应该开始受伤");
+        // 越热越疼（平方放大）
+        assert!(run(255) > run(200) * 2.0, "255 应该明显比 200 疼");
+    }
+
+    /// **核心断言**：单位血量的伤害率随体型下降 —— 大个体在热区活得更久。
+    ///
+    /// 伤害 ∝ `n^temp_size_exponent`（默认 -0.25），血量 = n，
+    /// 所以生存时间 ∝ `n^1.25`。
+    #[test]
+    fn big_bodies_take_less_heat_per_hp() {
+        let (mut w1, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let (mut w3, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+        ]);
+        for w in [&mut w1, &mut w3] {
+            w.config.life.temp_damage = 1.0;
+            w.config.life.temp_comfort = 0.0;
+            w.config.life.temp_size_exponent = -0.25;
+            for t in w.fields.temp.iter_mut() {
+                *t = 255;
+            }
+        }
+        w1.apply_heat_damage(0);
+        w3.apply_heat_damage(0);
+        let hp1 = w1.organisms[0].max_health(&w1.config);
+        let hp3 = w3.organisms[0].max_health(&w3.config);
+        let rate1 = w1.organisms[0].damage / hp1;
+        let rate3 = w3.organisms[0].damage / hp3;
+        assert!(
+            rate3 < rate1,
+            "3 格的单位血量伤害率应该更低：{:.4} vs {:.4}",
+            rate3,
+            rate1
+        );
+        // 而且必须是"温和地更低"——不是免疫
+        assert!(rate3 > rate1 * 0.1, "3 格不该几乎免疫：{:.4}", rate3);
+    }
+
+    /// 身体只要有一角伸进热区，整只就要承受 —— 取的是最热的那一格。
+    #[test]
+    fn the_hottest_cell_decides() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::PRODUCER, 1, 0)]);
+        w.config.life.temp_damage = 1.0;
+        w.config.life.temp_comfort = 0.0;
+        // 只有第二个细胞所在的格子是热的
+        for t in w.fields.temp.iter_mut() {
+            *t = 0;
+        }
+        let org = &w.organisms[0];
+        let cell = org.anatomy.cells[1];
+        let (c, r) = (org.real_col(&cell), org.real_row(&cell));
+        let idx = w.grid.index(c, r).unwrap();
+        w.fields.temp[idx] = 255;
+        w.apply_heat_damage(0);
+        assert!(w.organisms[0].damage > 0.0, "一根手指伸进热区也要疼");
     }
 }

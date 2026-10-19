@@ -188,7 +188,18 @@ impl Organism {
             .iter()
             .map(|c| cfg.attr(c.type_id, AttrField::Cost))
             .sum();
-        cost * scale
+        // Kleiber：`总开销 ∝ 体型^p`，p = 1 时逐位等于旧行为。
+        //
+        // 等价写法是「每格成本乘 `n^(p-1)`」——n > 1 且 p < 1 时那是个 < 1 的折扣，
+        // 也就是**单位体重的代谢率随体型下降**（大动物吃得少、活得久）。
+        // 1 格个体 `n^(p-1) = 1`，所以它一分钱折扣都拿不到。
+        let p = cfg.life.upkeep_exponent;
+        if (p - 1.0).abs() < 1e-12 {
+            cost * scale
+        } else {
+            let n = self.anatomy.cells.len().max(1) as f64;
+            cost * n.powf(p - 1.0) * scale
+        }
     }
 
     pub fn food_value_total(&self, cfg: &Config) -> f64 {
