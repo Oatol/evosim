@@ -43,6 +43,9 @@ struct Row {
     blk_path: u64,
     blk_cap: u64,
     blk_small: u64,
+    /// 有光格占用率（%）：`被生物占据的格子 / 有光格子`。
+    /// 判断"世界到底挤不挤"的唯一硬指标——温度生态位需要"别处太挤"才有驱动力。
+    occ: f64,
     /// 按温度分带：每带的（个体数, 平均体型）。5 带，每带 52 点温度。
     ///
     /// **必须分带看**：生物只占 5% 的格子，热区又只是一小块，
@@ -64,6 +67,7 @@ fn run(
     upkeep_p: f64,
     heat: usize,
     temp_dmg: f64,
+    photo: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -85,6 +89,8 @@ fn run(
     cfg.life.upkeep_exponent = upkeep_p;
     // `heatdmg`：环境温度伤害（0 = 关闭）
     cfg.life.temp_damage = temp_dmg;
+    // `photo`：光合速率（默认 0.12）。调高 = 世界更拥挤
+    cfg.life.photosynthesis_rate = photo;
 
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
@@ -143,6 +149,11 @@ fn run(
             / n as f64,
         mouth: pct(Flags::MOUTH),
         killer: pct(Flags::KILLER),
+        occ: {
+            let lit = w.light.level.iter().filter(|&&v| v > 0).count().max(1);
+            let occ = w.grid.owners.iter().filter(|&&o| o >= 0).count();
+            occ as f64 * 100.0 / lit as f64
+        },
         bands: {
             let mut cnt = [0usize; 5];
             let mut sum = [0usize; 5];
@@ -188,6 +199,7 @@ fn run_seeds(
     upkeep_p: f64,
     heat: usize,
     temp_dmg: f64,
+    photo: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -197,6 +209,7 @@ fn run_seeds(
         hetero: 0.0,
         mouth: 0.0,
         killer: 0.0,
+        occ: 0.0,
         bands: [(0, 0.0); 5],
         tries: 0,
         ok: 0,
@@ -207,7 +220,9 @@ fn run_seeds(
         hist: [0f64; 10],
     };
     for &s in seeds {
-        let r = run(p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg);
+        let r = run(
+            p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+        );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
         acc.body_max = acc.body_max.max(r.body_max);
@@ -215,6 +230,7 @@ fn run_seeds(
         acc.hetero += r.hetero;
         acc.mouth += r.mouth;
         acc.killer += r.killer;
+        acc.occ += r.occ;
         for b in 0..5 {
             acc.bands[b].0 += r.bands[b].0;
             acc.bands[b].1 += r.bands[b].1;
@@ -236,6 +252,7 @@ fn run_seeds(
     acc.hetero /= n;
     acc.mouth /= n;
     acc.killer /= n;
+    acc.occ /= n;
     for b in 0..5 {
         acc.bands[b].1 /= n;
     }
@@ -279,6 +296,11 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("heatdmg=").and_then(|v| v.parse().ok()))
         .unwrap_or(0.0);
+    // `photo=R`：光合速率（默认 0.12）。调高 = 世界更拥挤，用来测"热区避难"
+    let photo: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("photo=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0.12);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -296,7 +318,7 @@ fn main() {
     assert!(!seeds.is_empty(), "至少要一个种子");
 
     println!(
-        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} ──",
+        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} ──",
         seeds,
         if free { "**不**" } else { "" },
         tries,
@@ -304,15 +326,16 @@ fn main() {
         cost_mul,
         upkeep_p,
         heat,
-        temp_dmg
+        temp_dmg,
+        photo
     );
     println!("（同参数多跑几个种子取平均：这模拟在临界点上，单点差 4 倍很常见）\n");
 
     // ── 第一轮：只动指数 p，不限体型 ──
     println!("【1】繁殖成本指数 p（max_body_cells = 0，不限）");
     println!(
-        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>7}  {:>6}  {:>7}",
-        "p", "个体", "平均体型", "最大体型", "存活种", "异养%", "嘴%", "杀手%"
+        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>8}  {:>7}  {:>6}  {:>7}",
+        "p", "个体", "平均体型", "最大体型", "存活种", "有光占用", "异养%", "嘴%", "杀手%"
     );
     // 往 1 以下扫是重点：p < 1 让大体型便宜，才有向上的选择压力。
     // 只留 4 个点是为了控功耗——这台机器长时间满载会过热（clock_watchdog_timeout），
@@ -331,10 +354,12 @@ fn main() {
     };
     let mut rows = Vec::new();
     for &p in &ps {
-        let r = run_seeds(p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg);
+        let r = run_seeds(
+            p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+        );
         println!(
-            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}  {:>6.1}  {:>7.1}",
-            p, r.pop, r.body_avg, r.body_max, r.species, r.hetero, r.mouth, r.killer
+            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
+            p, r.pop, r.body_avg, r.body_max, r.species, r.occ, r.hetero, r.mouth, r.killer
         );
         rows.push((p, r));
     }
@@ -419,7 +444,9 @@ fn main() {
         "上限", "个体", "平均体型", "最大体型", "存活种"
     );
     for cap in [0usize, 8, 16] {
-        let r = run_seeds(1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg);
+        let r = run_seeds(
+            1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+        );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
             if cap == 0 {
