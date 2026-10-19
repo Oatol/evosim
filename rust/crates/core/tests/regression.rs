@@ -297,3 +297,48 @@ fn fragmented_light_feeds_more_than_uniform_dimness() {
         dim
     );
 }
+
+/// 富贫斑块（批次 13）：开着也要活得下去，而且**能量账照样要平**。
+///
+/// 它只改天空光的数值和食物落点，不动任何能量流向，所以守恒等式必须仍然成立。
+#[test]
+fn ecosystem_survives_rich_patches_and_the_ledger_still_balances() {
+    let mut cfg = Config::default();
+    cfg.world.patch_richness = 0.7;
+    let mut w = World::new(cfg, Rng::new(1001));
+    generate_demo_world(&mut w, 1.0, 1.0);
+    seed_origin_of_life(&mut w);
+    spawn_population(&mut w, 8, 3);
+
+    // 世界必须**同时**有富区和贫区，否则这一批就白做了。
+    //
+    // 只看**顶行有光**的列：顶行是墙的那一列本来就不发光（光不该从墙里冒出来），
+    // 那是另一回事，混进来会把"最暗"算成 0。
+    let top: Vec<u8> = (0..w.grid.cols)
+        .map(|c| w.light.sky_at(&w.grid, c as i32, 0))
+        .filter(|&v| v > 0)
+        .collect();
+    let hi = *top.iter().max().unwrap();
+    let lo = *top.iter().min().unwrap();
+    assert!(hi > 200, "应该存在接近满照的富斑块，实测最亮 {}", hi);
+    assert!(
+        lo > 40 && lo < 140,
+        "贫斑块应该「有光但很穷」（40~140），实测 {}",
+        lo
+    );
+
+    for _ in 0..2000 {
+        w.step();
+    }
+    let n = alive(&w).len();
+    assert!(n > 50, "富贫斑块下 2000 tick 只剩 {} 个个体——生态崩了", n);
+
+    let a = w.energy_audit();
+    assert!(
+        a.drift().abs() < 1e-9 * a.stored().max(1.0),
+        "富贫斑块下能量账对不上：注入 {:.6}，存量 {:.6}，残差 {:.3e}",
+        a.injected,
+        a.stored(),
+        a.drift()
+    );
+}

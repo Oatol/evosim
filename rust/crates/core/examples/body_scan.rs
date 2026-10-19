@@ -51,6 +51,11 @@ struct Row {
     /// **必须分带看**：生物只占 5% 的格子，热区又只是一小块，
     /// 全局平均体型会把"大个体挤进热区"这件事完全稀释掉。
     bands: [(usize, f64); 5],
+    /// 按**所在格光照质量**分带（0–25% / 25–50% / 50–75% / 75–100% 满照）。
+    ///
+    /// 这是"富贫斑块到底有没有分化出两种体型"的直接读数。
+    /// 全局平均会把"富区大体型 + 贫区小体型"平成一个中间值，必须分带看。
+    light_bands: [(usize, f64); 4],
     /// 体型分布：1 格 / 2 格 / … 的个体占比（只统计前 10 档，够看形状）
     hist: [f64; 10],
 }
@@ -74,6 +79,7 @@ fn run(
     gcost: f64,
     stall: u32,
     cloud: f64,
+    rich: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -107,6 +113,8 @@ fn run(
     cfg.life.growth_stall_mature = stall;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
+    // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
+    cfg.world.patch_richness = rich;
 
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
@@ -170,6 +178,28 @@ fn run(
             let occ = w.grid.owners.iter().filter(|&&o| o >= 0).count();
             occ as f64 * 100.0 / lit as f64
         },
+        light_bands: {
+            let mut cnt = [0usize; 4];
+            let mut sum = [0usize; 4];
+            for o in &w.organisms {
+                let l = w.light.sky_at(&w.grid, o.col, o.row) as usize;
+                let b = (l * 4 / 256).min(3);
+                cnt[b] += 1;
+                sum[b] += o.cell_count();
+            }
+            let mut out = [(0usize, 0.0f64); 4];
+            for b in 0..4 {
+                out[b] = (
+                    cnt[b],
+                    if cnt[b] == 0 {
+                        0.0
+                    } else {
+                        sum[b] as f64 / cnt[b] as f64
+                    },
+                );
+            }
+            out
+        },
         bands: {
             let mut cnt = [0usize; 5];
             let mut sum = [0usize; 5];
@@ -222,6 +252,7 @@ fn run_seeds(
     gcost: f64,
     stall: u32,
     cloud: f64,
+    rich: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -233,6 +264,7 @@ fn run_seeds(
         killer: 0.0,
         occ: 0.0,
         bands: [(0, 0.0); 5],
+        light_bands: [(0, 0.0); 4],
         tries: 0,
         ok: 0,
         blk_space: 0,
@@ -244,7 +276,7 @@ fn run_seeds(
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud,
+            ambient, comfort, growth, gcost, stall, cloud, rich,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -257,6 +289,10 @@ fn run_seeds(
         for b in 0..5 {
             acc.bands[b].0 += r.bands[b].0;
             acc.bands[b].1 += r.bands[b].1;
+        }
+        for b in 0..4 {
+            acc.light_bands[b].0 += r.light_bands[b].0;
+            acc.light_bands[b].1 += r.light_bands[b].1;
         }
         acc.tries += r.tries;
         acc.ok += r.ok;
@@ -278,6 +314,9 @@ fn run_seeds(
     acc.occ /= n;
     for b in 0..5 {
         acc.bands[b].1 /= n;
+    }
+    for b in 0..4 {
+        acc.light_bands[b].1 /= n;
     }
     for k in 0..10 {
         acc.hist[k] /= n;
@@ -350,6 +389,11 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("cloud=").and_then(|v| v.parse().ok()))
         .unwrap_or(0.0);
+    // `rich=R`：富贫斑块强度（0 = 关闭）
+    let rich: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("rich=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0.0);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -414,7 +458,7 @@ fn main() {
     for &p in &ps {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud,
+            ambient, comfort, growth, gcost, stall, cloud, rich,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -456,6 +500,27 @@ fn main() {
             r.blk_small,
             pct(r.blk_small)
         );
+    }
+
+    // 光照质量分带：富贫斑块有没有分化出两种体型
+    println!("
+【1d】按所在格天空光分带（占满照比例 · 个体数 / 平均体型）");
+    print!("{:>5} ", "p");
+    for b in 0..4 {
+        print!("  {:>3}–{:>3}%        ", b * 25, b * 25 + 24);
+    }
+    println!();
+    for (p, r) in &rows {
+        print!("{:>5.2} ", p);
+        for b in 0..4 {
+            let (c, a) = r.light_bands[b];
+            if c == 0 {
+                print!("{:>5} {:>5}        ", "—", "—");
+            } else {
+                print!("{:>5} {:>5.2}        ", c, a);
+            }
+        }
+        println!();
     }
 
     // 温度分带：生态位到底有没有分化的直接读数
@@ -505,7 +570,7 @@ fn main() {
     for cap in [0usize, 8, 16] {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud,
+            ambient, comfort, growth, gcost, stall, cloud, rich,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

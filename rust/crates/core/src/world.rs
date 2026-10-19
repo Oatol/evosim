@@ -1846,7 +1846,12 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         // 天空光单独比对，因为它由滑块驱动，随时可能变。
         let sky = self.sky_level();
         let patch = self.patchiness();
-        if self.light_dirty || self.light.sky != sky || self.light.patchiness != patch {
+        let floor = self.patch_floor();
+        if self.light_dirty
+            || self.light.sky != sky
+            || self.light.patchiness != patch
+            || self.light.patch_floor != floor
+        {
             self.refresh_light();
         }
         let World { grid, fields, .. } = self;
@@ -1866,16 +1871,28 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     fn refresh_light(&mut self) {
         let sky = self.sky_level();
         let patch = self.patchiness();
+        let floor = self.patch_floor();
         self.light_dirty = false;
         let World { grid, light, .. } = self;
         light.sky = sky;
         light.patchiness = patch;
+        light.patch_floor = floor;
         light.rebuild(grid);
     }
 
     /// 云影强度（0~1）。面板上拖动时逐帧比较，所以单独抽出来。
     fn patchiness(&self) -> f32 {
         self.config.world.sky_patchiness.clamp(0.0, 1.0) as f32
+    }
+
+    /// 富贫斑块的地板：暗廊里还剩多少比例的天空光（1.0 = 无效果）。
+    ///
+    /// `patch_richness = r` → 地板 `1 - r`。做成派生值而不是第二个配置项，
+    /// 是因为它们本来就是一件事的两面：**越"富贫悬殊"，暗处就越穷**。
+    /// 让用户面对两个互相牵制的滑块只会调不明白。
+    fn patch_floor(&self) -> f32 {
+        let r = self.config.world.patch_richness.clamp(0.0, 1.0);
+        (1.0 - r) as f32
     }
 
     // ────────────────────────────── 点光源 ──────────────────────────────

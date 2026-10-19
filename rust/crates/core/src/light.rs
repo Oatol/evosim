@@ -84,6 +84,23 @@ pub struct Light {
     /// `p = 1` 时平均透射率约 0.5，等于世界暗了一半。
     /// 想保持总能量就同时把「天空光」或「光合速率」提上去。
     pub patchiness: f32,
+    /// **富贫斑块**：天空光透射率的下限（1.0 = 关闭，默认）。
+    ///
+    /// 和 `patchiness` 是**两个独立效果**，共用同一张噪声图：
+    ///
+    /// | 旋钮 | 作用 | 极端值长什么样 |
+    /// |---|---|---|
+    /// | `patchiness` | 碎片化：把明暗交界拉长 | 1.0 = 光岛 + **全黑**暗廊 |
+    /// | `patch_floor` | 质量梯度：暗处能有多暗 | 0.3 = 光岛 + **微光**暗廊 |
+    ///
+    /// 为什么需要第二个：`patchiness = 1` 的暗廊是**全黑**的，生物干脆不住；
+    /// 于是"活着的地方"仍然一样亮，环境压力还是全局均匀的（批次 12.1 实测：
+    /// 云影只让整体变穷，r/K 分化不出现）。
+    ///
+    /// 把下限抬到 0.3，暗廊变成**能住但很穷**的地方——那里光合只够维持、
+    /// 不够长身体，芽会卡住 → 提前成熟 → 小体型（r）。光岛里则长满（K）。
+    /// **同一张图上出现两种生态策略**，这才是"富斑块 / 贫斑块"的意义。
+    pub patch_floor: f32,
     /// 噪声的种子。**不进存档**：它永远等于世界 RNG 的种子，
     /// 读档时由 `into_world` 重新灌进去（见 save.rs）。
     #[serde(skip)]
@@ -95,6 +112,8 @@ pub struct Light {
     mask: Vec<f32>,
     /// 缓存键：`(cols, rows, patchiness.to_bits(), mask_seed)`。
     /// 任何一项变了才重算——`patchiness` 滑块是逐帧拖的，不能每次都算。
+    /// `patch_floor` 不单独进键：它作用在**同一张噪声图**上，
+    /// 变化时由 `World::refresh_light` 直接触发重建（见那里的比较）。
     #[serde(skip)]
     mask_key: (u32, u32, u32, u32),
 }
@@ -110,6 +129,7 @@ impl Default for Light {
             absorb: 3,
             sky: SUN_MAX,
             patchiness: 0.0,
+            patch_floor: 1.0,
             mask_seed: 0,
             mask: Vec::new(),
             mask_key: (0, 0, 0, 0),
@@ -185,7 +205,8 @@ impl Light {
         // 乘在最终场上才是"云在天上挡住了一片天"这个物理图像。
         //
         // 只乘天空光：云挡得住太阳，挡不住玩家放的灯。
-        if self.patchiness > 0.0 {
+        // 云影（碎片化）和富贫斑块（质量梯度）共用这张掩码，任一开启都要乘。
+        if self.patchiness > 0.0 || self.patch_floor < 1.0 {
             self.ensure_mask(grid.cols, grid.rows);
             for i in 0..self.len {
                 if self.sky_level[i] > 0 {
@@ -284,7 +305,13 @@ impl Light {
         if self.mask_key == key && self.mask.len() == self.len {
             return;
         }
-        self.mask = build_cloud_mask(cols, rows, self.patchiness, self.mask_seed);
+        self.mask = build_cloud_mask(
+            cols,
+            rows,
+            self.patchiness,
+            self.patch_floor,
+            self.mask_seed,
+        );
         self.mask_key = key;
     }
 
@@ -423,12 +450,7 @@ fn periodic_noise(col: f32, row: f32, cell: f32, cols: usize, seed: u32, offset:
 ///
 /// 两个八度：大的（44 格）定"光岛在哪"，小的（17 格）定"岛的边缘有多碎"。
 /// 权重 0.65 / 0.35 —— 主八度必须明显占优，否则岛会被打散成斑点。
-fn build_cloud_mask(cols: usize, rows: usize, p: f32, seed: u32) -> Vec<f32> {
-    let p = p.clamp(0.0, 1.0);
-    let mut out = vec![1.0f32; cols * rows];
-    if p <= 0.0 {
-        return out;
-    }
+pub fn cloud_noise(cols: usize, rows: usize, seed: u32) -> Vec<f32> {
     // (格宽, 权重, 采样偏移)。两个八度的偏移必须不同，否则它们在同一条格线上相关，
     // 细节会被主八度吃掉，看不出"碎边"。
     const OCTAVES: [(f32, f32, f32); 2] = [(44.0, 0.65, 0.37), (17.0, 0.35, 0.71)];
@@ -437,7 +459,6 @@ fn build_cloud_mask(cols: usize, rows: usize, p: f32, seed: u32) -> Vec<f32> {
     // 夹到 0/1 的部分就是"实心暗块 / 实心亮块"，正好是云该有的样子。
     const CONTRAST: f32 = 3.0;
 
-    // 第一遍：算原始噪声。
     let mut raw = vec![0.0f32; cols * rows];
     let mut sum = 0.0f32;
     for r in 0..rows {
@@ -457,9 +478,35 @@ fn build_cloud_mask(cols: usize, rows: usize, p: f32, seed: u32) -> Vec<f32> {
     // 归一化之后 `p` 变成一个**纯粹的碎片化旋钮**：p=1 永远约等于"平均一半的光，
     // 但一半的地方更亮、一半更暗"。想单独测"变暗"就把「天空光」往下拨。
     let mean = if raw.is_empty() { 0.5 } else { sum / raw.len() as f32 };
-    for (i, n) in raw.iter().enumerate() {
-        let stretched = ((*n - mean) * CONTRAST + 0.5).clamp(0.0, 1.0);
-        out[i] = 1.0 - p * (1.0 - stretched);
+    for n in raw.iter_mut() {
+        *n = ((*n - mean) * CONTRAST + 0.5).clamp(0.0, 1.0);
+    }
+    raw
+}
+
+/// 生成整张天空光透射率图（0~1，越大越透）。
+///
+/// 两个独立效果乘在一起，共用同一张噪声 `n`：
+///
+/// ```text
+/// 云影碎片化： 1 - p × (1 - n)          p = patchiness
+/// 富贫斑块  ： floor + (1 - floor) × n   floor = patch_floor
+/// 透射率    ： 两者相乘
+/// ```
+///
+/// `p = 0 且 floor = 1` 时结果是恒 1 —— 默认配置**逐位等于旧行为**。
+fn build_cloud_mask(cols: usize, rows: usize, p: f32, floor: f32, seed: u32) -> Vec<f32> {
+    let p = p.clamp(0.0, 1.0);
+    let floor = floor.clamp(0.0, 1.0);
+    let mut out = vec![1.0f32; cols * rows];
+    if p <= 0.0 && floor >= 1.0 {
+        return out;
+    }
+    let n = cloud_noise(cols, rows, seed);
+    for (i, v) in n.iter().enumerate() {
+        let cloud = 1.0 - p * (1.0 - v);
+        let rich = floor + (1.0 - floor) * v;
+        out[i] = cloud * rich;
     }
     out
 }
@@ -715,7 +762,7 @@ mod tests {
 
         // 归一化：p = 1 时平均透射率应该接近 0.5，而不是被"这个种子恰好很阴"带跑。
         // 这一条守的是 A/B 对比的可解释性——p 必须只代表"碎片化"，不代表"变暗"。
-        let m = build_cloud_mask(120, 60, 1.0, 777);
+        let m = build_cloud_mask(120, 60, 1.0, 1.0, 777);
         let avg = m.iter().sum::<f32>() / m.len() as f32;
         assert!(
             (avg - 0.5).abs() < 0.06,
@@ -794,5 +841,102 @@ mod tests {
                 b
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    /// `patch_floor = 1.0`（默认）时富贫斑块**完全不生效**：掩码恒为 1。
+    ///
+    /// 这是默认配置的守门测试——它一旦挂，所有既有生态基线都会悄悄偏移。
+    #[test]
+    fn floor_one_is_a_no_op() {
+        let g = Grid::new(60, 40, true);
+        let mut l = Light::new(60, 40);
+        l.patchiness = 0.0;
+        l.patch_floor = 1.0;
+        l.mask_seed = 1234;
+        l.rebuild(&g);
+        let plain = {
+            let mut p = Light::new(60, 40);
+            p.mask_seed = 1234;
+            p.rebuild(&g);
+            p.level
+        };
+        assert_eq!(l.level, plain, "floor = 1 必须逐位等于没有富贫斑块");
+    }
+
+    /// 富贫斑块造的是**梯度**，不是"墙"：最穷的地方也有光，只是很少。
+    ///
+    /// 这一条是这一批的核心断言。云影（`patchiness = 1, floor = 0`）会把暗廊
+    /// 压成全黑——那里生物干脆不住，于是"活着的地方"仍然一样亮，
+    /// 环境压力还是全局均匀的。抬高地板之后暗廊**能住但很穷**，
+    /// 同一个世界里才会同时出现两种策略。
+    #[test]
+    fn richness_makes_a_gradient_not_a_wall() {
+        let g = Grid::new(120, 60, true);
+        let mut l = Light::new(120, 60);
+        l.patchiness = 0.0;
+        l.patch_floor = 0.3; // = patch_richness 0.7
+        l.mask_seed = 777;
+        l.rebuild(&g);
+
+        let top: Vec<u8> = (0..120).map(|c| l.at(&g, c, 0)).collect();
+        let hi = *top.iter().max().unwrap();
+        let lo = *top.iter().min().unwrap();
+
+        assert!(hi > 230, "富斑块应该接近满照，实测最亮 {}", hi);
+        // 噪声不一定恰好取到 0，所以最穷的格子会略高于 0.3×255 ≈ 76。
+        assert!(
+            (60..=110).contains(&(lo as i32)),
+            "贫斑块应该在 0.3×255 ≈ 76 附近，实测最暗 {}",
+            lo
+        );
+        assert!(
+            lo > 40,
+            "贫斑块**不能是黑的**——那会变成坟场而不是生态位，实测最暗 {}",
+            lo
+        );
+        assert!(hi as i32 - lo as i32 > 100, "富贫差距应该很明显");
+    }
+
+    /// 两个效果**相乘**：富贫斑块只能让光更少，永远不会让光变多。
+    ///
+    /// 这条守的是叠加时的方向性。具体来说，云影的"全黑暗廊"在叠加后仍然是全黑
+    /// （0 乘任何数都是 0）——这是对的，云真的挡住了太阳。想要"微光暗廊"
+    /// 就只开富贫斑块、别开云影，两个旋钮各管一种世界。
+    #[test]
+    fn richness_never_brightens_anything() {
+        let g = Grid::new(120, 60, true);
+        let build = |p: f32, floor: f32| {
+            let mut l = Light::new(120, 60);
+            l.patchiness = p;
+            l.patch_floor = floor;
+            l.mask_seed = 424242;
+            l.rebuild(&g);
+            (0..120)
+                .map(|c| l.at(&g, c, 0) as u32)
+                .collect::<Vec<u32>>()
+        };
+        let cloud_only = build(0.6, 1.0);
+        let both = build(0.6, 0.3);
+        for i in 0..cloud_only.len() {
+            assert!(
+                both[i] <= cloud_only[i],
+                "第 {} 列：富贫斑块让光变亮了（{} > {}）",
+                i,
+                both[i],
+                cloud_only[i]
+            );
+        }
+        assert!(
+            both.iter().sum::<u32>() < cloud_only.iter().sum::<u32>(),
+            "叠加之后总光照应该更少"
+        );
+        // 只开云影时暗廊是全黑的
+        let pure_cloud = build(1.0, 1.0);
+        assert_eq!(*pure_cloud.iter().min().unwrap(), 0, "只开云影时暗廊全黑");
     }
 }

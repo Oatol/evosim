@@ -639,6 +639,33 @@ pub fn draw(
                 if (patch - before_patch).abs() > 1e-9 {
                     cfg.world.sky_patchiness = patch;
                 }
+
+                // ── 富斑块 / 贫斑块（批次 13）──
+                //
+                // 和「云影」共用同一张噪声图，但管的是**另一件事**：
+                // 云影决定"明暗交界有多长"，这一项决定"暗处能有多穷"。
+                //
+                // 云影的暗廊是全黑的，生物干脆不住；把地板抬起来之后，
+                // 暗廊变成**能住但很穷**的地方——光合只够维持、不够长身体。
+                // 这才是"富斑块 / 贫斑块"该有的样子。
+                let before_rich = cfg.world.patch_richness;
+                let mut rich = before_rich;
+                ui.add(
+                    egui::Slider::new(&mut rich, 0.0..=1.0)
+                        .text("富贫斑块")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "把世界切成「光岛」和「暗廊」，暗廊里只剩 (1-值) 的天空光。
+                     0（默认）= 关闭，逐位等于旧行为；0.7 = 暗廊只剩 30% 的光，
+                     能活但长不动 —— 这是推荐值；1.0 = 暗廊全黑（等于云影的极端）。
+                     食物密度也跟着这张图走：光足的地方草甸更密。
+                     和「云影」共用一张噪声图，但云影的暗廊是全黑的，两者别一起开。",
+                );
+                if (rich - before_rich).abs() > 1e-9 {
+                    cfg.world.patch_richness = rich;
+                }
                 let before_photo = cfg.life.photosynthesis_rate;
                 let mut photo = before_photo;
                 ui.add(
