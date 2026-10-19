@@ -62,7 +62,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v8：`Light` 拆成 `sky_level` / `lamp_level` 两层，`LifeCfg` 加了 `shade_strength`，
 /// 批次 9（遮挡）。同理。
 /// v9：`LifeCfg` 加了 `bite_rate` / `bite_efficiency`，批次 9.5（嘴咬活体）。同理。
-pub const VERSION: u32 = 9;
+/// v10：`CombatCfg` 加了 `food_blocks_movement`，批次 9.6（食物算不算路障）。同理。
+pub const VERSION: u32 = 10;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

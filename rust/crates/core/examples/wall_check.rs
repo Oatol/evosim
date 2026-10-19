@@ -16,6 +16,7 @@
 //! - `shade=K` / `shade` —— 遮挡强度，`shade=0` 是批次 9 之前的基线
 //! - `bite=R` / `bite` —— 咬合速率，`bite=0` 是批次 9.5 之前的基线
 //! - `lamp` —— 关掉天空光，只放 4 盏灯
+//! - `freewalk` —— 食物不挡移动（踩碎的能量进热池）
 
 use evosim_core::cell_type::ct;
 use evosim_core::config::Config;
@@ -37,6 +38,7 @@ fn main() {
             || a.starts_with("shade=")
             || a == "bite"
             || a.starts_with("bite=")
+            || a == "freewalk"
         {
             flags.push(a);
         } else {
@@ -81,6 +83,11 @@ fn main() {
     if let Some(r) = bite {
         cfg.life.bite_rate = r;
     }
+    // `freewalk`：食物不挡移动（批次 9.6）。踩碎的食物能量进热池。
+    let freewalk = flags.contains(&"freewalk");
+    if freewalk {
+        cfg.combat.food_blocks_movement = false;
+    }
     // 世界尺寸（小世界 = 有光区很快被填满）
     if let Some(n) = pos.get(2).and_then(|s| s.parse::<usize>().ok()) {
         cfg.world.cols = n;
@@ -111,8 +118,10 @@ fn main() {
         seed,
         w.config.life.photosynthesis_rate,
         format!(
-            " · 遮挡 k={:.2} · 咬合 {:.2}",
-            w.config.life.shade_strength, w.config.life.bite_rate
+            " · 遮挡 k={:.2} · 咬合 {:.2}{}",
+            w.config.life.shade_strength,
+            w.config.life.bite_rate,
+            if freewalk { " · 食物不挡路" } else { "" }
         )
     );
     println!(

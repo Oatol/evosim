@@ -266,6 +266,15 @@ impl World {
         } else if was_food {
             self.remove_food(index);
             // 格子不再是食物 → 剩下的能量不能留着（否则以后再变成食物会"复活"）
+            //
+            // **但能量不能凭空消失**：`owner >= 0` 说明是一具身体盖在了食物上
+            // （只可能发生在 `food_blocks_movement = false` 时）。那格食物是被
+            // **压碎**的，不是被吃掉的，所以记进热池——离开生物圈，但账要对得上。
+            // 嘴吃东西走的是 `reveal_floor`（owner = -1），它已经把能量记到自己身上了，
+            // 所以这里必须排除掉，否则每一口都会被重复计入热池。
+            if owner >= 0 {
+                self.heat_pool += self.grid.food[index] as f64;
+            }
             self.grid.food[index] = 0.0;
         }
     }
@@ -1902,6 +1911,77 @@ mod tests {
             (w.organisms[pi].energy - 0.6).abs() < 1e-9,
             "摄取倍率 2.0 应该抽 0.6，实测 {}",
             w.organisms[pi].energy
+        );
+    }
+
+    // ── 批次 9.6：食物算不算路障（移动 / 繁殖两个开关）──
+
+    /// 默认：食物挡移动（和 1.x 一致）。
+    #[test]
+    fn food_blocks_movement_by_default() {
+        let (mut w, _) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        let idx = w.grid.index(4, 3).unwrap();
+        w.set_cell_at(idx, ct::FOOD, -1);
+        assert!(
+            !w.organisms[0].is_clear(&w.grid, &w.config, 4, 3, 0),
+            "默认配置下不该能走进食物格"
+        );
+    }
+
+    /// 放开之后能踩上去，但**那格食物被压碎，能量进热池**（不是吃掉）。
+    #[test]
+    fn trampling_food_credits_the_heat_pool() {
+        let (mut w, _) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        w.config.combat.food_blocks_movement = false;
+        let idx = w.grid.index(4, 3).unwrap();
+        w.set_food_at(idx, 2.5);
+        assert!(w.organisms[0].is_clear(&w.grid, &w.config, 4, 3, 0));
+
+        // `write_grid` 移动之后做的就是这件事
+        w.set_cell_at(idx, ct::MOVER, 0);
+        assert_eq!(w.grid.types[idx], ct::MOVER);
+        assert_eq!(w.grid.food[idx], 0.0, "被压碎的食物不该留能量");
+        assert!(
+            (w.heat_pool - 2.5).abs() < 1e-6,
+            "压碎的 2.5 能量应该进热池，实测 {}",
+            w.heat_pool
+        );
+    }
+
+    /// **嘴吃东西不能被算成"压碎"**：它走 `reveal_floor`（owner = -1），
+    /// 能量已经记到个体身上了，再进热池就是重复计数。
+    #[test]
+    fn eating_food_does_not_credit_the_heat_pool() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let idx = w.grid.index(3, 2).unwrap();
+        w.set_cell_at(idx, ct::FOOD, -1);
+        let cell = w.organisms[0].anatomy.cells[0];
+        w.run_cell_function(0, cell);
+        assert!(w.organisms[0].energy > 0.0, "嘴应该吃到东西");
+        assert_eq!(w.heat_pool, 0.0, "吃掉的能量不该被记成压碎");
+    }
+
+    /// 两个开关互不牵连：只放开移动，繁殖照样被食物挡着（反之亦然）。
+    #[test]
+    fn movement_and_reproduction_food_flags_are_independent() {
+        let (mut w, _) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        let idx = w.grid.index(4, 3).unwrap();
+        w.set_cell_at(idx, ct::FOOD, -1);
+        let anat = w.organisms[0].anatomy.clone();
+
+        w.config.combat.food_blocks_movement = false;
+        assert!(w.organisms[0].is_clear(&w.grid, &w.config, 4, 3, 0));
+        assert!(
+            !w.organisms[0].can_place_at(&w.grid, &w.config, 4, 3, 0, &anat),
+            "放开移动不该顺带放开繁殖"
+        );
+
+        w.config.combat.food_blocks_movement = true;
+        w.config.combat.food_blocks_reproduction = false;
+        assert!(!w.organisms[0].is_clear(&w.grid, &w.config, 4, 3, 0));
+        assert!(
+            w.organisms[0].can_place_at(&w.grid, &w.config, 4, 3, 0, &anat),
+            "放开繁殖不该顺带放开移动"
         );
     }
 

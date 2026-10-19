@@ -654,6 +654,28 @@ pub fn draw(
                 if (eff - before_eff).abs() > 1e-9 {
                     cfg.life.bite_efficiency = eff;
                 }
+                // ── 食物算不算路障 ──
+                //
+                // 拆成两个开关是因为它们是两件事：穿过一片尸体堆去追猎物（移动），
+                // 和把新生儿生在一格食物上（繁殖）。一个开关管两件事的话，
+                // 想放开前者就必然放开后者。
+                //
+                // 打开「食物不挡移动」是有代价的：身体盖上去会把那格食物**压碎**
+                // （`types` 是单层，能量没地方存），压碎的能量进热池。
+                // 所以这个开关适合"让捕食者能穿过尸体堆"，不适合当日常配置。
+                ui.checkbox(
+                    &mut cfg.combat.food_blocks_movement,
+                    "食物挡住移动",
+                )
+                .on_hover_text(
+                    "关掉之后生物能穿过食物格。代价：盖上去会把那格食物压碎，\n\
+                     碎掉的能量记进热池（不是吃掉，是毁掉）。默认开启。",
+                );
+                ui.checkbox(
+                    &mut cfg.combat.food_blocks_reproduction,
+                    "食物挡住繁殖",
+                )
+                .on_hover_text("关掉之后新生儿可以直接生在食物格上（会压掉那格食物）。默认开启。");
                 ui.separator();
                 ui.checkbox(&mut cfg.mutation.use_global_mutability, "启用全局变异率");
                 ui.add(

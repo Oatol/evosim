@@ -395,7 +395,20 @@ impl Default for SenseCfg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombatCfg {
     pub insta_kill: bool,
+    /// 食物是否挡住**繁殖**（`can_place_at`）。
+    ///
+    /// 默认 `true`：新生儿不能生在一格食物里。允许的话那一格食物会被直接压掉，
+    /// 而"生孩子顺手把饭砸了"不是个有意思的机制。
     pub food_blocks_reproduction: bool,
+    /// 食物是否挡住**移动**（`is_clear`）。
+    ///
+    /// 默认 `true`（与 1.x 一致）。调成 `false` 之后生物可以走进/穿过食物格——
+    /// 这是给「捕食者要穿过一整片尸体堆去追猎物」这种场景准备的。
+    ///
+    /// **代价必须知道**：身体盖上去会把那一格食物压碎，`types` 是单层，
+    /// 食物的能量没地方存。压碎的能量记进 `heat_pool`（不是吃掉，是毁掉），
+    /// 所以"穿过尸体堆"本身是有成本的——**踩碎的比吃到的多**。
+    pub food_blocks_movement: bool,
 }
 
 impl Default for CombatCfg {
@@ -403,6 +416,7 @@ impl Default for CombatCfg {
         CombatCfg {
             insta_kill: false,
             food_blocks_reproduction: true,
+            food_blocks_movement: true,
         }
     }
 }

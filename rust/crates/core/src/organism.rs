@@ -300,8 +300,12 @@ impl Organism {
     // ────────────────────────────── 占位判定 ──────────────────────────────
 
     /// 身体能否整体落在 (col,row) 且朝向 rotation
+    ///
+    /// 食物是否挡路走 `combat.food_blocks_movement`（和繁殖的开关**分开**：
+    /// 「穿过尸体堆」和「生在食物上」是两件不同的事，一个开关管两件事
+    /// 会让人没法只放开其中一个）。
     pub fn is_clear(&self, grid: &Grid, cfg: &Config, col: i32, row: i32, rotation: u8) -> bool {
-        let blocks_food = cfg.combat.food_blocks_reproduction;
+        let blocks_food = cfg.combat.food_blocks_movement;
         for cell in &self.anatomy.cells {
             let c = col + rotate_col(cell.dx, cell.dy, rotation);
             let r = row + rotate_row(cell.dx, cell.dy, rotation);
