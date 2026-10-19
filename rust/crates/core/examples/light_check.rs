@@ -245,7 +245,7 @@ fn main() {
 
     // 食物存量（批次 8）：食物不再是二值的，这里能看出"肥尸体"到底存不存在
     let food_cells = w.food_cells.len();
-    let food_energy: f64 = w.food_cells.iter().map(|&k| w.grid.food[k] as f64).sum();
+    let food_energy: f64 = w.food_cells.iter().map(|&k| w.grid.food[k]).sum();
     let avg_food = if food_cells > 0 {
         food_energy / food_cells as f64
     } else {

@@ -40,6 +40,33 @@ pub struct TerrainSet {
     pub pos: Vec<i32>,
 }
 
+/// 能量账目快照 —— 见 [`World::energy_audit`]。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EnergyAudit {
+    /// 所有存活个体体内的能量总和
+    pub organisms: f64,
+    /// 地上所有食物格里剩下的能量总和
+    pub food: f64,
+    /// 热池：离开生物圈的能量（腐败、代谢热、压碎、塞不下的溢出）
+    pub heat: f64,
+    /// 丢弃：超出容量的光合产出 + 捕食的消化损耗
+    pub wasted: f64,
+    /// 累计注入（光合 + 腐殖质 + 手工放置）
+    pub injected: f64,
+}
+
+impl EnergyAudit {
+    /// 现在世界上一共有多少能量（含已经离开生物圈的那部分）。
+    pub fn stored(&self) -> f64 {
+        self.organisms + self.food + self.heat + self.wasted
+    }
+
+    /// 守恒残差：`stored - injected`。**应该恒等于 0**。
+    pub fn drift(&self) -> f64 {
+        self.stored() - self.injected
+    }
+}
+
 pub struct World {
     pub config: Config,
     pub rng: Rng,
@@ -84,6 +111,20 @@ pub struct World {
     /// `生物可用总能量 + heat_pool` 才应该等于「注入总量」。
     pub heat_pool: f64,
 
+    /// **累计注入生物圈的能量**（批次 10 守恒审计的左半边）。
+    ///
+    /// 这个世界的能量只有三个入口：
+    /// 1. 光合（`Behavior::Producer`）—— 唯一的生物入口；
+    /// 2. 腐殖质冒食物（`TickFx::Fertilize`）；
+    /// 3. 玩家手工放置的食物（画笔）。
+    ///
+    /// 三者都走 `set_cell_at(FOOD)`，所以计数点放在那里，一处就够。
+    /// 唯一的例外是**搬运**：`set_food_at` 把别处的能量（尸体）写进一格食物，
+    /// 那不是新注入，要在里面把账退掉——见该函数的注释。
+    ///
+    /// 有了它，[`World::energy_audit`] 才能给出「存量 − 注入」这个恒为 0 的残差。
+    pub energy_injected: f64,
+
     /// 光场需要重算吗。
     ///
     /// 光场是「地形 + 光源 + 天空光」的纯函数，这三样都变得远比 60 Hz 慢，
@@ -116,6 +157,7 @@ impl World {
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
             heat_pool: 0.0,
+            energy_injected: 0.0,
             light_dirty: true,
             order: Vec::new(),
             config,
@@ -261,20 +303,23 @@ impl World {
                 self.add_food(index);
                 // 新食物默认装满一份（`food_energy_scale`）。
                 // 尸体/腐殖质这种"要指定能量"的路径走 `set_food_at` 覆盖它。
-                self.grid.food[index] = self.config.food_energy_gain() as f32;
+                self.grid.food[index] = self.config.food_energy_gain();
+                // 这是能量**进入**世界的一条路（画笔 / 腐殖质），记账。
+                // `set_food_at` 会在后面把这笔退掉——那是搬运，不是注入。
+                self.energy_injected += self.grid.food[index];
             }
         } else if was_food {
             self.remove_food(index);
-            // 格子不再是食物 → 剩下的能量不能留着（否则以后再变成食物会"复活"）
+            // 食物格不再是食物了 —— 剩下的能量不能留在数组里
+            // （否则以后再变成食物会"复活"）。
             //
-            // **但能量不能凭空消失**：`owner >= 0` 说明是一具身体盖在了食物上
-            // （只可能发生在 `food_blocks_movement = false` 时）。那格食物是被
-            // **压碎**的，不是被吃掉的，所以记进热池——离开生物圈，但账要对得上。
-            // 嘴吃东西走的是 `reveal_floor`（owner = -1），它已经把能量记到自己身上了，
-            // 所以这里必须排除掉，否则每一口都会被重复计入热池。
-            if owner >= 0 {
-                self.heat_pool += self.grid.food[index] as f64;
-            }
+            // **但也不能凭空消失**：不管是身体压碎（`owner >= 0`）、画笔抹掉、
+            // 还是世界生成时清场，这些能量都离开了生物圈，记进热池。
+            //
+            // 唯一"合法拿走"这条能量的路径是嘴——它在调 `reveal_floor` 之前
+            // **会先把 `grid.food[index]` 清零**，所以走到这里时读到的是 0。
+            // 那条顺序不能反：反了的话同一口饭会被同时算进个体和热池。
+            self.heat_pool += self.grid.food[index];
             self.grid.food[index] = 0.0;
         }
     }
@@ -285,20 +330,31 @@ impl World {
         Some(index)
     }
 
-    /// 把地板重新铺回顶层（生物离开 / 食物被吃掉时用）
     /// 把一格变成食物，并指定它携带多少能量。
     ///
     /// 尸体和额外投放走这条路；普通画笔/腐殖质走 `set_cell_at` 的默认值。
+    ///
+    /// **这不是注入，是搬运**：能量是从个体身上（尸体）搬过来的，
+    /// 所以必须把 `set_cell_at` 刚记的那笔"新长出一份食物"退掉。
+    /// 不退的话每死一只个体就往 `energy_injected` 里多灌一份默认食物，
+    /// 守恒审计会显示"凭空多出能量"。
     pub fn set_food_at(&mut self, index: usize, energy: f64) {
         if index >= self.grid.len {
             return;
         }
+        // 原本就是食物的话，那一格的旧能量不能凭空消失，得跟新的加在一起
+        let was_food = self.grid.types[index] == ct::FOOD;
+        let carried = if was_food { self.grid.food[index] } else { 0.0 };
         self.set_cell_at(index, ct::FOOD, -1);
+        if !was_food {
+            self.energy_injected -= self.config.food_energy_gain();
+        }
         if self.grid.types[index] == ct::FOOD {
-            self.grid.food[index] = energy.max(0.0) as f32;
+            self.grid.food[index] = carried + energy.max(0.0);
         }
     }
 
+    /// 把地板重新铺回顶层（生物离开 / 食物被吃掉时用）
     pub fn reveal_floor(&mut self, index: usize) {
         if index >= self.grid.len {
             return;
@@ -449,14 +505,17 @@ impl World {
         let mut i = 0;
         while i < self.food_cells.len() {
             let index = self.food_cells[i];
-            let e = self.grid.food[index] as f64;
+            let e = self.grid.food[index];
             let decay = (e * rel).max(floor).min(e);
             let left = e - decay;
             self.heat_pool += decay;
+            // **先写回剩下的量再决定要不要删格**：`reveal_floor` 会把
+            // "消失的食物能量"记进热池，如果这里还留着 `e`，那笔 `decay`
+            // 就会被记第二次——账面上凭空多出能量（批次 10 的对账测试抓到过）。
+            self.grid.food[index] = left;
             if left <= 1e-6 {
                 self.reveal_floor(index); // 会从 food_cells 里 swap-remove
             } else {
-                self.grid.food[index] = left as f32;
                 i += 1;
             }
         }
@@ -655,12 +714,23 @@ impl World {
         self.organisms[i].in_radiation = false;
 
         // 代谢
+        //
+        // **这是「活着的价格」**。`metabolism_scale = 0` 时这里整段跳过——
+        // 细胞不吃饭也不会饿死，于是"养一个生产者细胞"是免费的，
+        // 光合就成了严格占优策略（批次 9.5 的实测：异养占比恒为 0）。
+        //
+        // 付出去的能量记进 `heat_pool`：代谢热也是"离开生物圈"，
+        // 不能凭空消失，否则守恒审计永远对不上账。
+        // 注意记的是**实际付出**（`min(upkeep, energy)`）而不是名义开销：
+        // 身上只剩 0.01 的个体付不出 0.05，多记的 0.04 是凭空的。
         let upkeep = self.organisms[i].upkeep_cost(&self.config);
         if upkeep > 0.0 {
             let limit = self.config.life.starvation_ticks;
             let mut starved = false;
+            let paid: f64;
             {
                 let org = &mut self.organisms[i];
+                paid = upkeep.min(org.energy.max(0.0));
                 org.energy -= upkeep;
                 if org.energy <= 0.0 {
                     org.energy = 0.0;
@@ -672,6 +742,7 @@ impl World {
                     org.starve_ticks = 0;
                 }
             }
+            self.heat_pool += paid;
             if starved {
                 self.kill_organism(i);
                 return;
@@ -797,11 +868,18 @@ impl World {
             EnterFx::Bog => {
                 let cost = self.config.terrain.swamp_move_cost;
                 if cost > 0.0 {
-                    let org = &mut self.organisms[i];
-                    org.energy -= cost;
-                    if org.energy < 0.0 {
-                        org.energy = 0.0;
+                    // 踩沼泽耗掉的能量也是"离开生物圈"，要进热池——
+                    // 否则能量账每走一步沼泽就漏一笔。
+                    let paid: f64;
+                    {
+                        let org = &mut self.organisms[i];
+                        paid = cost.min(org.energy.max(0.0));
+                        org.energy -= cost;
+                        if org.energy < 0.0 {
+                            org.energy = 0.0;
+                        }
                     }
+                    self.heat_pool += paid;
                 }
             }
         }
@@ -885,6 +963,41 @@ impl World {
 
     // ────────────────────────────── 细胞功能 ──────────────────────────────
 
+    // ────────────────────────────── 能量账 ──────────────────────────────
+
+    /// 拍一张能量账目的快照。
+    ///
+    /// 守恒律只对**生命层**严格成立：世界的能量只有三个入口
+    /// （光合、腐殖质、手工放置），其余全是内部搬运。所以
+    ///
+    /// ```text
+    /// 注入总量 == 生物体内 + 地上食物 + 热池 + 丢弃
+    /// ```
+    ///
+    /// 恒成立（浮点误差以内）。`drift()` 就是这条等式的残差——
+    /// 它不为 0 就说明有某条路径在**凭空造能量或吞能量**，
+    /// 这正是这个函数存在的意义：以后每加一条改动能量的路径，
+    /// 跑一下审计就知道账有没有漏。
+    ///
+    /// 注意 `heat_pool` 和 `energy_wasted` 都算**存量**而不是"损失"：
+    /// 能量离开生物圈不等于消失，账面上它还在这两个池子里。
+    pub fn energy_audit(&self) -> EnergyAudit {
+        let organisms: f64 = self
+            .organisms
+            .iter()
+            .filter(|o| o.alive)
+            .map(|o| o.energy)
+            .sum();
+        let food: f64 = self.food_cells.iter().map(|&k| self.grid.food[k]).sum();
+        EnergyAudit {
+            organisms,
+            food,
+            heat: self.heat_pool,
+            wasted: self.energy_wasted,
+            injected: self.energy_injected,
+        }
+    }
+
     /// 这个个体能存多少能量（见 [`Organism::energy_capacity`]）。
     fn energy_capacity(&self, i: usize) -> f64 {
         self.organisms[i].energy_capacity(&self.config)
@@ -909,9 +1022,21 @@ impl World {
                         continue;
                     };
                     if self.grid.types[index] == ct::FOOD {
-                        let e = self.grid.food[index] as f64;
+                        let e = self.grid.food[index];
+                        // **先清零再铺地板**：`set_cell_at` 会把"消失的食物能量"
+                        // 记进热池，不先取走的话这一口会被算两次。
+                        self.grid.food[index] = 0.0;
                         self.reveal_floor(index);
-                        self.organisms[i].energy += e * mult;
+                        let gain = e * mult;
+                        self.organisms[i].energy += gain;
+                        // 摄取倍率不是 1 的时候，吃这一口**改变**了世界里的能量：
+                        // > 1 等于凭空放大（记成注入），< 1 等于消化损耗（记成丢弃）。
+                        // 不记的话账上会凭空多/少一块，审计立刻红。
+                        if gain > e {
+                            self.energy_injected += gain - e;
+                        } else {
+                            self.energy_wasted += e - gain;
+                        }
                         continue;
                     }
                     // ── 咬活体（批次 9.5）──
@@ -972,6 +1097,10 @@ impl World {
                 // 超出部分丢弃并记账（批次 10 的守恒审计要用）。
                 let cap = self.energy_capacity(i);
                 let room = (cap - self.organisms[i].energy).max(0.0);
+                // **注入记的是 `gain` 全额**，装不下的那部分记在 `energy_wasted` 里，
+                // 两者相加才等于"这一格造出来的能量"。审计的等式是
+                // `注入 = 生物 + 食物 + 热池 + 丢弃`，所以丢弃必须留在右半边。
+                self.energy_injected += gain;
                 if gain <= room {
                     self.organisms[i].energy += gain;
                 } else {
@@ -1202,13 +1331,17 @@ impl World {
 
     fn reproduce_organism(&mut self, i: usize) -> bool {
         let need = self.organisms[i].food_needed(&self.config);
+        // 繁殖成本付出去就没了（新生儿从 0 能量起步），所以这笔也要进热池。
+        let paid: f64;
         {
             let org = &mut self.organisms[i];
+            paid = need.min(org.energy.max(0.0));
             org.energy -= need;
             if org.energy < 0.0 {
                 org.energy = 0.0;
             }
         }
+        self.heat_pool += paid;
 
         if !self.can_add_organism() {
             return false;
@@ -1587,6 +1720,10 @@ mod tests {
         let mut cfg = Config::default();
         cfg.world.cols = 8;
         cfg.world.rows = 8;
+        // **单细胞功能测试一律关掉代谢**：这些测试量的是"这一口吃到多少 / 这一格产出多少"，
+        // 代谢开着的话每 tick 都会先扣掉一笔开销，测出来的就是"收入减开销"。
+        // 代谢本身由 `upkeep_*` 那组测试单独覆盖（它们自己建世界）。
+        cfg.life.metabolism_scale = 0.0;
         let mut w = World::new(cfg, Rng::new(1));
         w.fill_grid(ct::EMPTY, false);
 
@@ -2251,6 +2388,58 @@ mod tests {
             up,
             w.organisms[0].energy
         );
+    }
+
+    /// 维持成本必须真的记进热池 —— 代谢热也是"离开生物圈"，不能凭空消失。
+    ///
+    /// 这是批次 10 守恒审计的地基：如果 upkeep 只是把能量减掉而不记账，
+    /// `生物总量 + 热池` 就会随时间单调下沉，账永远对不上。
+    #[test]
+    fn upkeep_is_paid_into_the_heat_pool() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.metabolism_scale = 1.0;
+        w.organisms[0].energy = 1.0;
+        let up = w.organisms[0].upkeep_cost(&w.config);
+        assert!((up - 0.010).abs() < 1e-9, "嘴的出厂开销应是 0.010，实测 {}", up);
+        w.act_organism(0);
+        assert!(
+            (w.heat_pool - up).abs() < 1e-9,
+            "付出的 {:.4} 应该进热池，实测 {:.4}",
+            up,
+            w.heat_pool
+        );
+    }
+
+    /// 付不出全款时，**记的是实际付出**（身上有多少付多少），不是名义开销。
+    ///
+    /// 否则每 tick 都会往热池里灌一笔"凭空的能量"，审计照样对不上。
+    #[test]
+    fn upkeep_is_capped_by_the_energy_on_hand() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.metabolism_scale = 1.0;
+        w.organisms[0].energy = 0.004; // 付不出 0.010
+        w.act_organism(0);
+        assert_eq!(w.organisms[0].energy, 0.0, "能量不该变成负数");
+        assert!(
+            (w.heat_pool - 0.004).abs() < 1e-9,
+            "只该记 0.004，实测 {:.4}",
+            w.heat_pool
+        );
+        assert_eq!(w.organisms[0].starve_ticks, 1, "付不出钱要开始计饥饿");
+    }
+
+    /// `metabolism_scale = 0` 等于关掉代谢：一分不扣，热池不动。
+    ///
+    /// 能量取 0.5 而不是 1.0：单格身体的繁殖阈值正好是 1.0，
+    /// 给 1.0 会直接触发繁殖并扣掉一份成本（`act_organism` 末尾含繁殖判定）。
+    #[test]
+    fn zero_metabolism_pays_nothing() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.metabolism_scale = 0.0;
+        w.organisms[0].energy = 0.5;
+        w.act_organism(0);
+        assert_eq!(w.organisms[0].energy, 0.5);
+        assert_eq!(w.heat_pool, 0.0);
     }
 
     /// 能量不能超过容量——光合直充体内之后必须有上限，否则无限膨胀。

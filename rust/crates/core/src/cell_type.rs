@@ -175,7 +175,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::BiteMult),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.002,
+        cost: 0.010,
         colors: [0xe07b39, 0xff9500, 0xe69f00],
         ..base(ct::MOUTH, "MOUTH", "mouth", "嘴")
     },
@@ -192,7 +192,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::ProdMult),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.002,
+        cost: 0.010,
         colors: [0x4caf50, 0x00e676, 0x009e73],
         ..base(ct::PRODUCER, "PRODUCER", "producer", "生产者")
     },
@@ -209,7 +209,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::Cost),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.008,
+        cost: 0.040,
         colors: [0x38bdf8, 0x00b0ff, 0x56b4e9],
         ..base(ct::MOVER, "MOVER", "mover", "移动器")
     },
@@ -227,7 +227,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::FoodValue),
         ],
         damage: 1.0,
-        cost: 0.006,
+        cost: 0.030,
         colors: [0xef4444, 0xff1744, 0xd55e00],
         ..base(ct::KILLER, "KILLER", "killer", "杀手")
     },
@@ -243,7 +243,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::ArmorResist),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.004,
+        cost: 0.020,
         colors: [0xa855f7, 0xd500f9, 0xcc79a7],
         ..base(ct::ARMOR, "ARMOR", "armor", "装甲")
     },
@@ -261,7 +261,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::SenseRange),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.006,
+        cost: 0.030,
         colors: [0xd8b4fe, 0xffffff, 0xf0e442],
         ..base(ct::EYE, "EYE", "eye", "眼睛")
     },
@@ -327,7 +327,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::StorageMult),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.004,
+        cost: 0.020,
         food_value: 3.0,
         colors: [0xfbbf24, 0xffd600, 0xf0c000],
         ..base(ct::STORAGE, "STORAGE", "storage", "储食")
@@ -344,7 +344,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::RegenMult),
             ParamRef::cell(AttrField::FoodValue),
         ],
-        cost: 0.005,
+        cost: 0.025,
         colors: [0x5eead4, 0x00ffc8, 0x44d7b6],
         ..base(ct::REGEN, "REGEN", "regen", "再生")
     },
@@ -360,7 +360,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
             ParamRef::cell(AttrField::FoodValue),
         ],
         damage: 1.0,
-        cost: 0.004,
+        cost: 0.020,
         colors: [0x94a3b8, 0xe0e6ee, 0xb8c0cc],
         ..base(ct::SPIKE, "SPIKE", "spike", "刺")
     },

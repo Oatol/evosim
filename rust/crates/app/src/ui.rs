@@ -509,6 +509,9 @@ pub fn draw(
     // 所以地形效果**不在这里**——那是每种地形一份，归「类型参数」。
     if st.show_params {
         let mut params_open = st.show_params;
+        // 能量账要在借 `&mut world.config` **之前**算好：
+        // 窗口闭包里拿着配置的可变借用，那之后再读 world 就是借用冲突。
+        let ledger = world.energy_audit();
         egui::Window::new("全局参数")
             .resizable(false)
             .collapsible(true)
@@ -516,12 +519,28 @@ pub fn draw(
             .default_pos([1100.0, 42.0])
             .show(ctx, |ui| {
                 let cfg = &mut world.config;
+                // 活着的价格。批次 10 起默认 1.0（不再是 0）：
+                // 每个细胞的 `消耗` 已经是真实量级（生产者 0.010 对满照收入 0.12），
+                // 所以 1.0 就是"照价付账"。0 = 关掉代谢，细胞不吃饭也不饿死。
+                //
+                // 量程 0~5：出厂 1.0 落在 20% 处。实测 2.0 世界开始稀疏、
+                // 4.0 濒临灭绝 —— 上限留着，是给"想看生态系统怎么死"的人用的。
+                let before_metab = cfg.life.metabolism_scale;
+                let mut metab = before_metab;
                 ui.add(
-                    egui::Slider::new(&mut cfg.life.metabolism_scale, 0.0..=5.0)
+                    egui::Slider::new(&mut metab, 0.0..=5.0)
                         .text("全局消耗量倍率")
-                        .step_by(0.05),
+                        .step_by(0.05)
+                        .fixed_decimals(2),
                 )
-                .on_hover_text("乘在所有细胞的每 tick 消耗上。0 = 关闭。");
+                .on_hover_text(
+                    "乘在所有细胞的每 tick 消耗上（默认 1.00）。\n\
+                     0 = 关掉代谢：细胞不吃饭也不饿死，光合变成稳赚不赔。\n\
+                     实测 2.0 世界开始稀疏、4.0 濒临灭绝。",
+                );
+                if (metab - before_metab).abs() > 1e-9 {
+                    cfg.life.metabolism_scale = metab;
+                }
                 ui.add(
                     egui::Slider::new(&mut cfg.life.food_energy_scale, 0.1..=10.0)
                         .text("食物量倍率")
@@ -733,6 +752,44 @@ pub fn draw(
                 if cap != before_cap {
                     cfg.life.max_body_cells = cap;
                 }
+
+                // ── 能量账（批次 10）──
+                //
+                // 守恒律只对生命层成立：世界只有三个能量入口（光合 / 腐殖质 /
+                // 手工放置），其余全是内部搬运。所以
+                // `注入 == 生物 + 食物 + 热池 + 丢弃` 应该恒成立，
+                // 残差不为 0 就说明有某条路径在凭空造能量或吞能量。
+                ui.separator();
+                ui.label(egui::RichText::new("能量账").strong());
+                egui::Grid::new("energy-ledger")
+                    .num_columns(2)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut egui::Ui, k: &str, v: f64| {
+                            ui.label(egui::RichText::new(k).color(Color32::from_rgb(150, 165, 185)));
+                            ui.label(format!("{:.1}", v));
+                            ui.end_row();
+                        };
+                        row(ui, "注入", ledger.injected);
+                        row(ui, "生物体内", ledger.organisms);
+                        row(ui, "地上食物", ledger.food);
+                        row(ui, "热池（离开生物圈）", ledger.heat);
+                        row(ui, "丢弃（超容量 + 消化）", ledger.wasted);
+                        let drift = ledger.drift();
+                        let color = if drift.abs() <= 1e-6 * ledger.stored().max(1.0) {
+                            Color32::from_rgb(120, 200, 140)
+                        } else {
+                            Color32::from_rgb(230, 120, 120)
+                        };
+                        ui.label(egui::RichText::new("残差").color(color));
+                        ui.label(egui::RichText::new(format!("{:.3e}", drift)).color(color));
+                        ui.end_row();
+                    });
+                ui.label(
+                    egui::RichText::new("注入 = 生物 + 食物 + 热池 + 丢弃，残差应恒为 0")
+                        .color(Color32::from_rgb(130, 140, 155))
+                        .size(11.0),
+                );
             });
         st.show_params = params_open;
     }

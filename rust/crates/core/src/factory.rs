@@ -88,7 +88,7 @@ pub fn is_area_empty(world: &World, col: i32, row: i32, radius: i32) -> bool {
 /// 在世界中央投放生命起源
 pub fn seed_origin_of_life(world: &mut World) -> u32 {
     let col = (world.grid.cols / 2) as i32;
-    let row = (world.grid.rows / 2) as i32;
+    let row = (world.grid.rows / 4) as i32;
 
     // 先把中心一小块清空
     for dr in -3..=3 {

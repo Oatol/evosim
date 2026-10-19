@@ -3,7 +3,7 @@
 //!   types  : Vec<u8>    顶层类型（可能被生物的身体盖住）
 //!   owners : Vec<i32>   所属生物 id，-1 = 独立格
 //!   floor  : Vec<u8>    地板层：这一格的地形是什么
-//!   food   : Vec<f32>   **食物格里的能量**（只有 types == FOOD 时有意义）
+//!   food   : Vec<f64>   **食物格里的能量**（只有 types == FOOD 时有意义）
 //!
 //! 为什么要有 floor：生物写格子会把 types 覆盖成自己的细胞类型。
 //! 地形只存 types 的话，一只生物从岩浆上走过就把岩浆抹掉了。
@@ -29,7 +29,7 @@ pub struct Grid {
     /// 尸体则携带死者生前的能量（见 `World::kill_organism`）。
     ///
     /// 只有 `types[i] == FOOD` 时这个值才有意义；其他格子恒为 0。
-    pub food: Vec<f32>,
+    pub food: Vec<f64>,
 }
 
 impl Grid {
@@ -106,7 +106,7 @@ impl Grid {
 
     /// 这一格食物还剩多少能量（非食物格恒为 0）
     #[inline]
-    pub fn food_at(&self, col: i32, row: i32) -> f32 {
+    pub fn food_at(&self, col: i32, row: i32) -> f64 {
         self.index(col, row).map(|i| self.food[i]).unwrap_or(0.0)
     }
 

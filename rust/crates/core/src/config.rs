@@ -179,6 +179,21 @@ pub struct LifeCfg {
     pub storage_capacity: f64,
     pub movers_can_produce: bool,
     pub turn_cooldown: i32,
+    /// 全局消耗量倍率 —— **「活着的价格」**（默认 1.0 = 按细胞类型参数里写的开销付账）。
+    ///
+    /// 1.x 里它是 0，等于关掉了代谢：细胞不吃饭也不会饿死。后果是
+    /// 「养一个生产者细胞」不要钱，光合就成了严格占优策略——
+    /// 批次 9.5 实测异养占比恒为 0，正是因为这个。
+    ///
+    /// 批次 10 把它拨到 1.0，并把每种细胞的 `cost` 改成**真实量级**
+    /// （生产者 0.010/tick 对满照收入 0.12/tick，约 8%）。
+    /// 之前那些 0.002~0.008 是"装饰值"：乘 0 永远是 0，乘 5 也才占收入的百分之几。
+    ///
+    /// **量级是怎么定的**：满照下一个生产者细胞挣 0.12/tick。
+    /// 消耗必须让「每格平均开销」落在收入的一半以下，否则移动器（0.040）
+    /// 这种贵细胞会直接把个体拖死。实测扫描（10000 tick、200×150）：
+    /// 倍率 1.0 世界健康（~1100 个体 / 致密 1%），2.0 开始稀疏（~600），
+    /// 4.0 已经濒临灭绝。所以默认 1.0，滑块上限 5 留给"想看灭绝"的人。
     pub metabolism_scale: f64,
     pub food_energy_scale: f64,
     pub starvation_ticks: i32,
@@ -213,7 +228,7 @@ impl Default for LifeCfg {
             storage_capacity: 6.0,
             movers_can_produce: false,
             turn_cooldown: 4,
-            metabolism_scale: 0.0,
+            metabolism_scale: 1.0,
             food_energy_scale: 1.0,
             starvation_ticks: 60,
             storage_food_bonus: 1.0,
@@ -595,8 +610,9 @@ impl AttrField {
             // 血量出厂 1.0 配 0~20 的话拖柄永远趴在 5%，既看不出当前值也调不动
             // ——细胞参数面板第一版就栽在这上面。
             AttrField::Hp => (0.0, 5.0, 0.1, 1),
-            // 消耗出厂 0.002~0.008，步长必须比它细，否则会被吸附成 0
-            AttrField::Cost => (0.0, 0.05, 0.001, 3),
+            // 消耗出厂 0.010~0.040（批次 10 起是真实量级，对满照收入 0.12/tick），
+            // 步长必须比最小值细，否则 0.010 会被吸附成 0
+            AttrField::Cost => (0.0, 0.08, 0.001, 3),
             AttrField::Damage => (0.0, 5.0, 0.1, 1),
             AttrField::SenseRange => (0.0, 10.0, 1.0, 0),
             AttrField::FoodValue => (0.0, 10.0, 0.1, 1),
@@ -614,7 +630,9 @@ impl AttrField {
     pub fn hint(self) -> &'static str {
         match self {
             AttrField::Hp => "被打掉多少伤害这个细胞才会死。0 = 一碰就碎。",
-            AttrField::Cost => "每 tick 的能量开销（会再乘上全局消耗量倍率）。",
+            AttrField::Cost => {
+                "每 tick 的能量开销（会再乘上全局消耗量倍率）。满照下一个生产者细胞挣 0.12。"
+            }
             AttrField::Damage => "攻击型细胞每次命中的伤害。",
             AttrField::SenseRange => "眼睛能看多远。0 = 用全局视野距离。",
             AttrField::FoodValue => "被吃掉时提供多少能量（会再乘上食物量倍率）。",

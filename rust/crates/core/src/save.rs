@@ -63,7 +63,10 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// 批次 9（遮挡）。同理。
 /// v9：`LifeCfg` 加了 `bite_rate` / `bite_efficiency`，批次 9.5（嘴咬活体）。同理。
 /// v10：`CombatCfg` 加了 `food_blocks_movement`，批次 9.6（食物算不算路障）。同理。
-pub const VERSION: u32 = 10;
+/// v11：`Grid.food` 从 `Vec<f32>` 改成 `Vec<f64>`，`SaveFile` 加了三个能量池
+/// （`heat_pool` / `energy_wasted` / `energy_injected`），批次 10（维持成本 + 守恒审计）。
+/// 三个池子以前**根本没存**——读档之后账目从 0 重新开始，审计会直接红。
+pub const VERSION: u32 = 11;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
@@ -92,6 +95,11 @@ pub struct SaveFile {
     /// 光场。**存下来而不是读档重算**：重算只依赖地形，理论上等价，
     /// 但存档应该能完整还原「用户看到的那一帧」，别在这里省 30KB。
     pub light: Light,
+    /// 能量账的三个池子（批次 10）。必须存，否则读档后守恒审计从 0 开始算，
+    /// `注入 == 存量` 这条等式立刻不成立。
+    pub heat_pool: f64,
+    pub energy_wasted: f64,
+    pub energy_injected: f64,
 }
 
 /// 只读文件头就能拿到的摘要（世界窗口列存档用）
@@ -161,6 +169,9 @@ pub fn encode(world: &World) -> Vec<u8> {
         species: world.species.clone(),
         fields: world.fields.clone(),
         light: world.light.clone(),
+        heat_pool: world.heat_pool,
+        energy_wasted: world.energy_wasted,
+        energy_injected: world.energy_injected,
     };
 
     let body = bincode::serialize(&save).expect("存档序列化失败");
@@ -195,6 +206,7 @@ pub fn decode(bytes: &[u8]) -> Result<World, SaveError> {
         || save.grid.types.len() != save.grid.len
         || save.grid.owners.len() != save.grid.len
         || save.grid.floor.len() != save.grid.len
+        || save.grid.food.len() != save.grid.len
     {
         return Err(SaveError::Corrupt("网格三层长度与尺寸不符".into()));
     }
@@ -248,6 +260,9 @@ fn into_world(save: SaveFile) -> World {
         species,
         fields,
         light,
+        heat_pool,
+        energy_wasted,
+        energy_injected,
     } = save;
 
     // 先按 config 建一个空世界（拿到尺寸正确的索引表），随后整体覆盖
@@ -278,6 +293,9 @@ fn into_world(save: SaveFile) -> World {
     world.species = species;
     world.fields = fields;
     world.light = light;
+    world.heat_pool = heat_pool;
+    world.energy_wasted = energy_wasted;
+    world.energy_injected = energy_injected;
 
     world
 }
@@ -419,6 +437,11 @@ mod tests {
         assert_eq!(back.species.size(), w.species.size());
         assert_eq!(back.fields.temp, w.fields.temp);
         assert_eq!(back.fields.rad, w.fields.rad);
+        // 能量账的三个池子必须一起存下来，否则读档后守恒审计从 0 重新开始
+        assert_eq!(back.heat_pool.to_bits(), w.heat_pool.to_bits());
+        assert_eq!(back.energy_wasted.to_bits(), w.energy_wasted.to_bits());
+        assert_eq!(back.energy_injected.to_bits(), w.energy_injected.to_bits());
+        assert_eq!(back.grid.food, w.grid.food, "食物能量必须逐位还原");
 
         for (a, b) in w.organisms.iter().zip(back.organisms.iter()) {
             assert_eq!(a.id, b.id);

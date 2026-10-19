@@ -17,6 +17,8 @@
 //! - `bite=R` / `bite` —— 咬合速率，`bite=0` 是批次 9.5 之前的基线
 //! - `lamp` —— 关掉天空光，只放 4 盏灯
 //! - `freewalk` —— 食物不挡移动（踩碎的能量进热池）
+//! - `metab=M` —— 全局消耗量倍率，`metab=0` 是批次 10 之前的基线
+//! - `prodcost=C` —— 生产者细胞每 tick 的消耗（默认 0.010），用来找异养的门槛
 
 use evosim_core::cell_type::ct;
 use evosim_core::config::Config;
@@ -39,6 +41,10 @@ fn main() {
             || a == "bite"
             || a.starts_with("bite=")
             || a == "freewalk"
+            || a == "metab"
+            || a.starts_with("metab=")
+            || a == "prodcost"
+            || a.starts_with("prodcost=")
         {
             flags.push(a);
         } else {
@@ -88,6 +94,29 @@ fn main() {
     if freewalk {
         cfg.combat.food_blocks_movement = false;
     }
+    // `metab=M`：全局消耗量倍率（批次 10 的"活着的价格"）。`metab=0` 是旧基线。
+    let mut metab: Option<f64> = None;
+    for f in &flags {
+        if *f == "metab" {
+            metab = Some(1.0);
+        } else if let Some(v) = f.strip_prefix("metab=") {
+            metab = v.parse().ok();
+        }
+    }
+    if let Some(m) = metab {
+        cfg.life.metabolism_scale = m;
+    }
+    // `prodcost=C`：生产者细胞的每 tick 消耗。用来回答「异养到底要什么条件」——
+    // 生产者越贵，纯吃别人的策略才越有机会。默认 0.010（对满照收入 0.12）。
+    let mut prodcost: Option<f64> = None;
+    for f in &flags {
+        if let Some(v) = f.strip_prefix("prodcost=") {
+            prodcost = v.parse().ok();
+        }
+    }
+    if let Some(c) = prodcost {
+        cfg.cells[ct::PRODUCER as usize].cost = c;
+    }
     // 世界尺寸（小世界 = 有光区很快被填满）
     if let Some(n) = pos.get(2).and_then(|s| s.parse::<usize>().ok()) {
         cfg.world.cols = n;
@@ -118,9 +147,11 @@ fn main() {
         seed,
         w.config.life.photosynthesis_rate,
         format!(
-            " · 遮挡 k={:.2} · 咬合 {:.2}{}",
+            " · 遮挡 k={:.2} · 咬合 {:.2} · 代谢 {:.1} · 生产者消耗 {:.3}{}",
             w.config.life.shade_strength,
             w.config.life.bite_rate,
+            w.config.life.metabolism_scale,
+            w.config.cells[ct::PRODUCER as usize].cost,
             if freewalk { " · 食物不挡路" } else { "" }
         )
     );
@@ -135,6 +166,25 @@ fn main() {
         w.step();
     }
     profile(&w);
+    audit(&w);
+}
+
+/// 能量账：注入 == 生物 + 食物 + 热池 + 丢弃（残差应为 0）。
+///
+/// 这条等式是批次 10 的地基。改任何"动能量"的代码之后跑一次，
+/// 残差不为 0 就说明有路径在凭空造能量或者吞能量。
+fn audit(w: &World) {
+    let a = w.energy_audit();
+    println!();
+    println!(
+        "能量账：注入 {:.1} = 生物 {:.1} + 食物 {:.1} + 热池 {:.1} + 丢弃 {:.1} · 残差 {:.3e}",
+        a.injected,
+        a.organisms,
+        a.food,
+        a.heat,
+        a.wasted,
+        a.drift()
+    );
 }
 
 /// 按行分带看占用率：如果"墙"是真的，它应该出现在光最强的那几行。
