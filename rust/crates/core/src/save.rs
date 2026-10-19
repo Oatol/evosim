@@ -70,7 +70,10 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v13：`LifeCfg` 加了 7 个字段——`repro_fail_costs_energy` / `repro_search_tries` /
 /// `min_breed_cells` / `upkeep_exponent` / `temp_damage` / `temp_comfort` /
 /// `temp_size_exponent`（批次 11 体型经济学 + 环境温度）。同理。
-pub const VERSION: u32 = 13;
+/// v14：`WorldCfg` 加了 `ambient_temp` / `temp_span`，`LifeCfg::temp_comfort`
+/// （0–1 比例）改名并换成 `comfort_temp`（摄氏度）。温度场从"绝对 0–255"
+/// 变成"高于环境的温差"。
+pub const VERSION: u32 = 14;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

@@ -521,6 +521,21 @@ impl App {
         self.upload_field();
     }
 
+    /// 「删光源」工具：删掉光标附近最近的那个光源。
+    ///
+    /// 半径 4 格：光晕在视觉上大概就是这个尺度，再大容易误删相邻的灯。
+    fn erase_light_at_cursor(&mut self) {
+        let Some((col, row)) = self.hover_cell else {
+            return;
+        };
+        let Some(world) = self.world.as_mut() else {
+            return;
+        };
+        if world.remove_nearest_light_source(col, row, 4) {
+            self.upload_field();
+        }
+    }
+
     /// 悬停读数：光标所在格子的类型 / 归属个体 / 能量
     fn update_hover(&mut self) {
         let Some(world) = self.world.as_ref() else {
@@ -543,15 +558,17 @@ impl App {
         if floor != ty && floor != ct::EMPTY {
             text.push_str(&format!("（地形：{}）", cell_type::label(floor)));
         }
-        // 每格环境属性（M4）：温度 / 辐射，0–255 归一化后按百分比显示
+        // 每格环境属性（M4）。
+        //
+        // 温度**总是显示**，而且换算成摄氏度：温度场存的是"高于环境的温差"，
+        // 单看 0–255 的原始值根本读不出"这里多热"。`22℃` 和 `122℃` 才读得懂。
         let temp = world.fields.temp_at(&world.grid, col, row);
         let rad = world.fields.rad_at(&world.grid, col, row);
-        if temp > 0 || rad > 0 {
-            text.push_str(&format!(
-                " · 温度 {}% · 辐射 {}%",
-                temp as u32 * 100 / 255,
-                rad as u32 * 100 / 255
-            ));
+        let celsius =
+            world.config.world.ambient_temp + (temp as f64 / 255.0) * world.config.world.temp_span;
+        text.push_str(&format!(" · 温度 {:.0}℃", celsius));
+        if rad > 0 {
+            text.push_str(&format!(" · 辐射 {}%", rad as u32 * 100 / 255));
         }
         // 食物现在带能量存量：同一格"一份食物"可能是满的也可能是快烂完的
         if ty == ct::FOOD {
@@ -1185,6 +1202,7 @@ impl ApplicationHandler for App {
                                 }
                                 ui::LeftAction::Inspect => self.inspect_at_cursor(),
                                 ui::LeftAction::Light => self.toggle_light_at_cursor(),
+                                ui::LeftAction::LightErase => self.erase_light_at_cursor(),
                                 ui::LeftAction::Pan => {
                                     // 平移工具：左键拖动即可平移（右键/中键任何时候都能拖）
                                     self.dragging = true;

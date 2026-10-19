@@ -21,6 +21,12 @@ pub enum Tool {
     Inspect,
     /// 放置点光源。光源**独立于物质世界**：不占格子、不挡路、画笔擦不到。
     Light,
+    /// 移除点光源：删掉光标附近最近的那一个。
+    ///
+    /// 单独立一个工具而不是靠「再点一下切换」：光源在画面上是一团光晕，
+    /// 视觉上的"这个光源"和它的格子中心差几格是常事；拖拽放置还会一次留下
+    /// 一串。按"最近的"删，点哪儿都能删掉眼前那个。
+    LightErase,
 }
 
 /// 左键按下时要做什么
@@ -32,6 +38,8 @@ pub enum LeftAction {
     Pan,
     /// 放置/移除点光源（点一下放、再点一下移除）
     Light,
+    /// 删掉光标附近最近的点光源
+    LightErase,
 }
 
 /// **放置模式优先于一切工具**。
@@ -48,6 +56,7 @@ pub fn left_action(placing: bool, tool: Tool) -> LeftAction {
         Tool::Inspect => LeftAction::Inspect,
         Tool::Pan => LeftAction::Pan,
         Tool::Light => LeftAction::Light,
+        Tool::LightErase => LeftAction::LightErase,
     }
 }
 
@@ -439,6 +448,13 @@ pub fn draw(
                     );
                     ui.label(
                         egui::RichText::new("左键放置 / 移除 · 不占格子，生物可以穿过")
+                            .color(TEXT_DIM)
+                            .size(10.0),
+                    );
+                } else if st.tool == Tool::LightErase {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("左键删掉附近最近的光源 · 可以拖拽连续删")
                             .color(TEXT_DIM)
                             .size(10.0),
                     );
@@ -874,20 +890,41 @@ pub fn draw(
                     cfg.life.temp_damage = td;
                 }
 
-                let before_tc = cfg.life.temp_comfort;
-                let mut tc = before_tc;
+                // 环境温度：整个世界的基础温度。
+                // 温度场存的是"高于它的温差"，所以调高这一项 = 全球变暖。
+                let before_amb = cfg.world.ambient_temp;
+                let mut amb = before_amb;
                 ui.add(
-                    egui::Slider::new(&mut tc, 0.0..=1.0)
-                        .text("舒适温度阈值")
-                        .step_by(0.05)
-                        .fixed_decimals(2),
+                    egui::Slider::new(&mut amb, 0.0..=60.0)
+                        .text("环境温度 ℃")
+                        .step_by(1.0)
+                        .fixed_decimals(0),
                 )
                 .on_hover_text(
-                    "温度场超过这个比例才开始受伤（0.15 ≈ 38/255）。
-                     调低 = 热区变大、更毒；调高 = 只有贴着岩浆才疼。",
+                    "整个世界的基础温度（默认 22℃）。\n\
+                     温度场存的是「高于环境的温差」，岩浆钉在满值，\n\
+                     所以岩浆的温度 = 环境温度 + 量程（默认 +100℃）。\n\
+                     调到 40℃ 以上，连常温区都会开始扣血——全球变暖旋钮。",
+                );
+                if (amb - before_amb).abs() > 1e-9 {
+                    cfg.world.ambient_temp = amb;
+                }
+
+                let before_tc = cfg.life.comfort_temp;
+                let mut tc = before_tc;
+                ui.add(
+                    egui::Slider::new(&mut tc, 0.0..=120.0)
+                        .text("舒适温度 ℃")
+                        .step_by(1.0)
+                        .fixed_decimals(0),
+                )
+                .on_hover_text(
+                    "局部温度低于它就不受伤（默认 35℃）。\n\
+                     环境 22℃ + 量程 100℃ → 岩浆约 122℃，\n\
+                     所以贴着岩浆必然受伤，离得远才安全。",
                 );
                 if (tc - before_tc).abs() > 1e-9 {
-                    cfg.life.temp_comfort = tc;
+                    cfg.life.comfort_temp = tc;
                 }
 
                 let before_te = cfg.life.temp_size_exponent;
@@ -1300,7 +1337,13 @@ mod tests {
     /// 所以用户拿着「检视」或「平移」时，装了蓝图也点不出东西。
     #[test]
     fn placement_wins_over_every_tool() {
-        for tool in [Tool::Paint, Tool::Pan, Tool::Inspect, Tool::Light] {
+        for tool in [
+            Tool::Paint,
+            Tool::Pan,
+            Tool::Inspect,
+            Tool::Light,
+            Tool::LightErase,
+        ] {
             assert_eq!(
                 left_action(true, tool),
                 LeftAction::Place,

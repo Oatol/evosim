@@ -1079,8 +1079,9 @@ impl World {
     /// 环境温度造成的伤害：**表面积/体积比**决定谁扛得住。
     ///
     /// ```text
-    /// excess = (温度 - 舒适阈值) / (1 - 舒适阈值)      // 0..1
-    /// 伤害   = temp_damage × excess² × 体型^temp_size_exponent
+    /// 局部温度 = ambient_temp + (场值/255) × temp_span      // 摄氏度
+    /// excess   = (局部温度 - comfort_temp) / temp_span      // 0..1
+    /// 伤害     = temp_damage × excess × 体型^temp_size_exponent
     /// ```
     ///
     /// 取个体占据格子里**最热**的一格：身体只要有一角伸进热区就得承受。
@@ -1095,7 +1096,9 @@ impl World {
         if !(base > 0.0) {
             return;
         }
-        let comfort = self.config.life.temp_comfort.clamp(0.0, 1.0);
+        let ambient = self.config.world.ambient_temp;
+        let span = self.config.world.temp_span.max(1.0);
+        let comfort = self.config.life.comfort_temp;
 
         let mut hottest = 0u8;
         for cell in &self.organisms[i].anatomy.cells {
@@ -1105,13 +1108,18 @@ impl World {
                 hottest = hottest.max(self.fields.temp[idx]);
             }
         }
-        let t = hottest as f64 / 255.0;
-        if t <= comfort {
+        // 场值是"高于环境的温差"，换算成绝对温度才能和舒适温度比。
+        let local = ambient + (hottest as f64 / 255.0) * span;
+        if local <= comfort {
             return;
         }
-        let excess = ((t - comfort) / (1.0 - comfort).max(1e-6)).clamp(0.0, 1.0);
+        let excess = ((local - comfort) / span).clamp(0.0, 1.0);
         let n = self.organisms[i].anatomy.cells.len().max(1) as f64;
-        let dmg = base * excess * excess * n.powf(self.config.life.temp_size_exponent);
+        // **线性**，不是平方。平方在"中等温度"上会把伤害压成零：
+        // 实测环境 40℃（比舒适温度高 5℃）时 excess = 0.05、平方后 0.0025，
+        // 伤害 0.001/tick，和 22℃ 的结果**一模一样**，看起来像 bug。
+        // 线性下 excess 本身就随距离上升，"越靠近岩浆越致命"照样成立。
+        let dmg = base * excess * n.powf(self.config.life.temp_size_exponent);
         if !(dmg > 0.0) {
             return;
         }
@@ -1669,6 +1677,29 @@ impl World {
             self.refresh_light();
         }
         removed
+    }
+
+    /// 删掉光标附近**最近**的那个点光源，返回有没有删掉。
+    ///
+    /// 为什么不按精确坐标删：光源在画面上是一团光晕，视觉上的"这个光源"
+    /// 和它的格子中心差几格是常事；拖拽放置还会一次留下一串。
+    /// 按"最近的"删，点哪儿都能删掉眼前那个，不用对准。
+    pub fn remove_nearest_light_source(&mut self, col: i32, row: i32, radius: i32) -> bool {
+        let mut best: Option<(usize, i32)> = None;
+        for (k, s) in self.light.sources.iter().enumerate() {
+            let d = (s.col - col).abs().max((s.row - row).abs());
+            if d <= radius && best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((k, d));
+            }
+        }
+        match best {
+            Some((k, _)) => {
+                self.light.sources.remove(k);
+                self.refresh_light();
+                true
+            }
+            None => false,
+        }
     }
 
     /// 这一格有没有点光源（UI 的「点一下放置、再点一下移除」用）
@@ -2851,24 +2882,57 @@ mod tests {
         assert_eq!(w.organisms[0].damage, 0.0);
     }
 
-    /// 舒适阈值以下不受伤害；以上才开始掉血。
+    /// 舒适温度以下不受伤害；以上才开始掉血。
+    ///
+    /// 现在温度是**摄氏度**：局部温度 = `环境温度 + 场值/255 × 量程`。
     #[test]
     fn heat_only_hurts_above_the_comfort_threshold() {
         let run = |temp: u8| -> f64 {
             let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
             w.config.life.temp_damage = 1.0;
-            w.config.life.temp_comfort = 0.5;
+            w.config.world.ambient_temp = 22.0;
+            w.config.world.temp_span = 100.0;
+            w.config.life.comfort_temp = 72.0; // = 22 + 50% 量程
             for t in w.fields.temp.iter_mut() {
                 *t = temp;
             }
             w.apply_heat_damage(0);
             w.organisms[0].damage
         };
-        assert_eq!(run(0), 0.0, "本底温度不该伤人");
-        assert_eq!(run(127), 0.0, "127/255 ≈ 0.498，还在阈值以下");
-        assert!(run(200) > 0.0, "200/255 应该开始受伤");
-        // 越热越疼（平方放大）
-        assert!(run(255) > run(200) * 2.0, "255 应该明显比 200 疼");
+        assert_eq!(run(0), 0.0, "22℃ 低于舒适温度 72℃");
+        assert_eq!(run(127), 0.0, "22 + 49.8 = 71.8℃，仍低于 72℃");
+        assert!(run(200) > 0.0, "22 + 78.4 = 100.4℃，应该开始受伤");
+        // 越热越疼（线性：excess 从 0.28 到 0.5）
+        assert!(
+            run(255) > run(200) * 1.5,
+            "122℃ 应该明显比 100℃ 疼：{} vs {}",
+            run(255),
+            run(200)
+        );
+    }
+
+    /// **环境温度是全局旋钮**：调高它，连一格热源都没有的常温区也会开始扣血。
+    ///
+    /// 这一条钉的是"世界有基础温度"这件事本身——温度场存的是温差，
+    /// 绝对温度 = 环境温度 + 温差，所以环境温度一涨，全场都跟着涨。
+    #[test]
+    fn raising_ambient_temperature_hurts_everywhere() {
+        let run = |ambient: f64| -> f64 {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+            w.config.life.temp_damage = 1.0;
+            w.config.world.ambient_temp = ambient;
+            w.config.world.temp_span = 100.0;
+            w.config.life.comfort_temp = 35.0;
+            // 场值全 0：世界里没有任何热源
+            for t in w.fields.temp.iter_mut() {
+                *t = 0;
+            }
+            w.apply_heat_damage(0);
+            w.organisms[0].damage
+        };
+        assert_eq!(run(22.0), 0.0, "22℃ 是常温，不该受伤");
+        assert_eq!(run(35.0), 0.0, "刚好等于舒适温度，仍不受伤");
+        assert!(run(45.0) > 0.0, "45℃ 超过舒适温度，常温区也该受伤");
     }
 
     /// **核心断言**：单位血量的伤害率随体型下降 —— 大个体在热区活得更久。
@@ -2885,7 +2949,7 @@ mod tests {
         ]);
         for w in [&mut w1, &mut w3] {
             w.config.life.temp_damage = 1.0;
-            w.config.life.temp_comfort = 0.0;
+            w.config.life.comfort_temp = 0.0;
             w.config.life.temp_size_exponent = -0.25;
             for t in w.fields.temp.iter_mut() {
                 *t = 255;
@@ -2912,7 +2976,7 @@ mod tests {
     fn the_hottest_cell_decides() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0), (ct::PRODUCER, 1, 0)]);
         w.config.life.temp_damage = 1.0;
-        w.config.life.temp_comfort = 0.0;
+        w.config.life.comfort_temp = 0.0;
         // 只有第二个细胞所在的格子是热的
         for t in w.fields.temp.iter_mut() {
             *t = 0;

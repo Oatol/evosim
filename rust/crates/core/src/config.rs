@@ -126,6 +126,18 @@ pub struct WorldCfg {
     /// **代价**：透射率恒 ≤ 1，所以开云影一定降低总光照（`p = 1` 时平均约 0.5）。
     /// 想保住总能量就同时把「天空光」或「光合速率」提上去。
     pub sky_patchiness: f64,
+    /// **环境温度（摄氏度）**。温度场的 0 就是这个世界温度。
+    ///
+    /// 温度场存的是"**高于环境的温差**"（0–255），不是绝对温度：
+    /// 局部温度 = `ambient_temp + (场值/255) × temp_span`。
+    /// 所以调高这一项 = 整个世界变热，**所有生物都开始受热**，不只是岩浆附近。
+    /// 岩浆本身钉在满值，永远是 `ambient + span` 摄氏度。
+    pub ambient_temp: f64,
+    /// 温度场满量程（255）对应的温差，摄氏度。
+    ///
+    /// 默认 100：岩浆 ≈ 122℃（环境 22℃ 时）。调小 = 岩浆没那么烫，
+    /// 但同样的场值会被解释成更大的温差，热区更危险。
+    pub temp_span: f64,
 }
 
 impl Default for WorldCfg {
@@ -141,6 +153,8 @@ impl Default for WorldCfg {
             auto_reset: false,
             sun_intensity: 1.0,
             sky_patchiness: 0.0,
+            ambient_temp: 22.0,
+            temp_span: 100.0,
         }
     }
 }
@@ -299,11 +313,13 @@ pub struct LifeCfg {
     /// 这一条管「能住在哪」。真实动物体型越大，表面积/体积比越小，
     /// 越不容易被环境温度左右（老鼠要不停吃来产热，野牛不用）。
     pub temp_damage: f64,
-    /// 舒适温度阈值（0–1，占温度场的比例）。低于它不受伤害。
+    /// **舒适温度（摄氏度）**。局部温度低于它不受伤害。
     ///
-    /// 0.15 意味着温度场超过 38/255 才开始受伤——足够让岩浆周围的
-    /// 热区形成一圈"只有大个体扛得住"的地带，又不至于让整个上半世界变毒。
-    pub temp_comfort: f64,
+    /// 局部温度 = `world.ambient_temp + (场值/255) × world.temp_span`。
+    /// 默认 35℃、环境 22℃ → 场值 0 的常温世界是安全的，
+    /// 靠近岩浆才开始疼。把 `ambient_temp` 调到 40℃ 以上，
+    /// 整个世界都会开始扣血——这就是"全球变暖"旋钮。
+    pub comfort_temp: f64,
     /// 伤害随体型的指数：`伤害 ∝ n^temp_size_exponent`。
     ///
     /// **默认 `-0.25`**，理由是"体温"而不是"接触面积"：
@@ -351,7 +367,7 @@ impl Default for LifeCfg {
             min_breed_cells: 1,
             upkeep_exponent: 1.0,
             temp_damage: 0.0,
-            temp_comfort: 0.15,
+            comfort_temp: 35.0,
             temp_size_exponent: -0.25,
         }
     }

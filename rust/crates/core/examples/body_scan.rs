@@ -68,6 +68,8 @@ fn run(
     heat: usize,
     temp_dmg: f64,
     photo: f64,
+    ambient: f64,
+    comfort: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -91,6 +93,9 @@ fn run(
     cfg.life.temp_damage = temp_dmg;
     // `photo`：光合速率（默认 0.12）。调高 = 世界更拥挤
     cfg.life.photosynthesis_rate = photo;
+    // `ambient` / `comfort`：环境温度与舒适温度（摄氏度）
+    cfg.world.ambient_temp = ambient;
+    cfg.life.comfort_temp = comfort;
 
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
@@ -200,6 +205,8 @@ fn run_seeds(
     heat: usize,
     temp_dmg: f64,
     photo: f64,
+    ambient: f64,
+    comfort: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -222,6 +229,7 @@ fn run_seeds(
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+            ambient, comfort,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -301,6 +309,15 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("photo=").and_then(|v| v.parse().ok()))
         .unwrap_or(0.12);
+    // `ambient=C`：环境温度（℃）；`comfort=C`：舒适温度（℃）
+    let ambient: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("ambient=").and_then(|v| v.parse().ok()))
+        .unwrap_or(22.0);
+    let comfort: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("comfort=").and_then(|v| v.parse().ok()))
+        .unwrap_or(35.0);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -356,6 +373,7 @@ fn main() {
     for &p in &ps {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+            ambient, comfort,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -446,6 +464,7 @@ fn main() {
     for cap in [0usize, 8, 16] {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
+            ambient, comfort,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
