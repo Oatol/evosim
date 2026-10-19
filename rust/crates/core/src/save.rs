@@ -75,7 +75,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// 变成"高于环境的温差"。
 /// v15：`LifeCfg` 加了 `growth_enabled` / `growth_cost` / `growth_seed_fraction`，
 /// `Organism` 加了 `growth_plan`（批次 12 成长过程）。
-pub const VERSION: u32 = 15;
+/// v16：`LifeCfg` 加了 `growth_stall_mature`，`Organism` 加了 `grow_stall`
+/// （批次 12.1 环境可塑 / 提前成熟）。
+pub const VERSION: u32 = 16;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

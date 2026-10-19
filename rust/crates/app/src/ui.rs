@@ -921,6 +921,26 @@ pub fn draw(
                     if (sf - before_sf).abs() > 1e-9 {
                         cfg.life.growth_seed_fraction = sf;
                     }
+
+                    // 环境可塑：芽长不动够久就提前成熟（体型小但能繁殖）。
+                    // 0 = 关闭（必须长满，默认）。
+                    let before_st = cfg.life.growth_stall_mature;
+                    let mut st_v = before_st.min(255) as u8;
+                    ui.add(
+                        egui::Slider::new(&mut st_v, 0..=120)
+                            .text("提前成熟阈值")
+                            .step_by(1.0),
+                    )
+                    .on_hover_text(
+                        "芽连续多少个 tick 长不动就「提前成熟」，0 = 关闭（必须长满）。
+                         长不动 = 能量不够或目标格被占，两者都算。
+                         建议 30~60（饥饿致死是 60 tick，太大等不到成熟就饿死）。
+                         实测：关闭时体型 3.01 / 人口 1710；调到 30 时
+                         体型 1.69 / 人口 2638 / 存活种 112 —— 这就是 r/K 的两端。",
+                    );
+                    if st_v as u32 != before_st {
+                        cfg.life.growth_stall_mature = st_v as u32;
+                    }
                 }
 
                 // ── 环境温度（批次 11）──

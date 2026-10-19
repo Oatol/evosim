@@ -72,6 +72,8 @@ fn run(
     comfort: f64,
     growth: bool,
     gcost: f64,
+    stall: u32,
+    cloud: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -101,6 +103,10 @@ fn run(
     // `growth` / `gcost`：成长过程与每格生长成本
     cfg.life.growth_enabled = growth;
     cfg.life.growth_cost = gcost;
+    // `stall`：连续卡多少 tick 就提前成熟（0 = 必须长满）
+    cfg.life.growth_stall_mature = stall;
+    // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
+    cfg.world.sky_patchiness = cloud;
 
     let mut w = World::new(cfg, Rng::new(seed));
     generate_demo_world(&mut w, 1.0, 1.0);
@@ -214,6 +220,8 @@ fn run_seeds(
     comfort: f64,
     growth: bool,
     gcost: f64,
+    stall: u32,
+    cloud: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -236,7 +244,7 @@ fn run_seeds(
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost,
+            ambient, comfort, growth, gcost, stall, cloud,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -332,6 +340,16 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("gcost=").and_then(|v| v.parse().ok()))
         .unwrap_or(1.0);
+    // `stall=N`：连续卡 N tick 就提前成熟（0 = 必须长满）
+    let stall: u32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("stall=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
+    // `cloud=P`：云影强度（0 = 无，1 = 光岛 + 暗廊）
+    let cloud: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("cloud=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0.0);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -360,7 +378,11 @@ fn main() {
         temp_dmg,
         photo,
         if growth {
-            format!("开(每格 {:.1})", gcost)
+            if stall > 0 {
+                format!("开(每格 {:.1} · 卡 {} 就成熟)", gcost, stall)
+            } else {
+                format!("开(每格 {:.1} · 必须长满)", gcost)
+            }
         } else {
             "关".to_string()
         }
@@ -392,7 +414,7 @@ fn main() {
     for &p in &ps {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost,
+            ambient, comfort, growth, gcost, stall, cloud,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -483,7 +505,7 @@ fn main() {
     for cap in [0usize, 8, 16] {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost,
+            ambient, comfort, growth, gcost, stall, cloud,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

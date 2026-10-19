@@ -68,6 +68,13 @@ pub struct Organism {
     /// 也是把体型变成"过程中的量"的关键。
     #[serde(default)]
     pub growth_plan: Option<Anatomy>,
+
+    /// 芽连续**没能长大**的 tick 数。到 `growth_stall_mature` 就提前成熟。
+    ///
+    /// 清零的时机只有两个：真的长了一格，或者成年了。
+    /// 所以它衡量的是"这个环境让这只芽卡了多久"，不是"它活了多久"。
+    #[serde(default)]
+    pub grow_stall: u32,
 }
 
 impl Organism {
@@ -98,6 +105,7 @@ impl Organism {
             last_move_ok: false,
             energy_gained_last: 0.0,
             growth_plan: None,
+            grow_stall: 0,
         };
         org.normalize_position(grid);
         org

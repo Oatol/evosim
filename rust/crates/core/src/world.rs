@@ -1112,11 +1112,12 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             return;
         };
         let cost = self.config.life.growth_cost.max(0.0);
-        if self.organisms[i].energy < cost {
-            return;
-        }
+        // 能量不够就长不动 —— 但**不能直接 return**：要走下面的停滞计数，
+        // 否则"饿着的芽"永远不会被判定为"该提前成熟"。
+        let can_pay = self.organisms[i].energy >= cost;
         let mut grew = false;
-        for cell in plan.cells.iter() {
+        if can_pay {
+            for cell in plan.cells.iter() {
             // 已经长出来了？
             if self.organisms[i].anatomy.cell_at(cell.dx, cell.dy).is_some() {
                 continue;
@@ -1183,6 +1184,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 }
             }
         }
+        }
         if grew && cost > 0.0 {
             let paid: f64;
             {
@@ -1196,9 +1198,31 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             // 生长耗能也是"离开生物圈"，进热池——否则账上会多出一块。
             self.heat_pool += paid;
         }
+        // ── 停滞计数与「提前成熟」──
+        //
+        // 长不动 = 能量不够（食物稀缺）**或**目标格被占（拥挤）。
+        // 两者在生态上是同一件事：**这个环境撑不起这么大的身体**。
+        //
+        // 连续卡够久就放弃长满，以当前体型成年 —— 这就是表型可塑性：
+        // 同一个基因型，食物充足时长成大体型（K），稀缺时提前成熟成小体型（r）。
+        if grew {
+            self.organisms[i].grow_stall = 0;
+        } else {
+            let limit = self.config.life.growth_stall_mature;
+            if limit > 0 {
+                self.organisms[i].grow_stall = self.organisms[i].grow_stall.saturating_add(1);
+                if self.organisms[i].grow_stall >= limit {
+                    self.organisms[i].growth_plan = None;
+                    self.organisms[i].grow_stall = 0;
+                    return;
+                }
+            }
+        }
+
         // 长满了 → 成年
         if self.organisms[i].anatomy.cells.len() >= plan.cells.len() {
             self.organisms[i].growth_plan = None;
+            self.organisms[i].grow_stall = 0;
         }
     }
 
@@ -3356,6 +3380,56 @@ mod tests {
             w.organisms[0].cell_count(),
             2,
             "目标格被堵死时应该退化长到别的相邻空位"
+        );
+    }
+
+    /// **环境可塑**：芽长不动够久就提前成熟，而且体型比目标小。
+    ///
+    /// 这条钉的是 r/K 分化的机制本身：食物充足时长满（K），
+    /// 稀缺/拥挤时提前成熟成小体型（r）。
+    #[test]
+    fn a_stalled_sprout_matures_early_and_stays_small() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_cost = 1.0;
+        w.config.life.growth_stall_mature = 3;
+        // 目标 3 格，但一格都不给它长（能量 0）
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        plan.add_cell(ct::PRODUCER, 0, 1, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 0.0;
+
+        for _ in 0..3 {
+            w.grow_organism(0);
+        }
+        assert!(
+            w.organisms[0].growth_plan.is_none(),
+            "卡满 3 tick 应该提前成熟"
+        );
+        assert_eq!(
+            w.organisms[0].cell_count(),
+            1,
+            "提前成熟的体型应该停在 1 格，而不是长到目标的 3 格"
+        );
+    }
+
+    /// 阈值设为 0 时**永远不提前成熟**：必须长满，保持旧行为。
+    #[test]
+    fn zero_stall_threshold_never_matures_early() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_stall_mature = 0;
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 0.0;
+        for _ in 0..100 {
+            w.grow_organism(0);
+        }
+        assert!(
+            w.organisms[0].growth_plan.is_some(),
+            "阈值 0 时不该提前成熟"
         );
     }
 }
