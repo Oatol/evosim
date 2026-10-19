@@ -960,7 +960,15 @@ impl World {
         }
     }
 
-    /// 遮挡：生产者正上方同列 `SHADE_DEPTH` 行内，有几个身体格（**谁的不重要**）。
+    /// 温度视图的显示上限（℃）。
+///
+/// 固定值，**不随环境温度移动**：如果范围跟着 `ambient + span` 一起动，
+/// 调环境温度时底色会跟着一起漂，反而看不出变化。
+/// 120℃ 让「常温」落在色表的深紫段、「岩浆」顶到最亮，
+/// 中间的变化肉眼可分。
+const TEMP_VIEW_MAX_C: f64 = 120.0;
+
+/// 遮挡：生产者正上方同列 `SHADE_DEPTH` 行内，有几个身体格（**谁的不重要**）。
     ///
     /// 返回天空光的透过率 `(1-k)^n`，`n = 0` 时是 1.0。
     ///
@@ -1700,6 +1708,28 @@ impl World {
             }
             None => false,
         }
+    }
+
+    /// **温度视图用的场**：把「高于环境的温差」换算成绝对温度再归一化。
+    ///
+    /// 不能直接拿 `fields.temp` 去着色——那是**温差**，世界 30℃ 时全场都是 0，
+    /// 画面纯黑，看起来像坏了。用户调了环境温度却看不到任何变化，
+    /// 就是因为这件事。
+    ///
+    /// 归一化范围固定 `0 .. TEMP_VIEW_MAX_C`，**不随环境温度移动**：
+    /// 如果范围跟着 `ambient + span` 一起动，调环境温度时底色会跟着一起漂，
+    /// 反而看不出变化。
+    pub fn temp_view(&self) -> Vec<u8> {
+        let ambient = self.config.world.ambient_temp;
+        let span = self.config.world.temp_span.max(1.0);
+        self.fields
+            .temp
+            .iter()
+            .map(|&t| {
+                let celsius = ambient + (t as f64 / 255.0) * span;
+                (celsius / Self::TEMP_VIEW_MAX_C * 255.0).clamp(0.0, 255.0) as u8
+            })
+            .collect()
     }
 
     /// 这一格有没有点光源（UI 的「点一下放置、再点一下移除」用）
@@ -2988,5 +3018,59 @@ mod tests {
         w.fields.temp[idx] = 255;
         w.apply_heat_damage(0);
         assert!(w.organisms[0].damage > 0.0, "一根手指伸进热区也要疼");
+    }
+
+    /// **温度视图必须显示绝对温度，不是温差。**
+    ///
+    /// 这个 bug 是用户报的：「世界温度调成 30℃ 了，但温度视图里看还是完全漆黑」。
+    /// 根因是着色时直接把 `fields.temp`（温差）传给了渲染层——30℃ 环境里
+    /// 没有任何热源，全场温差都是 0，于是整幅画面纯黑。
+    #[test]
+    fn temp_view_shows_absolute_temperature_not_delta() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.world.ambient_temp = 30.0;
+        w.config.world.temp_span = 100.0;
+        // 场值全 0：世界里一格热源都没有
+        for t in w.fields.temp.iter_mut() {
+            *t = 0;
+        }
+        let v = w.temp_view();
+        // 30℃ / 120℃ × 255 ≈ 63
+        assert!(
+            v.iter().all(|&x| (60..=66).contains(&x)),
+            "常温区应该显示约 64（30℃），实测 {}",
+            v[0]
+        );
+        assert!(v[0] > 40, "不能是纯黑——这正是用户看到的 bug");
+    }
+
+    /// 环境温度越高，同一个温差格子在视图上越亮。
+    #[test]
+    fn temp_view_brightens_with_ambient() {
+        let build = |ambient: f64| -> u8 {
+            let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+            w.config.world.ambient_temp = ambient;
+            w.config.world.temp_span = 100.0;
+            for t in w.fields.temp.iter_mut() {
+                *t = 0;
+            }
+            w.temp_view()[0]
+        };
+        assert!(
+            build(40.0) > build(22.0),
+            "环境 40℃ 应该比 22℃ 更亮：{} vs {}",
+            build(40.0),
+            build(22.0)
+        );
+    }
+
+    /// 岩浆（场值满）在任何环境温度下都顶到最亮。
+    #[test]
+    fn temp_view_saturates_at_lava() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.world.ambient_temp = 22.0;
+        w.config.world.temp_span = 100.0;
+        w.fields.temp[0] = 255; // 22 + 100 = 122℃ > 120℃ 上限
+        assert_eq!(w.temp_view()[0], 255, "岩浆应该顶满");
     }
 }

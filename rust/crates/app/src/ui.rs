@@ -376,7 +376,11 @@ pub fn draw(
                     };
                     if ui
                         .button(mode_label)
-                        .on_hover_text("Tab 依次切换：类型 → 物种 → 温度 → 辐射 → 光照")
+                        .on_hover_text(
+                            "Tab 依次切换：类型 → 物种 → 温度 → 辐射 → 光照\n\
+                             温度视图显示的是**绝对温度**（0–120℃ 映射到色表）：\n\
+                             常温是暗紫，岩浆顶到最亮。调「环境温度」会看到整幅底色变亮。",
+                        )
                         .clicked()
                     {
                         act.toggle_mode = true;

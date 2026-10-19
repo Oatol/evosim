@@ -492,7 +492,11 @@ impl App {
     fn upload_field(&mut self) {
         if let (Some(renderer), Some(world)) = (self.renderer.as_mut(), self.world.as_ref()) {
             match renderer.mode {
-                2 => renderer.upload_field(&world.fields.temp),
+                // 温度视图要传**绝对温度**，不能传温差——见 `World::temp_view`
+                2 => {
+                    let v = world.temp_view();
+                    renderer.upload_field(&v);
+                }
                 3 => renderer.upload_field(&world.fields.rad),
                 4 => renderer.upload_field(&world.light.level),
                 _ => {}
