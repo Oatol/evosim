@@ -528,6 +528,32 @@ pub fn draw(
                         .step_by(0.1),
                 )
                 .on_hover_text("一份食物能提供多少能量（默认 1）。");
+                // ── 食物腐败 ──
+                //
+                // 腐败是「相对 + 绝对」两条腿：相对项让大块尸体慢慢烂，绝对项
+                // 让小块食物干脆消失。这里只把**绝对项**放出来，因为它是
+                // 「尸体能躺多久」的直接旋钮——调大 = 残骸很快清空，
+                // 调小 = 肥尸体变成一块能吃很久的资源（守尸 / 抢食才有戏）。
+                //
+                // 写法照 cells.rs 的老规矩：先读进局部变量、画完再比对，
+                // 只在**真的变了**才写回。egui 的 Slider 绘制时会按 `step_by`
+                // 吸附值，无条件写回等于让「打开参数面板」变成一个改配置的动作。
+                let before_floor = cfg.world.food_decay_floor;
+                let mut floor = before_floor;
+                ui.add(
+                    egui::Slider::new(&mut floor, 0.0..=0.1)
+                        .text("食物腐败下限")
+                        .step_by(0.005)
+                        .fixed_decimals(3),
+                )
+                .on_hover_text(
+                    "每 tick 至少流失这么多能量（默认 0.005）。\n\
+                     调小 = 小块食物也能拖很久，肥尸体变成长期资源；\n\
+                     调大 = 残骸很快清空。0 = 只按百分比衰减。",
+                );
+                if (floor - before_floor).abs() > 1e-9 {
+                    cfg.world.food_decay_floor = floor;
+                }
                 // ── 光与光合 ──
                 //
                 // 批次 7 新增。生产者不再是永动机：它把**所在格的光**转成能量。

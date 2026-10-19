@@ -98,10 +98,15 @@ pub struct WorldCfg {
     /// **大块尸体靠它慢慢烂**：`e -= max(e × rate/100, floor)`。
     /// 旧的 2.0 是"每 tick 有 2% 概率整格消失"，断崖式，看不出过程。
     pub food_decay_rate: f64,
-    /// 食物每 tick 的绝对衰减下限（能量单位，默认 0.02）。
+    /// 食物每 tick 的绝对衰减下限（能量单位，默认 0.005）。
     ///
     /// 没有它，小块食物的指数衰减尾巴会拖得极长——0.001 点能量赖在格子上不走，
     /// 既占地方又让"食物格数"这个指标失真。
+    ///
+    /// 出厂值从 0.02 降到 0.005 是**为了让「肥尸体」活得久一点**：
+    /// 一块 1.0 能量的肉，0.02 时每 tick 掉 0.02（50 tick 就没了），
+    /// 0.005 时前 100 tick 由相对项主导、之后才落到绝对项，寿命翻了一倍多。
+    /// 守尸 / 抢食这类依赖「尸体是一块能吃很久的资源」的行为需要这个时间尺度。
     pub food_decay_floor: f64,
     pub clear_walls_on_reset: bool,
     pub auto_reset: bool,
@@ -120,7 +125,7 @@ impl Default for WorldCfg {
             wrap_edges: true,
             food_drop_prob: 0.0,
             food_decay_rate: 1.0,
-            food_decay_floor: 0.02,
+            food_decay_floor: 0.005,
             clear_walls_on_reset: false,
             auto_reset: false,
             sun_intensity: 1.0,
