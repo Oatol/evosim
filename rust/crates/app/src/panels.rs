@@ -125,6 +125,31 @@ impl Panels {
         self.species_drag = None;
     }
 
+    /// 检视工具点了某一格（`owner` 是那一格的生物 id，`-1` = 空地）。
+    ///
+    /// **点了生物必须顺带把检视器打开**。批次 17 把窗口默认值全改成了关，
+    /// 于是这里只设 `selected_org` 的话，用户拿检视工具点半天什么都不会出现
+    /// —— 面板是关的，窗口根本不画。
+    ///
+    /// 点空地只清选中，**不关面板**：用户可能只是想取消选中再点下一个，
+    /// 每点一下空地就关一次窗口会很难用。
+    pub fn on_inspect(&mut self, owner: i32) {
+        // 图钉锁着的时候不换目标，但仍然保证面板是开着的。
+        if self.pinned && self.selected_org.is_some() {
+            if owner >= 0 {
+                self.show_inspector = true;
+            }
+            return;
+        }
+        if owner >= 0 {
+            self.selected_org = Some(owner as u32);
+            self.show_inspector = true;
+        } else {
+            self.selected_org = None;
+            self.follow = false;
+        }
+    }
+
     /// 采样一个点。
     ///
     /// 间隔会**自适应**：历史满了就把间隔翻倍、隔一个丢一个，而不是丢掉最老的点。
@@ -778,6 +803,42 @@ mod tests {
         let (mut rects, mut texts) = (Vec::new(), Vec::new());
         walk(&flat, &mut rects, &mut texts);
         (rects.into_iter().cloned().collect(), texts.into_iter().cloned().collect())
+    }
+
+    /// 拿检视工具点生物，**检视器必须自己打开**。
+    ///
+    /// 回归：批次 17 把窗口默认值全改成了关，于是 `inspect_at_cursor` 只设
+    /// `selected_org` 的话，用户点半天什么都不会出现（面板关着，窗口不画）。
+    #[test]
+    fn inspecting_an_organism_opens_the_panel() {
+        let mut p = Panels::default();
+        assert!(!p.show_inspector, "默认应该是关的（批次 17）");
+
+        p.on_inspect(7);
+        assert_eq!(p.selected_org, Some(7), "应该选中那只生物");
+        assert!(p.show_inspector, "点生物必须把检视器打开");
+
+        // 点空地：清选中，但**不关面板**（否则连着点几下就得反复重开）
+        p.on_inspect(-1);
+        assert_eq!(p.selected_org, None, "点空地要清掉选中");
+        assert!(p.show_inspector, "点空地不该把面板关掉");
+    }
+
+    /// 图钉锁着的时候不换目标，但仍然保证面板是开着的。
+    #[test]
+    fn pinned_inspector_keeps_its_target_but_stays_open() {
+        let mut p = Panels::default();
+        p.on_inspect(3);
+        p.pinned = true;
+
+        p.on_inspect(9);
+        assert_eq!(p.selected_org, Some(3), "图钉锁着时不该换目标");
+        assert!(p.show_inspector);
+
+        // 手动关掉面板之后再点生物：仍然要打开
+        p.show_inspector = false;
+        p.on_inspect(9);
+        assert!(p.show_inspector, "图钉状态下点生物也要把面板叫出来");
     }
 
     fn species_panels() -> Panels {

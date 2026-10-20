@@ -812,25 +812,20 @@ impl App {
         let Some((col, row)) = self.hover_cell else {
             return;
         };
-        let Some(world) = self.world.as_ref() else {
-            return;
+        // 先把 owner 取出来，借 `world` 的作用域必须在这里结束——
+        // 下面要改 `self.panels`。
+        let owner = {
+            let Some(world) = self.world.as_ref() else {
+                return;
+            };
+            let Some(idx) = world.grid.index(col, row) else {
+                return;
+            };
+            world.grid.owners[idx]
         };
-        let Some(idx) = world.grid.index(col, row) else {
-            return;
-        };
-        let owner = world.grid.owners[idx];
-
-        // 图钉：锁定当前检视目标——点空地或点别的个体都不会换目标。
-        // （1.x 的图钉语义是"点画布不关闭浮窗"；2.0 的检视器是 egui 窗口，本来就不会
-        //   被点关掉，所以把图钉落到"锁目标"上，功能才实在。）
-        if self.panels.pinned && self.panels.selected_org.is_some() {
-            return;
-        }
-
-        self.panels.selected_org = if owner >= 0 { Some(owner as u32) } else { None };
-        if self.panels.selected_org.is_none() {
-            self.panels.follow = false;
-        }
+        // 图钉 / 打开面板 / 清选中这一整套语义都在 `Panels::on_inspect` 里，
+        // 那边可以单测（这里要 `App`，测不了）。
+        self.panels.on_inspect(owner);
     }
 
     fn paint_at_cursor(&mut self) {
