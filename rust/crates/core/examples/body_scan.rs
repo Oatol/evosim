@@ -84,6 +84,7 @@ fn run(
     bud: bool,
     budper: f64,
     budfeed: f64,
+    oldbite: bool,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -121,6 +122,8 @@ fn run(
     cfg.life.budding_enabled = bud;
     cfg.life.bud_cells_per_slot = budper;
     cfg.life.bud_feed = budfeed;
+    // `oldbite`：退回旧的「按接触面积叠加」伤害
+    cfg.combat.killer_bite_capped = !oldbite;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -267,6 +270,7 @@ fn run_seeds(
     bud: bool,
     budper: f64,
     budfeed: f64,
+    oldbite: bool,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -291,6 +295,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
+            oldbite,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -415,6 +420,7 @@ fn main() {
         .unwrap_or(0);
     // `bud`：出芽
     let bud = args.iter().any(|a| a == "bud");
+    let oldbite = args.iter().any(|a| a == "oldbite");
     let budper: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("budper=").and_then(|v| v.parse().ok()))
@@ -495,6 +501,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
+            oldbite,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -607,6 +614,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
+            oldbite,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

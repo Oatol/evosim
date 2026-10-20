@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::anatomy::{Anatomy, BodyCell, Flags};
@@ -134,6 +134,12 @@ pub struct World {
     /// 出芽模式下芽位已满（母体已经挂着 `bud_slots` 个未成熟的芽）
     pub repro_blocked_buds: u64,
 
+    /// 本 tick 这个攻击者**已经咬过**的目标 id（「整口咬合」用）。
+    ///
+    /// 每个个体行动前清空，所以它天然是"per 攻击者、per tick"的。
+    /// 不进存档：它只活在一次 `act_organism` 之内。
+    killer_hits: HashSet<u32>,
+
     /// **累计注入生物圈的能量**（批次 10 守恒审计的左半边）。
     ///
     /// 这个世界的能量只有三个入口：
@@ -188,6 +194,7 @@ impl World {
             repro_blocked_mutated: 0,
             repro_blocked_too_small: 0,
             repro_blocked_buds: 0,
+            killer_hits: HashSet::new(),
             energy_injected: 0.0,
             light_dirty: true,
             order: Vec::new(),
@@ -730,6 +737,8 @@ impl World {
         }
         let before = self.organisms[i].energy;
         self.organisms[i].last_move_ok = false;
+        // 「整口咬合」的记账是 per 攻击者 / per tick 的，每次行动前清空。
+        self.killer_hits.clear();
         self.act_organism_inner(i);
         if let Some(org) = self.organisms.get_mut(i) {
             org.energy_gained_last = org.energy - before;
@@ -1407,6 +1416,27 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 if damage <= 0.0 {
                     return;
                 }
+                // 「整口咬合」：这一口的大小 = 单格伤害 × 这个个体的杀手细胞数。
+                //
+                // 关键在于它**不随接触面积放大**：一只 5 杀手细胞的捕食者贴着
+                // 猎物的 5 个格子，仍然只咬一口 5 点，而不是 5 口各 5 点。
+                // 这样击杀时间 = 目标血量 / 咬合力，体型才买得到生存时间。
+                let capped = self.config.combat.killer_bite_capped;
+                let bite = if capped {
+                    let n = self.organisms[i]
+                        .anatomy
+                        .cells
+                        .iter()
+                        .filter(|c| {
+                            cell_type::def(c.type_id)
+                                .map(|d| d.behavior == Some(Behavior::Killer))
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    damage * n as f64
+                } else {
+                    damage
+                };
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
                 let my_id = self.organisms[i].id;
@@ -1429,12 +1459,22 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                             }
                             // resist <= 0 或 NaN 都退回"不减免"，按普通格处理
                             if resist > 0.0 {
-                                let eff = damage * (1.0 - resist);
+                                // 装甲只减免"这一口"，同样不按接触面积叠加。
+                                if capped && !self.killer_hits.insert(owner as u32) {
+                                    continue;
+                                }
+                                let eff = bite * (1.0 - resist);
                                 self.harm_organism(owner as u32, eff, Some(my_id));
                                 continue;
                             }
                         }
-                        self.harm_organism(owner as u32, damage, Some(my_id));
+                        // 「整口咬合」：同一个目标这一 tick 只挨这一口。
+                        // 记在 `killer_hits` 里的是**目标 id**，所以同一只捕食者的
+                        // 第 2、3、4 个接触格都会在这里被挡掉。
+                        if capped && !self.killer_hits.insert(owner as u32) {
+                            continue;
+                        }
+                        self.harm_organism(owner as u32, bite, Some(my_id));
                     }
                 }
             }
@@ -3902,5 +3942,138 @@ mod tests {
         assert_eq!(w.organisms.len(), before + 1);
         let child = &w.organisms[before];
         assert_eq!(child.parent_id, None, "普通繁殖的后代不该挂靠母体");
+    }
+
+    // ────────────── 批次 16：整口咬合（击杀时间 = 目标血量 / 咬合力）──────────────
+
+    /// 造一个「决斗场」：捕食者放在 pc，猎物放在 vc，两边身体形状自己给。
+    fn arena(
+        pred: &[(u8, i32, i32)],
+        pc: (i32, i32),
+        prey: &[(u8, i32, i32)],
+        vc: (i32, i32),
+    ) -> (World, usize, usize) {
+        let mut cfg = Config::default();
+        cfg.world.cols = 16;
+        cfg.world.rows = 16;
+        cfg.life.metabolism_scale = 0.0;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+
+        let mut a = Organism::new(&w.config, &mut rng, &w.grid, pc.0, pc.1);
+        for (t, dx, dy) in pred {
+            a.anatomy.add_cell(*t, *dx, *dy, 0);
+        }
+        a.anatomy.recompute();
+        let pid = w.add_organism(a);
+
+        let mut b = Organism::new(&w.config, &mut rng, &w.grid, vc.0, vc.1);
+        for (t, dx, dy) in prey {
+            b.anatomy.add_cell(*t, *dx, *dy, 0);
+        }
+        b.anatomy.recompute();
+        let vid = w.add_organism(b);
+
+        let pi = w.organism_index(pid).unwrap();
+        let vi = w.organism_index(vid).unwrap();
+        (w, pi, vi)
+    }
+
+    /// **核心断言**：击杀需要的 tick 数 = 目标血量 ÷ 咬合力。
+    ///
+    /// 1 格猎物 1 HP、5 格猎物 5 HP，捕食者都只有 1 个杀手细胞（咬合力 1.0），
+    /// 所以应该是 1 tick 和 5 tick。这就是"体型买得到生存时间"。
+    #[test]
+    fn kill_time_scales_with_the_victims_health() {
+        let ticks_to_kill = |prey: &[(u8, i32, i32)]| -> usize {
+            let (mut w, pi, vi) = arena(&[(ct::KILLER, 0, 0)], (3, 3), prey, (4, 3));
+            let mut t = 0;
+            while w.organisms[vi].alive && t < 200 {
+                w.act_organism(pi);
+                t += 1;
+            }
+            t
+        };
+        // 竖排：只有最上面那一格贴着捕食者，所以接触面恒为 1
+        let one = ticks_to_kill(&[(ct::PRODUCER, 0, 0)]);
+        let five = ticks_to_kill(&[
+            (ct::PRODUCER, 0, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 0, 2),
+            (ct::PRODUCER, 0, 3),
+            (ct::PRODUCER, 0, 4),
+        ]);
+        assert_eq!(one, 1, "1 格猎物应该 1 tick 就死，实测 {}", one);
+        assert_eq!(five, 5, "5 格猎物应该 5 tick，实测 {}", five);
+    }
+
+    /// 同一个目标被同一只捕食者的**多个接触格**同时咬，伤害只算一次。
+    ///
+    /// 这是整批的病根：旧逻辑按接触面积叠加，20 格猎物被 3~5 格咬住，
+    /// 每 tick 挨 3~5 点，20 点血几 tick 就没了 —— 体型买不到任何生存时间。
+    #[test]
+    fn extra_contact_cells_do_not_add_damage() {
+        // 猎物是 U 形（5 格），捕食者卡在缺口里，同时贴着 3 个格子
+        let prey = [
+            (ct::PRODUCER, 0, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 0, 2),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 1, 2),
+        ];
+        let dmg = |capped: bool| -> f64 {
+            let (mut w, pi, vi) = arena(&[(ct::KILLER, 0, 0)], (5, 4), &prey, (4, 3));
+            w.config.combat.killer_bite_capped = capped;
+            w.act_organism(pi);
+            w.organisms[vi].damage
+        };
+        let capped = dmg(true);
+        let uncapped = dmg(false);
+        assert!(
+            (capped - 1.0).abs() < 1e-9,
+            "整口咬合：3 个接触格也只该挨 1.0，实测 {}",
+            capped
+        );
+        assert!(
+            (uncapped - 3.0).abs() < 1e-9,
+            "旧行为应该按接触面积叠加成 3.0，实测 {}",
+            uncapped
+        );
+    }
+
+    /// 杀手细胞越多，咬合力越大——大捕食者仍然更强，只是不再"按面积翻倍"。
+    #[test]
+    fn more_killer_cells_bite_harder() {
+        let prey = [(ct::PRODUCER, 0, 0), (ct::PRODUCER, 0, 1), (ct::PRODUCER, 0, 2)];
+        let (mut w, pi, vi) = arena(
+            &[
+                (ct::KILLER, 0, 0),
+                (ct::KILLER, 0, 1),
+                (ct::KILLER, 0, 2),
+            ],
+            (3, 2),
+            &prey,
+            (4, 3),
+        );
+        w.act_organism(pi);
+        let dmg = w.organisms[vi].damage;
+        assert!(
+            (dmg - 3.0).abs() < 1e-9,
+            "3 个杀手细胞应该咬 3.0，实测 {}",
+            dmg
+        );
+    }
+
+    /// 关掉「整口咬合」必须逐位退回旧行为。
+    #[test]
+    fn turning_the_cap_off_restores_the_old_rule() {
+        let prey = [(ct::PRODUCER, 0, 0)];
+        let (mut w, pi, vi) = arena(&[(ct::KILLER, 0, 0)], (3, 3), &prey, (4, 3));
+        w.config.combat.killer_bite_capped = false;
+        w.act_organism(pi);
+        // 1 格猎物、1 点伤害 → 当 tick 就死
+        assert!(!w.organisms[vi].alive, "关掉之后仍然是 1 tick 咬死");
+        assert!(w.organisms[vi].damage >= 1.0);
     }
 }

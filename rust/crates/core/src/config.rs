@@ -689,6 +689,21 @@ impl Default for SenseCfg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombatCfg {
     pub insta_kill: bool,
+    /// **整口咬合**：一个个体每 tick 对**同一个目标**只造成一次伤害。
+    ///
+    /// 伤害大小 = `damage × 这个个体的杀手细胞数`，**不按接触面积叠加**。
+    ///
+    /// `true`（默认）= 新行为。`false` = 旧行为：每贴着一个目标格子各算一次。
+    ///
+    /// 为什么必须改：血量是**体积**（每格 1 HP，所以 n 格 = n HP），
+    /// 而旧逻辑的伤害是**接触面积**——一个 20 格的猎物会同时被 3~5 个杀手格
+    /// 咬到，于是每 tick 挨 3~5 点，20 点血 4~5 tick 就没了。
+    /// 也就是说**击杀时间 ∝ n / 接触格数 ≈ √n**，体型几乎买不到任何生存时间。
+    ///
+    /// 改成整口之后：**击杀时间 = 目标血量 / 攻击者咬合力**，
+    /// 1 格猎物 1 tick、5 格 5 tick、20 格 20 tick。体型第一次成为真实的防御。
+    /// 而杀手要更快，就得多来几只（每只各自贡献一份咬合力）——「围攻」有了意义。
+    pub killer_bite_capped: bool,
     /// 食物是否挡住**繁殖**（`can_place_at`）。
     ///
     /// 默认 `true`：新生儿不能生在一格食物里。允许的话那一格食物会被直接压掉，
@@ -709,6 +724,7 @@ impl Default for CombatCfg {
     fn default() -> Self {
         CombatCfg {
             insta_kill: false,
+            killer_bite_capped: true,
             food_blocks_reproduction: true,
             food_blocks_movement: true,
         }
