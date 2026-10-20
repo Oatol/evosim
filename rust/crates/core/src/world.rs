@@ -131,6 +131,8 @@ pub struct World {
     pub repro_blocked_mutated: u64,
     /// 体型小于 `min_breed_cells`，没资格繁殖
     pub repro_blocked_too_small: u64,
+    /// 出芽模式下芽位已满（母体已经挂着 `bud_slots` 个未成熟的芽）
+    pub repro_blocked_buds: u64,
 
     /// **累计注入生物圈的能量**（批次 10 守恒审计的左半边）。
     ///
@@ -185,6 +187,7 @@ impl World {
             repro_blocked_path: 0,
             repro_blocked_mutated: 0,
             repro_blocked_too_small: 0,
+            repro_blocked_buds: 0,
             energy_injected: 0.0,
             light_dirty: true,
             order: Vec::new(),
@@ -825,7 +828,15 @@ impl World {
         }
 
         // 繁殖
-        let at = self.organisms[i].reproduce_at(&self.config);
+        //
+        // 出芽模式下门槛是**固定的** `bud_start_cost`，不是 `food_needed = 细胞数`。
+        // 这正是"大个体产后代更划算"的体现：10 格母体的收入是 1 格的 10 倍，
+        // 但每产一个芽的启动成本一样。
+        let at = if self.budding() && self.bud_slots(i) > 0 {
+            self.config.life.bud_start_cost
+        } else {
+            self.organisms[i].reproduce_at(&self.config)
+        };
         // **未成年不能繁殖**：芽攒再多能量也得先长成成体。
         // 这一条是整个成长机制的意义所在——它让「1 格」不再等于「完整个体」。
         if self.organisms[i].energy >= at && self.organisms[i].growth_plan.is_none() {
@@ -1115,6 +1126,10 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         // 1 格目标的芽出生时就已经"长满"了，没有它就会当 tick 成年、立刻繁殖，
         // 于是「小」变成免费策略，体型在**任何**环境里都涨不上去（见批次 13 实测）。
         self.organisms[i].grow_age = self.organisms[i].grow_age.saturating_add(1);
+        // 出芽：先向母体取一份能量（内部转移，不进热池）。
+        if let Some(pid) = self.organisms[i].parent_id {
+            self.feed_from_parent(i, pid);
+        }
         let min_age = self.config.life.growth_min_ticks;
         let old_enough = self.organisms[i].grow_age >= min_age;
         let cost = self.config.life.growth_cost.max(0.0);
@@ -1223,6 +1238,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 if self.organisms[i].grow_stall >= limit && old_enough {
                     self.organisms[i].growth_plan = None;
                     self.organisms[i].grow_stall = 0;
+                    // 成年即脱离母体：之后不再取能量，也不再占母体的芽位。
+                    self.organisms[i].parent_id = None;
                     return;
                 }
             }
@@ -1232,6 +1249,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         if self.organisms[i].anatomy.cells.len() >= plan.cells.len() && old_enough {
             self.organisms[i].growth_plan = None;
             self.organisms[i].grow_stall = 0;
+            self.organisms[i].parent_id = None;
         }
     }
 
@@ -1625,6 +1643,166 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         crate::cell_type::is_passable(ty)
     }
 
+    /// 出芽是否生效。**依赖成长过程**：芽必须有 `growth_plan` 才谈得上"长成"，
+    /// 所以两个开关都得开。
+    fn budding(&self) -> bool {
+        self.config.life.budding_enabled && self.config.life.growth_enabled
+    }
+
+    /// 这个个体能同时挂几个未成熟的芽。**0 = 不能出芽**。
+    ///
+    /// `floor(n / bud_cells_per_slot)`，**没有下限**。
+    ///
+    /// 第一版给了 `max(1)`（1 格也有 1 个芽位），实测直接把体型压到 1.85：
+    /// 1 格身体拿到了和 10 格一样的"最低配置"，而它便宜得多。
+    /// 去掉下限之后出芽变成**大体型专属**的机制——这也更符合生物学：
+    /// 单细胞是分裂，不是出芽。
+    fn bud_slots(&self, i: usize) -> usize {
+        let per = self.config.life.bud_cells_per_slot.max(1.0);
+        let n = self.organisms[i].cell_count() as f64;
+        (n / per).floor() as usize
+    }
+
+    /// 这个个体当前还挂着几个未成熟的芽。
+    ///
+    /// 只在"母体攒够钱、准备产芽"那一下调用，所以不需要维护计数器——
+    /// 每 tick 全量扫一遍是 O(个体数²)，但这里一 tick 只发生几次。
+    fn live_buds(&self, id: u32) -> usize {
+        self.organisms
+            .iter()
+            .filter(|o| o.parent_id == Some(id))
+            .count()
+    }
+
+    /// 紧贴母体身体的空格里随机挑一个（出芽的位置）。
+    ///
+    /// 和普通繁殖的区别：不要 4~6 格外的空地、不要直线路径——
+    /// **芽就长在母体身上**。这也顺带把"出生失败率 70%"那个问题绕开了：
+    /// 母体自己的体表一定有空格可挂（除非被围死）。
+    fn adjacent_free_cell(&mut self, i: usize) -> Option<(i32, i32)> {
+        let mut cands: Vec<usize> = Vec::new();
+        for cell in &self.organisms[i].anatomy.cells {
+            let (c, r) = (
+                self.organisms[i].real_col(cell),
+                self.organisms[i].real_row(cell),
+            );
+            for n in NEIGHBORS_4 {
+                let Some(idx) = self.grid.index(c + n.0, r + n.1) else {
+                    continue;
+                };
+                if !self.cell_is_free_for_birth(idx) {
+                    continue;
+                }
+                if !cands.contains(&idx) {
+                    cands.push(idx);
+                }
+            }
+        }
+        if cands.is_empty() {
+            return None;
+        }
+        let k = self.rng.int(cands.len());
+        let (c, r) = self.grid.coords(cands[k]);
+        Some((c, r))
+    }
+
+    /// 向母体取一份能量。**内部转移**，不进热池——账上总量不变。
+    ///
+    /// 取多少取三者的最小值：`bud_feed`（母体愿意给的）、芽的容量余量、
+    /// 母体身上剩的。第三项让"母体快饿死时芽也挨饿"自然发生，不需要特判。
+    fn feed_from_parent(&mut self, i: usize, pid: u32) {
+        let Some(&pi) = self.id_index.get(&pid) else {
+            return;
+        };
+        if pi == i || pi >= self.organisms.len() || !self.organisms[pi].alive {
+            return;
+        }
+        let cap = self.energy_capacity(i);
+        let room = (cap - self.organisms[i].energy).max(0.0);
+        let give = self
+            .config
+            .life
+            .bud_feed
+            .min(room)
+            .min(self.organisms[pi].energy.max(0.0));
+        if give <= 0.0 {
+            return;
+        }
+        self.organisms[pi].energy -= give;
+        self.organisms[i].energy += give;
+    }
+
+    /// 出芽：产一个挂在母体身上的芽。
+    ///
+    /// 和 `reproduce_organism` 的四处关键差别（也是"大个体终于能赢"的来源）：
+    ///
+    /// | | 普通繁殖 | 出芽 |
+    /// |---|---|---|
+    /// | 落点 | 4~6 格外的空地 | **紧贴母体** |
+    /// | 一次性成本 | `food_needed = 细胞数`（随体型涨） | `bud_start_cost`（**固定**） |
+    /// | 同时能生几个 | 1 个 | `floor(n / bud_cells_per_slot)` 个 |
+    /// | 未成熟期 | 自己攒能量 | 母体每 tick 喂 `bud_feed` |
+    fn reproduce_bud(&mut self, i: usize) -> bool {
+        self.repro_tries += 1;
+        if self.organisms[i].cell_count() < self.config.life.min_breed_cells {
+            self.repro_blocked_too_small += 1;
+            return false;
+        }
+        if !self.can_add_organism() {
+            self.repro_blocked_cap += 1;
+            return false;
+        }
+        let id = self.organisms[i].id;
+        if self.live_buds(id) >= self.bud_slots(i) {
+            self.repro_blocked_buds += 1;
+            return false;
+        }
+        let Some((nc, nr)) = self.adjacent_free_cell(i) else {
+            self.repro_blocked_space += 1;
+            return false;
+        };
+
+        // 固定的启动成本。**不随体型涨**——这就是超线性的全部来源。
+        let cost = self.config.life.bud_start_cost.max(0.0);
+        let paid: f64;
+        {
+            let org = &mut self.organisms[i];
+            paid = cost.min(org.energy.max(0.0));
+            org.energy -= cost;
+            if org.energy < 0.0 {
+                org.energy = 0.0;
+            }
+        }
+        self.heat_pool += paid;
+
+        let rotation = self.rng.int(4) as u8;
+        let mut child = Organism::new(&self.config, &mut self.rng, &self.grid, nc, nr);
+        child.brain.copy_from(&self.organisms[i].brain);
+        child.rotation = rotation;
+        child.direction = self.rng.int(4) as u8;
+        child.parent_id = Some(id);
+        child.growth_plan = Some(self.organisms[i].anatomy.clone());
+
+        // 变异作用在**目标蓝图**上（同成长模式，否则体型永远变不了）
+        child.anatomy = child.growth_plan.take().unwrap();
+        {
+            let parent = &self.organisms[i];
+            let cfg = &self.config;
+            mutate_organism(&mut child, parent, &mut self.rng, cfg);
+        }
+        let plan = child.anatomy.clone();
+        if plan.cells.is_empty() {
+            return false;
+        }
+        child.anatomy = Anatomy::default();
+        let seed = plan.cell_at(0, 0).copied().unwrap_or(plan.cells[0]);
+        child.anatomy.add_cell(seed.type_id, 0, 0, seed.dir);
+        child.growth_plan = Some(plan);
+        self.repro_ok += 1;
+        self.add_organism(child);
+        true
+    }
+
     /// 收一次繁殖成本，记进热池。返回实际付出去的量。
     ///
     /// 抽成函数是因为「失败也要付账」的旧行为要在**每个失败分支**里各调一次，
@@ -1647,6 +1825,14 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     }
 
     fn reproduce_organism(&mut self, i: usize) -> bool {
+        // 有芽位才出芽；**没有芽位就退回普通繁殖**。
+        //
+        // 第一版这里是"出芽开着就一律走芽"，于是 `bud_slots = 0` 的小个体
+        // 直接绝育——`bud_cells_per_slot >= 4` 时世界当场全灭。
+        // 退回之后语义才对：小体型照旧在空地上生，大体型才用得上芽。
+        if self.budding() && self.bud_slots(i) > 0 {
+            return self.reproduce_bud(i);
+        }
         self.repro_tries += 1;
         // 旧行为（默认）：**先扣钱**，之后任何一步失败都白付。
         // 新行为：等所有空间检查都通过才扣钱——「找不到地方就继续攒着」。
@@ -3571,5 +3757,150 @@ mod tests {
             "满 10 tick 之后才允许提前成熟"
         );
         assert_eq!(w.organisms[0].cell_count(), 1, "提前成熟的体型停在 1 格");
+    }
+
+    // ────────────── 批次 15：出芽（芽挂在母体上）──────────────
+
+    /// 芽位随体型涨，而且**没有下限**：不到门槛就退回普通繁殖。
+    ///
+    /// 下限那一版（`max(1)`）让 1 格身体也白拿一个芽位，实测把体型压到 1.85；
+    /// 现在只有够大的身体才出芽，这也更符合生物学（单细胞是分裂，不是出芽）。
+    #[test]
+    fn bud_slots_scale_with_body_size() {
+        let (w1, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let (w4, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 1, 1),
+        ]);
+        for w in [&w1, &w4] {
+            assert_eq!(w.bud_slots(0), 0, "4 格以下（budper = 8）不该有芽位");
+        }
+        let mut cfg = Config::default();
+        cfg.life.bud_cells_per_slot = 2.0;
+        let (mut w4, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 1, 1),
+        ]);
+        w4.config = cfg;
+        assert_eq!(w4.bud_slots(0), 2, "4 格 / 每芽位 2 格 = 2 个芽位");
+    }
+
+    /// 芽生**紧贴母体**，而不是 4~6 格外的空地。
+    #[test]
+    fn a_bud_is_born_next_to_its_parent() {
+        let (mut w, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 1, 1),
+        ]);
+        w.config.life.budding_enabled = true;
+        w.config.life.growth_enabled = true;
+        w.config.life.bud_cells_per_slot = 2.0;
+        w.config.life.bud_start_cost = 1.0;
+        w.organisms[0].energy = 10.0;
+        let before = w.organisms.len();
+
+        assert!(w.reproduce_bud(0), "应该产出一个芽");
+        assert_eq!(w.organisms.len(), before + 1);
+        let child = &w.organisms[before];
+        assert_eq!(child.parent_id, Some(w.organisms[0].id), "要记下母体");
+        assert!(child.growth_plan.is_some(), "芽必须是未成熟的");
+
+        let parent = &w.organisms[0];
+        let adjacent = parent.anatomy.cells.iter().any(|c| {
+            let (pc, pr) = (parent.real_col(c), parent.real_row(c));
+            (pc - child.col).abs() + (pr - child.row).abs() == 1
+        });
+        assert!(adjacent, "芽必须紧贴母体的某一格");
+    }
+
+    /// 产芽的成本是**固定的** `bud_start_cost`，不随体型涨。
+    ///
+    /// 这是超线性的来源：普通繁殖收 `food_needed = 细胞数`，
+    /// 4 格母体要付 4；出芽只付 1。
+    #[test]
+    fn budding_charges_a_fixed_cost() {
+        let (mut w, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 1, 1),
+        ]);
+        w.config.life.budding_enabled = true;
+        w.config.life.growth_enabled = true;
+        w.config.life.bud_cells_per_slot = 2.0;
+        w.config.life.bud_start_cost = 1.0;
+        w.organisms[0].energy = 10.0;
+        let need = w.organisms[0].food_needed(&w.config);
+        assert!(need > 1.5, "普通繁殖应该贵得多（实测 {}）", need);
+
+        w.reproduce_bud(0);
+        assert!(
+            (w.organisms[0].energy - 9.0).abs() < 1e-9,
+            "出芽应该只扣 1.0，实测剩 {}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 母体每 tick 喂芽一份能量，而且是**内部转移**——总能量不变。
+    #[test]
+    fn a_bud_draws_energy_from_its_parent() {
+        let (mut w, _) = tiny_world(&[
+            (ct::MOUTH, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 0, 1),
+            (ct::PRODUCER, 1, 1),
+        ]);
+        w.config.life.budding_enabled = true;
+        w.config.life.growth_enabled = true;
+        w.config.life.bud_cells_per_slot = 2.0;
+        w.config.life.bud_start_cost = 1.0;
+        w.config.life.bud_feed = 0.5;
+        w.organisms[0].energy = 10.0;
+        w.reproduce_bud(0);
+
+        let ci = w.organisms.len() - 1;
+        let pid = w.organisms[ci].parent_id.unwrap();
+        let before_parent = w.organisms[0].energy;
+        let before_child = w.organisms[ci].energy;
+        w.feed_from_parent(ci, pid);
+        let gave = before_parent - w.organisms[0].energy;
+        assert!((gave - 0.5).abs() < 1e-9, "应该喂 0.5，实测 {}", gave);
+        assert!(
+            (w.organisms[ci].energy - (before_child + 0.5)).abs() < 1e-9,
+            "芽应该收到 0.5"
+        );
+        // 内部转移：两人之和不变（这条守住"喂食不能凭空造能量"）
+        let sum_before = before_parent + before_child;
+        let sum_after = w.organisms[0].energy + w.organisms[ci].energy;
+        assert!((sum_after - sum_before).abs() < 1e-12);
+    }
+
+    /// 没有芽位时**退回普通繁殖**，而不是绝育。
+    ///
+    /// 第一版"出芽开着就一律走芽"，于是 `bud_slots = 0` 的小个体再也生不了——
+    /// `bud_cells_per_slot >= 4` 时世界当场全灭（实测 0 个体）。
+    #[test]
+    fn bodies_without_a_slot_fall_back_to_normal_reproduction() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.budding_enabled = true;
+        w.config.life.growth_enabled = true;
+        w.config.life.bud_cells_per_slot = 8.0;
+        w.config.life.metabolism_scale = 0.0;
+        w.organisms[0].energy = 50.0;
+        assert_eq!(w.bud_slots(0), 0, "1 格没有芽位");
+
+        let before = w.organisms.len();
+        // 普通繁殖要 4~6 格外的空地；8x8 的测试世界放得下
+        let ok = w.reproduce_organism(0);
+        assert!(ok, "没有芽位时应该走普通繁殖");
+        assert_eq!(w.organisms.len(), before + 1);
+        let child = &w.organisms[before];
+        assert_eq!(child.parent_id, None, "普通繁殖的后代不该挂靠母体");
     }
 }

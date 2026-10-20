@@ -342,3 +342,34 @@ fn ecosystem_survives_rich_patches_and_the_ledger_still_balances() {
         a.drift()
     );
 }
+
+/// 出芽（批次 15）：开着也要活得下去，而且**能量账照样要平**。
+///
+/// 这条尤其重要：出芽的「母体供养」是**内部转移**（母体的能量挪给芽），
+/// 不进热池也不进注入。一旦写错（比如两边都加），账上会凭空多出能量，
+/// 而这种 bug 在种群曲线上完全看不出来。
+#[test]
+fn ecosystem_survives_budding_and_the_ledger_still_balances() {
+    let mut cfg = Config::default();
+    cfg.life.growth_enabled = true;
+    cfg.life.budding_enabled = true;
+    let mut w = World::new(cfg, Rng::new(1001));
+    generate_demo_world(&mut w, 1.0, 1.0);
+    seed_origin_of_life(&mut w);
+    spawn_population(&mut w, 8, 3);
+
+    for _ in 0..2000 {
+        w.step();
+    }
+    let n = alive(&w).len();
+    assert!(n > 50, "出芽下 2000 tick 只剩 {} 个个体——生态崩了", n);
+
+    let a = w.energy_audit();
+    assert!(
+        a.drift().abs() < 1e-9 * a.stored().max(1.0),
+        "出芽下能量账对不上：注入 {:.6}，存量 {:.6}，残差 {:.3e}",
+        a.injected,
+        a.stored(),
+        a.drift()
+    );
+}

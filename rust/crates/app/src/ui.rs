@@ -994,6 +994,65 @@ pub fn draw(
                     if mg as u32 != before_mg {
                         cfg.life.growth_min_ticks = mg as u32;
                     }
+
+                    // ── 出芽（批次 15）──
+                    //
+                    // 芽不生在 4~6 格外的空地，而是**紧贴母体**，由母体每 tick 供养。
+                    // 关键不是"省了找地方"（那件事偏向小体型），而是
+                    // **芽位随体型涨**：只有够大的身体才拿得到芽位。
+                    let mut bud = cfg.life.budding_enabled;
+                    if ui
+                        .checkbox(&mut bud, "出芽")
+                        .on_hover_text(
+                            "勾上：芽紧贴母体出生、由母体每 tick 供养，芽位随体型涨。
+                             不到芽位门槛的身体退回普通繁殖（不会绝育）。
+                             实测（6000 tick、最短成长期 20）：体型 4.76 → 5.57、
+                             有光占用 35.9% → 52.6%、异养 2.4% → 26.0%。",
+                        )
+                        .changed()
+                    {
+                        cfg.life.budding_enabled = bud;
+                    }
+
+                    if cfg.life.budding_enabled {
+                        let before_bp = cfg.life.bud_cells_per_slot;
+                        let mut bp = before_bp;
+                        ui.add(
+                            egui::Slider::new(&mut bp, 1.0..=20.0)
+                                .text("每芽位格数")
+                                .step_by(1.0)
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text(
+                            "多少格身体换一个芽位（同时能挂几个未成熟的芽）。
+                             这个数**必须够大**：出芽最直接的效果是「出生不用再找空地」，
+                             而让出生变容易永远是偏向小体型的。实测每芽位 2 格时体型
+                             1.80、4 格 2.59、6 格 3.15、8 格 3.70 —— 越小越塌。
+                             默认 8，也就是只有 8 格以上的身体才能出芽。",
+                        );
+                        if (bp - before_bp).abs() > 1e-9 {
+                            cfg.life.bud_cells_per_slot = bp;
+                        }
+
+                        let before_bf = cfg.life.bud_feed;
+                        let mut bf = before_bf;
+                        ui.add(
+                            egui::Slider::new(&mut bf, 0.0..=2.0)
+                                .text("母体供养")
+                                .step_by(0.05)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text(
+                            "母体每 tick 给每个未成熟芽的能量（满照一个生产者自己挣 0.12）。
+                             喂得少（0.03）时芽主要靠自己攒，而「自己攒多久」正比于目标体型，
+                             大体型的芽长得慢、芽位长期占满 —— 实测体型只有 3.70。
+                             喂得足（0.5）时芽的成长期被压到「最短成长期」那个固定值上，
+                             芽位周转快，大体型才真正赢（体型 5.57）。",
+                        );
+                        if (bf - before_bf).abs() > 1e-9 {
+                            cfg.life.bud_feed = bf;
+                        }
+                    }
                 }
 
                 // ── 环境温度（批次 11）──

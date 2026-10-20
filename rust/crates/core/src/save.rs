@@ -81,7 +81,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// （批次 13 富贫斑块）。
 /// v18：`LifeCfg` 加了 `growth_min_ticks`，`Organism` 加了 `grow_age`
 /// （批次 14 最短成长期）。
-pub const VERSION: u32 = 18;
+/// v19：`LifeCfg` 加了 `budding_enabled` / `bud_cells_per_slot` /
+/// `bud_start_cost` / `bud_feed`，`Organism` 加了 `parent_id`（批次 15 出芽）。
+pub const VERSION: u32 = 19;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

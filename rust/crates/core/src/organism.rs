@@ -81,6 +81,13 @@ pub struct Organism {
     /// 只在 `growth_plan` 还在时增长；成年之后不再有意义（也不会被读）。
     #[serde(default)]
     pub grow_age: u32,
+
+    /// **出芽**时记下母体的 id。`None` = 不是芽（普通出生或已经脱离）。
+    ///
+    /// 用途只有两个：未成熟期间向母体取能量；成年时清空。
+    /// 母体死了 `id_index` 查不到，供养自然停止——不需要额外的清理逻辑。
+    #[serde(default)]
+    pub parent_id: Option<u32>,
 }
 
 impl Organism {
@@ -113,6 +120,7 @@ impl Organism {
             growth_plan: None,
             grow_stall: 0,
             grow_age: 0,
+            parent_id: None,
         };
         org.normalize_position(grid);
         org
