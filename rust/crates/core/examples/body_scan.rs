@@ -99,6 +99,8 @@ fn run(
     budper: f64,
     budfeed: f64,
     oldbite: bool,
+    bite: f64,
+    shade: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -138,6 +140,10 @@ fn run(
     cfg.life.bud_feed = budfeed;
     // `oldbite`：退回旧的「按接触面积叠加」伤害
     cfg.combat.killer_bite_capped = !oldbite;
+    // `bite=R`：嘴每 tick 能从活体身上抽多少能量（默认 0.30，比满照光合的 0.12 还高）
+    cfg.life.bite_rate = bite;
+    // `shade=K`：遮挡强度（默认 0.25，0 = 关掉）
+    cfg.life.shade_strength = shade;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -320,6 +326,8 @@ fn run_seeds(
     budper: f64,
     budfeed: f64,
     oldbite: bool,
+    bite: f64,
+    shade: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -348,7 +356,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite,
+            oldbite, bite, shade,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -500,6 +508,16 @@ fn main() {
         Config::default().life.budding_enabled
     };
     let oldbite = args.iter().any(|a| a == "oldbite");
+    // `shade=K`：遮挡强度（默认跟 Config 走）
+    let shade: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("shade=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.shade_strength);
+    // `bite=R`：咬活体的速率（默认跟 Config 走）
+    let bite: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("bite=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.bite_rate);
     let budper: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("budper=").and_then(|v| v.parse().ok()))
@@ -580,7 +598,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite,
+            oldbite, bite, shade,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -716,7 +734,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite,
+            oldbite, bite, shade,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
