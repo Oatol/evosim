@@ -1097,9 +1097,11 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     /// 这个 bug 在"繁殖失败不扣钱"之后才暴露：旧行为下个体能量经常被繁殖
     /// 清到 0，几乎撞不到容量上限；新行为下能量长期贴着上限，
     /// 每一次越界 clamp 都在偷偷吃掉能量。
-    fn add_energy(&mut self, i: usize, amount: f64) {
+    /// 返回**实际到账**多少（装不下被丢弃的那部分不算）——
+    /// 收入来源统计要的是真到手的，不是名义上的。
+    fn add_energy(&mut self, i: usize, amount: f64) -> f64 {
         if !(amount > 0.0) {
-            return;
+            return 0.0;
         }
         let cap = self.energy_capacity(i);
         // 历史遗留的超容量（旧存档 / 早先漏了 clamp 的路径）：先把它记掉，
@@ -1111,9 +1113,11 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let room = (cap - self.organisms[i].energy).max(0.0);
         if amount <= room {
             self.organisms[i].energy += amount;
+            amount
         } else {
             self.organisms[i].energy = cap;
             self.energy_wasted += amount - room;
+            room
         }
     }
 
@@ -1338,7 +1342,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                         self.grid.food[index] = 0.0;
                         self.reveal_floor(index);
                         let gain = e * mult;
-                        self.add_energy(i, gain);
+                        let got = self.add_energy(i, gain);
+                        self.organisms[i].gain_food += got;
                         // 摄取倍率不是 1 的时候，吃这一口**改变**了世界里的能量：
                         // > 1 等于凭空放大（记成注入），< 1 等于消化损耗（记成丢弃）。
                         // 不记的话账上会凭空多/少一块，审计立刻红。
@@ -1364,7 +1369,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                     let gain = self.bite_from(owner as u32, index, mult);
                     // 同样要走容量检查：咬到嘴里的能量一旦超过容量，
                     // 直接 `+=` 会让下一次光合把个体往下 clamp，那一截就蒸发了。
-                    self.add_energy(i, gain);
+                    let got = self.add_energy(i, gain);
+                    self.organisms[i].gain_bite += got;
                 }
             }
             Behavior::Producer => {
@@ -1409,7 +1415,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 // 审计的等式是 `注入 = 生物 + 食物 + 热池 + 丢弃`，
                 // 所以丢弃必须留在右半边。
                 self.energy_injected += gain;
-                self.add_energy(i, gain);
+                let got = self.add_energy(i, gain);
+                self.organisms[i].gain_photo += got;
             }
             Behavior::Killer => {
                 let damage = self.config.attr(cell.type_id, AttrField::Damage);
@@ -1809,6 +1816,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         }
         self.organisms[pi].energy -= give;
         self.organisms[i].energy += give;
+        self.organisms[i].gain_gift += give;
     }
 
     /// 出芽：产一个挂在母体身上的芽。

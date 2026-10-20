@@ -18,6 +18,7 @@ use evosim_core::anatomy::Flags;
 use evosim_core::cell_type::ct;
 use evosim_core::config::Config;
 use evosim_core::factory::{seed_origin_of_life, spawn_population};
+use evosim_core::organism::Income;
 use evosim_core::rng::Rng;
 use evosim_core::world::World;
 use evosim_core::worldgen::generate_demo_world;
@@ -56,6 +57,19 @@ struct Row {
     /// 这是"富贫斑块到底有没有分化出两种体型"的直接读数。
     /// 全局平均会把"富区大体型 + 贫区小体型"平成一个中间值，必须分带看。
     light_bands: [(usize, f64); 4],
+    /// **按累计能量收入**判定的构成（光合 / 吃食物 / 咬活体 / 母体供养 / 没收入）。
+    ///
+    /// 和上面的 `hetero` 是两套判据，别混：
+    /// - `hetero` 看**结构**（有嘴、没有生产者）；
+    /// - 这里看**行为**（能量到底从哪来）。「生产者 + 嘴」在结构上是自养，
+    ///   但如果九成收入来自咬活体，这里会把它算成捕食者。
+    income: [f64; 5],
+    /// 收入里「咬活体」占一半以上的个体占比（%）
+    pred_share: f64,
+    /// 捕食为主（咬 > 50%）里，**没有生产者**的占比（% of 全体）
+    pred_pure: f64,
+    /// 捕食为主（咬 > 50%）里，**带生产者**的占比（% of 全体）
+    pred_mix: f64,
     /// 体型分布：1 格 / 2 格 / … 的个体占比（只统计前 10 档，够看形状）
     hist: [f64; 10],
 }
@@ -170,6 +184,37 @@ fn run(
     let pct = |f: u16| {
         w.organisms.iter().filter(|o| o.anatomy.has(f)).count() as f64 * 100.0 / n as f64
     };
+    // 按收入来源分类。`Nothing` 是"还没挣到钱"（刚出生 / 快饿死），
+    // 单独一列——把它并进任何一类都会污染结论。
+    let mut inc = [0f64; 5];
+    let mut pred = 0f64;
+    let mut pure = 0f64;
+    let mut mix = 0f64;
+    for o in &w.organisms {
+        let k = match o.income_source() {
+            Income::Photo => 0,
+            Income::Scavenge => 1,
+            Income::Predate => 2,
+            Income::Gift => 3,
+            Income::Nothing => 4,
+        };
+        inc[k] += 1.0;
+        let total = o.income_total();
+        if total > 1e-9 && o.gain_bite / total > 0.5 {
+            pred += 1.0;
+            if o.anatomy.has(Flags::PRODUCER) {
+                mix += 1.0;
+            } else {
+                pure += 1.0;
+            }
+        }
+    }
+    for v in inc.iter_mut() {
+        *v = *v * 100.0 / n as f64;
+    }
+    let pred_share = pred * 100.0 / n as f64;
+    let pred_pure = pure * 100.0 / n as f64;
+    let pred_mix = mix * 100.0 / n as f64;
     Row {
         pop: w.organisms.len() as f64,
         body_avg: st.avg_cells,
@@ -186,6 +231,10 @@ fn run(
             / n as f64,
         mouth: pct(Flags::MOUTH),
         killer: pct(Flags::KILLER),
+        income: inc,
+        pred_share,
+        pred_pure,
+        pred_mix,
         occ: {
             let lit = w.light.level.iter().filter(|&&v| v > 0).count().max(1);
             let occ = w.grid.owners.iter().filter(|&&o| o >= 0).count();
@@ -280,6 +329,10 @@ fn run_seeds(
         hetero: 0.0,
         mouth: 0.0,
         killer: 0.0,
+        income: [0.0; 5],
+        pred_share: 0.0,
+        pred_pure: 0.0,
+        pred_mix: 0.0,
         occ: 0.0,
         bands: [(0, 0.0); 5],
         light_bands: [(0, 0.0); 4],
@@ -304,6 +357,12 @@ fn run_seeds(
         acc.hetero += r.hetero;
         acc.mouth += r.mouth;
         acc.killer += r.killer;
+        for k in 0..5 {
+            acc.income[k] += r.income[k];
+        }
+        acc.pred_share += r.pred_share;
+        acc.pred_pure += r.pred_pure;
+        acc.pred_mix += r.pred_mix;
         acc.occ += r.occ;
         for b in 0..5 {
             acc.bands[b].0 += r.bands[b].0;
@@ -330,6 +389,12 @@ fn run_seeds(
     acc.hetero /= n;
     acc.mouth /= n;
     acc.killer /= n;
+    for k in 0..5 {
+        acc.income[k] /= n;
+    }
+    acc.pred_share /= n;
+    acc.pred_pure /= n;
+    acc.pred_mix /= n;
     acc.occ /= n;
     for b in 0..5 {
         acc.bands[b].1 /= n;
@@ -382,53 +447,67 @@ fn main() {
     let photo: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("photo=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0.12);
+        .unwrap_or(Config::default().life.photosynthesis_rate);
     // `ambient=C`：环境温度（℃）；`comfort=C`：舒适温度（℃）
     let ambient: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("ambient=").and_then(|v| v.parse().ok()))
-        .unwrap_or(22.0);
+        .unwrap_or(Config::default().world.ambient_temp);
     let comfort: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("comfort=").and_then(|v| v.parse().ok()))
-        .unwrap_or(35.0);
+        .unwrap_or(Config::default().life.comfort_temp);
     // `growth`：启用成长过程（芽从 1 格长到目标体型）；`gcost=C`：每格生长成本
-    let growth = args.iter().any(|a| a == "growth");
+    // 默认**跟 Config 走**（批次 17 起成长是默认开的）。
+    // `growth` / `bud` 仍然接受（写了就是开），`nogrowth` / `nobud` 才是关。
+    let growth = if args.iter().any(|a| a == "nogrowth") {
+        false
+    } else if args.iter().any(|a| a == "growth") {
+        true
+    } else {
+        Config::default().life.growth_enabled
+    };
     let gcost: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("gcost=").and_then(|v| v.parse().ok()))
-        .unwrap_or(1.0);
+        .unwrap_or(Config::default().life.growth_cost);
     // `stall=N`：连续卡 N tick 就提前成熟（0 = 必须长满）
     let stall: u32 = args
         .iter()
         .find_map(|a| a.strip_prefix("stall=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0);
+        .unwrap_or(Config::default().life.growth_stall_mature);
     // `cloud=P`：云影强度（0 = 无，1 = 光岛 + 暗廊）
     let cloud: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("cloud=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0.0);
+        .unwrap_or(Config::default().world.sky_patchiness);
     // `rich=R`：富贫斑块强度（0 = 关闭）
     let rich: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("rich=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0.0);
+        .unwrap_or(Config::default().world.patch_richness);
     // `mingrow=N`：最短成长期（0 = 关闭）
     let mingrow: u32 = args
         .iter()
         .find_map(|a| a.strip_prefix("mingrow=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0);
+        .unwrap_or(Config::default().life.growth_min_ticks);
     // `bud`：出芽
-    let bud = args.iter().any(|a| a == "bud");
+    let bud = if args.iter().any(|a| a == "nobud") {
+        false
+    } else if args.iter().any(|a| a == "bud") {
+        true
+    } else {
+        Config::default().life.budding_enabled
+    };
     let oldbite = args.iter().any(|a| a == "oldbite");
     let budper: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("budper=").and_then(|v| v.parse().ok()))
-        .unwrap_or(2.0);
+        .unwrap_or(Config::default().life.bud_cells_per_slot);
     let budfeed: f64 = args
         .iter()
         .find_map(|a| a.strip_prefix("budfeed=").and_then(|v| v.parse().ok()))
-        .unwrap_or(0.03);
+        .unwrap_or(Config::default().life.bud_feed);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -584,6 +663,29 @@ fn main() {
             }
         }
         println!();
+    }
+
+    // 收入来源：这是"到底有没有捕食者"的**行为**读数
+    println!("\n【1e】按累计能量收入判定（占个体百分比）");
+    println!(
+        "{:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>9}",
+        "p", "光合", "吃食物", "咬活体", "供养", "没收入", "咬>50%", "异养(结构)",
+        "其中纯异养", "其中混养"
+    );
+    for (p, r) in &rows {
+        println!(
+            "{:>5.2}  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>8.1}%  {:>10.1}%  {:>8.1}%  {:>8.1}%",
+            p,
+            r.income[0],
+            r.income[1],
+            r.income[2],
+            r.income[3],
+            r.income[4],
+            r.pred_share,
+            r.hetero,
+            r.pred_pure,
+            r.pred_mix
+        );
     }
 
     // 体型分布：看 p 是不是真的把分布推走

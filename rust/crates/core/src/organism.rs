@@ -82,12 +82,98 @@ pub struct Organism {
     #[serde(default)]
     pub grow_age: u32,
 
+    // ── 收入来源（诊断用：不进任何判定、只累加）──
+    //
+    // 存在的理由：光看解剖结构判"自养 / 异养"是不够的。
+    // 「生产者 + 嘴」的混养个体在结构上算自养，但它可能 90% 的能量都是吃来的。
+    // 这四个计数器回答的是**行为**问题：这只生物到底靠什么活着。
+    /// 光合挣到的能量（累计，实际到账的部分）
+    #[serde(default)]
+    pub gain_photo: f64,
+    /// 吃地上食物挣到的
+    #[serde(default)]
+    pub gain_food: f64,
+    /// 咬活体抽到的
+    #[serde(default)]
+    pub gain_bite: f64,
+    /// 母体供养的（出芽）
+    #[serde(default)]
+    pub gain_gift: f64,
+
     /// **出芽**时记下母体的 id。`None` = 不是芽（普通出生或已经脱离）。
     ///
     /// 用途只有两个：未成熟期间向母体取能量；成年时清空。
     /// 母体死了 `id_index` 查不到，供养自然停止——不需要额外的清理逻辑。
     #[serde(default)]
     pub parent_id: Option<u32>,
+}
+
+/// 一只生物**主要靠什么活着**（按累计能量收入判定）。
+///
+/// 和「有没有生产者细胞」这种结构判定不同，这里看的是**实际到账的能量**：
+/// 一只「生产者 + 嘴」的个体如果九成收入来自咬活体，它算捕食者。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Income {
+    /// 光合为主
+    Photo,
+    /// 吃地上的食物（尸体 / 草甸）为主
+    Scavenge,
+    /// 咬活体为主
+    Predate,
+    /// 母体供养为主（还是芽）
+    Gift,
+    /// 一分钱没挣到（刚出生 / 快饿死）
+    Nothing,
+}
+
+impl Income {
+    /// 给人看的短标签（检视器 / 诊断工具共用）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Income::Photo => "光合",
+            Income::Scavenge => "吃食物",
+            Income::Predate => "咬活体",
+            Income::Gift => "母体供养",
+            Income::Nothing => "还没收入",
+        }
+    }
+}
+
+impl Organism {
+    /// 累计收入里最大的一份来自哪。
+    ///
+    /// 用**累计**而不是瞬时：单 tick 的收支噪声太大，看一眼就下结论会误判。
+    pub fn income_source(&self) -> Income {
+        let (p, f, b, g) = (
+            self.gain_photo.max(0.0),
+            self.gain_food.max(0.0),
+            self.gain_bite.max(0.0),
+            self.gain_gift.max(0.0),
+        );
+        let total = p + f + b + g;
+        if total <= 1e-9 {
+            return Income::Nothing;
+        }
+        let mut best = Income::Photo;
+        let mut max = p;
+        if f > max {
+            best = Income::Scavenge;
+            max = f;
+        }
+        if b > max {
+            best = Income::Predate;
+            max = b;
+        }
+        if g > max {
+            best = Income::Gift;
+        }
+        best
+    }
+
+    /// 累计总收入（四项之和）。
+    pub fn income_total(&self) -> f64 {
+        self.gain_photo + self.gain_food + self.gain_bite + self.gain_gift
+    }
 }
 
 impl Organism {
@@ -120,6 +206,10 @@ impl Organism {
             growth_plan: None,
             grow_stall: 0,
             grow_age: 0,
+            gain_photo: 0.0,
+            gain_food: 0.0,
+            gain_bite: 0.0,
+            gain_gift: 0.0,
             parent_id: None,
         };
         org.normalize_position(grid);
@@ -508,6 +598,44 @@ mod tests {
                 n
             );
         }
+    }
+
+    /// 收入来源判定：看**实际到账的能量**，不是看有没有某个细胞。
+    ///
+    /// 这一条是回答"到底有没有捕食者"的关键——「生产者 + 嘴」在结构上是自养，
+    /// 但如果九成收入来自咬活体，它行为上是捕食者。
+    #[test]
+    fn income_source_looks_at_energy_not_anatomy() {
+        let cfg = Config::default();
+        let mut rng = Rng::new(1);
+        let grid = crate::grid::Grid::new(8, 8, false);
+        let mut org = Organism::new(&cfg, &mut rng, &grid, 3, 3);
+
+        assert_eq!(org.income_source(), Income::Nothing, "一分没挣到");
+
+        // 只有光合
+        org.gain_photo = 10.0;
+        assert_eq!(org.income_source(), Income::Photo);
+
+        // 咬活体占大头 —— 即使它带着生产者细胞，行为上也是捕食者
+        org.gain_bite = 25.0;
+        org.anatomy.add_cell(ct::PRODUCER, 0, 0, 0);
+        org.anatomy.recompute();
+        assert!(org.anatomy.has(Flags::PRODUCER), "结构上确实是自养");
+        assert_eq!(
+            org.income_source(),
+            Income::Predate,
+            "但收入主要来自咬，就该算捕食"
+        );
+
+        // 吃食物超过咬
+        org.gain_food = 40.0;
+        assert_eq!(org.income_source(), Income::Scavenge);
+
+        // 母体供养超过一切
+        org.gain_gift = 100.0;
+        assert_eq!(org.income_source(), Income::Gift);
+        assert!((org.income_total() - 175.0).abs() < 1e-9);
     }
 
     /// p < 1 让大体型便宜，p > 1 让它变贵——这是整个"大体型"实验的杠杆方向。

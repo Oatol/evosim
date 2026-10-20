@@ -101,6 +101,51 @@ pub fn draw_body(
             .size(10.0),
     );
 
+    // ── 收入来源（累计）──
+    //
+    // 为什么需要这一块：**解剖结构判不出自养 / 异养**。
+    // 「生产者 + 嘴」在结构上是自养，但实测它可能八成能量都是咬来的。
+    // 这里显示的是"这只生物到底靠什么活着"。
+    ui.add_space(3.0);
+    let total = org.income_total();
+    let src = org.income_source();
+    if total > 1e-9 {
+        let pct = |v: f64| v.max(0.0) * 100.0 / total;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("靠什么活着").color(TEXT_DIM).size(11.0));
+            ui.label(
+                egui::RichText::new(src.label())
+                    .color(ACCENT)
+                    .size(11.0)
+                    .strong(),
+            );
+            let mut parts: Vec<String> = Vec::new();
+            for (v, name) in [
+                (org.gain_photo, "光合"),
+                (org.gain_food, "吃食物"),
+                (org.gain_bite, "咬活体"),
+                (org.gain_gift, "供养"),
+            ] {
+                if v > 1e-9 {
+                    parts.push(format!("{} {:.0}%", name, pct(v)));
+                }
+            }
+            if !parts.is_empty() {
+                ui.label(
+                    egui::RichText::new(parts.join(" · "))
+                        .color(TEXT_DIM)
+                        .size(11.0),
+                );
+            }
+        });
+    } else {
+        ui.label(
+            egui::RichText::new("靠什么活着：还没挣到能量")
+                .color(TEXT_DIM)
+                .size(11.0),
+        );
+    }
+
     // ── 神经网络 ──
     ui.add_space(3.0);
     ui.horizontal(|ui| {
