@@ -146,7 +146,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::EMPTY, "EMPTY", "empty", "空")
     },
     CellDef {
-        desc: "一份食物，嘴吃掉后换成能量；会缓慢腐败。",
+        desc: "一块食物，带着一份能量（尸体带的是死者攒下的）。嘴吃掉后按摄取倍率换算，剩下的会逐渐腐败流失。默认会挡住移动。",
         independent: true,
         paintable: true,
         visible: true,
@@ -154,7 +154,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::FOOD, "FOOD", "food", "食物")
     },
     CellDef {
-        desc: "实心墙，谁也穿不过去，也不会被生物啃掉。",
+        desc: "实心墙：挡住移动，也挡住光（会在下面投下阴影）。不会被生物啃掉。",
         independent: true,
         paintable: true,
         visible: true,
@@ -163,7 +163,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::WALL, "WALL", "wall", "墙")
     },
     CellDef {
-        desc: "吃掉四邻域里的食物；也会咬相邻的活体，把对方身上的能量抽过来。",
+        desc: "吃掉四邻域里的食物；也会咬相邻的活体——抽的是**能量**不是血，消化效率之外的差额散掉。",
         is_body_cell: true,
         paintable: true,
         visible: true,
@@ -180,7 +180,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::MOUTH, "MOUTH", "mouth", "嘴")
     },
     CellDef {
-        desc: "按所在格的光强把能量直接充进体内；暗处不产出。会动的个体默认不能用。",
+        desc: "按所在格的光强把能量直接充进体内，暗处不产出；正上方同列的身体会挡光（包括自己）。会动的个体默认不能用。",
         is_body_cell: true,
         paintable: true,
         visible: true,
@@ -214,7 +214,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::MOVER, "MOVER", "mover", "移动器")
     },
     CellDef {
-        desc: "每 tick 伤害四邻域里属于其他生物的格子；装甲格免疫。",
+        desc: "每 tick 咬四邻域里的其他生物。一个个体每 tick 对同一个目标**只咬一口**，咬合力 = 单格伤害 × 自己的杀手细胞数——所以击杀时间 ≈ 目标血量 ÷ 咬合力，体型越大越耐打。装甲按减免比例挡下。",
         is_body_cell: true,
         paintable: true,
         visible: true,
@@ -232,7 +232,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::KILLER, "KILLER", "killer", "杀手")
     },
     CellDef {
-        desc: "免疫杀手的伤害。让身体更难被吃掉，但自己不产生任何收益。",
+        desc: "按「伤害减免」比例挡下杀手的伤害（出厂 1.00 = 完全免疫）。让身体更难被吃掉，但自己不产生任何收益。",
         is_body_cell: true,
         paintable: true,
         visible: true,
@@ -266,7 +266,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::EYE, "EYE", "eye", "眼睛")
     },
     CellDef {
-        desc: "岩浆。踏进去挨一记冲击伤害，待在里面每 tick 继续烧。",
+        desc: "岩浆。踏进去挨一记冲击伤害，待在里面每 tick 继续烧；同时是**热源**，会把周围加热（温度伤害开启时更危险）。",
         independent: true,
         paintable: true,
         terrain: true,
@@ -306,7 +306,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::RAD, "RAD", "rad", "辐射带")
     },
     CellDef {
-        desc: "腐殖质。以一定概率往相邻空格冒食物，等于一块会自己长东西的地。",
+        desc: "腐殖质。以一定概率在**自己或相邻格**冒食物，等于一块会自己长东西的地。",
         independent: true,
         paintable: true,
         terrain: true,
@@ -317,7 +317,7 @@ pub static CELL_DEFS: [CellDef; 16] = [
         ..base(ct::HUMUS, "HUMUS", "humus", "腐殖质")
     },
     CellDef {
-        desc: "抬高繁殖阈值：攒够更多能量才繁殖，但只花基础成本，差额留在身上当储备。",
+        desc: "抬高普通繁殖的触发阈值：攒够更多能量才繁殖，但只花基础成本，差额留在身上当储备。（出芽繁殖用固定的启动成本，这一项不生效。）",
         is_body_cell: true,
         paintable: true,
         flag: Some(flag::STORAGE),
@@ -505,6 +505,67 @@ mod order_tests {
         for (i, d) in CELL_DEFS.iter().enumerate() {
             assert_eq!(d.id as usize, i, "CELL_DEFS 下标必须等于 id（{} 的位置是 {}）", d.key, i);
         }
+    }
+
+    /// 每种类型都必须有描述（面板 / 工坊 / 笔刷的 tooltip 都直接用它）。
+    #[test]
+    fn every_type_has_a_description() {
+        for d in CELL_DEFS.iter() {
+            assert!(!d.desc.is_empty(), "「{}」没有描述", d.label);
+            assert!(
+                d.desc.chars().count() >= 6,
+                "「{}」的描述太短，可能没写清楚：{}",
+                d.label,
+                d.desc
+            );
+        }
+    }
+
+    /// **描述必须跟得上机制**。
+    ///
+    /// 这个项目改机制很频繁，而描述是写死在 `CellDef` 里的静态字符串——
+    /// 一不小心就变成"文档说 A、代码做 B"。批次 18 就抓到三处：
+    ///
+    /// | 类型 | 描述原来写 | 实际 |
+    /// |---|---|---|
+    /// | 杀手 | 每 tick 伤害四邻域里的格子；装甲格免疫 | 一个个体每 tick 对同一目标只咬一口；装甲按比例减免 |
+    /// | 腐殖质 | 往**相邻**空格冒食物 | 自己那格也会冒 |
+    /// | 食物 | 一份食物，嘴吃掉后换成能量 | 食物带能量存量，吃多少看存量，剩余会腐败 |
+    ///
+    /// 这里只钉住"改机制时最容易忘"的那几句关键词，不是逐字比对
+    /// （逐字比对会让改文案变成改代码）。
+    #[test]
+    fn descriptions_match_current_mechanics() {
+        let killer = def(ct::KILLER).unwrap().desc;
+        assert!(
+            killer.contains("只咬一口"),
+            "杀手已经是「整口咬合」了，描述里必须说清楚：{}",
+            killer
+        );
+        let armor = def(ct::ARMOR).unwrap().desc;
+        assert!(
+            armor.contains("减免"),
+            "装甲已经是按比例减免（可调），不再是绝对免疫：{}",
+            armor
+        );
+        let humus = def(ct::HUMUS).unwrap().desc;
+        assert!(
+            humus.contains("自己"),
+            "腐殖质会在自己那格也冒食物，描述不能只说相邻格：{}",
+            humus
+        );
+        let food = def(ct::FOOD).unwrap().desc;
+        assert!(
+            food.contains("腐败"),
+            "食物会渐进腐败，描述里要有：{}",
+            food
+        );
+        let producer = def(ct::PRODUCER).unwrap().desc;
+        assert!(
+            producer.contains("挡光"),
+            "生产者的产出会被上方身体遮挡，描述里要有：{}",
+            producer
+        );
     }
 
     #[test]

@@ -924,13 +924,13 @@ impl AttrField {
     /// 面板上的说明
     pub fn hint(self) -> &'static str {
         match self {
-            AttrField::Hp => "被打掉多少伤害这个细胞才会死。0 = 一碰就碎。",
+            AttrField::Hp => "这一格贡献多少血量。整只生物的血量是各格之和，累积伤害超过它才死；0 = 这一格不贡献血量。",
             AttrField::Cost => {
                 "每 tick 的能量开销（会再乘上全局消耗量倍率）。满照下一个生产者细胞挣 0.12。"
             }
-            AttrField::Damage => "攻击型细胞每次命中的伤害。",
+            AttrField::Damage => "每个杀手细胞贡献的咬合力。一个个体每 tick 对同一目标只咬一口，所以总咬合力 = 单格伤害 × 杀手细胞数。",
             AttrField::SenseRange => "眼睛能看多远。0 = 用全局视野距离。",
-            AttrField::FoodValue => "被吃掉时提供多少能量（会再乘上食物量倍率）。",
+            AttrField::FoodValue => "死亡时这一格最多能装多少能量（残骸容量）。体内的能量按格平均分配，装不下的撒到周围。",
             AttrField::BiteMult => "吃食物和咬活体都乘它：一份食物换多少能量 / 一口能抽走多少。",
             AttrField::ProdMult => "光合产出的倍率（× 全局「光合速率」）。",
             AttrField::RegenMult => "每 tick 抹掉累积伤害的倍率（× 全局「再生速率」）。",
