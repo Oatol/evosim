@@ -75,6 +75,12 @@ pub struct Organism {
     /// 所以它衡量的是"这个环境让这只芽卡了多久"，不是"它活了多久"。
     #[serde(default)]
     pub grow_stall: u32,
+
+    /// 芽出生以来活了多少 tick。到 `growth_min_ticks` 才允许成年。
+    ///
+    /// 只在 `growth_plan` 还在时增长；成年之后不再有意义（也不会被读）。
+    #[serde(default)]
+    pub grow_age: u32,
 }
 
 impl Organism {
@@ -106,6 +112,7 @@ impl Organism {
             energy_gained_last: 0.0,
             growth_plan: None,
             grow_stall: 0,
+            grow_age: 0,
         };
         org.normalize_position(grid);
         org

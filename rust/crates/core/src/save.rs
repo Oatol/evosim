@@ -79,7 +79,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// （批次 12.1 环境可塑 / 提前成熟）。
 /// v17：`WorldCfg` 加了 `patch_richness`，`Light` 加了 `patch_floor`
 /// （批次 13 富贫斑块）。
-pub const VERSION: u32 = 17;
+/// v18：`LifeCfg` 加了 `growth_min_ticks`，`Organism` 加了 `grow_age`
+/// （批次 14 最短成长期）。
+pub const VERSION: u32 = 18;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

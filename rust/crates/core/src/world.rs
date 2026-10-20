@@ -1111,6 +1111,12 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let Some(plan) = self.organisms[i].growth_plan.clone() else {
             return;
         };
+        // 年龄只在"还是芽"的时候涨。它是「最短成长期」的计时器：
+        // 1 格目标的芽出生时就已经"长满"了，没有它就会当 tick 成年、立刻繁殖，
+        // 于是「小」变成免费策略，体型在**任何**环境里都涨不上去（见批次 13 实测）。
+        self.organisms[i].grow_age = self.organisms[i].grow_age.saturating_add(1);
+        let min_age = self.config.life.growth_min_ticks;
+        let old_enough = self.organisms[i].grow_age >= min_age;
         let cost = self.config.life.growth_cost.max(0.0);
         // 能量不够就长不动 —— 但**不能直接 return**：要走下面的停滞计数，
         // 否则"饿着的芽"永远不会被判定为"该提前成熟"。
@@ -1211,7 +1217,10 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             let limit = self.config.life.growth_stall_mature;
             if limit > 0 {
                 self.organisms[i].grow_stall = self.organisms[i].grow_stall.saturating_add(1);
-                if self.organisms[i].grow_stall >= limit {
+                // **提前成熟也要过年龄门槛**：否则「最短成长期」会被
+                // 「长不动就提前成熟」这条路径绕过去——那正好是最需要它的场景
+                // （贫斑块里芽长不动，本来会立刻变小体型）。
+                if self.organisms[i].grow_stall >= limit && old_enough {
                     self.organisms[i].growth_plan = None;
                     self.organisms[i].grow_stall = 0;
                     return;
@@ -1219,8 +1228,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             }
         }
 
-        // 长满了 → 成年
-        if self.organisms[i].anatomy.cells.len() >= plan.cells.len() {
+        // 长满了**而且**够年龄 → 成年
+        if self.organisms[i].anatomy.cells.len() >= plan.cells.len() && old_enough {
             self.organisms[i].growth_plan = None;
             self.organisms[i].grow_stall = 0;
         }
@@ -3312,6 +3321,9 @@ mod tests {
     fn growing_adds_a_cell_and_charges_energy() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
+        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
+        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
+        w.config.life.growth_min_ticks = 0;
         w.config.life.growth_cost = 1.0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
@@ -3337,6 +3349,9 @@ mod tests {
     fn a_sprout_cannot_breed() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
+        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
+        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
+        w.config.life.growth_min_ticks = 0;
         w.config.life.metabolism_scale = 0.0;
         // 目标 2 格，但生长成本高到这一 tick 长不动
         let mut plan = w.organisms[0].anatomy.clone();
@@ -3381,6 +3396,9 @@ mod tests {
     fn growth_falls_back_to_any_free_neighbour() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
+        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
+        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
+        w.config.life.growth_min_ticks = 0;
         w.config.life.growth_cost = 1.0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
@@ -3408,6 +3426,9 @@ mod tests {
     fn a_stalled_sprout_matures_early_and_stays_small() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
+        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
+        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
+        w.config.life.growth_min_ticks = 0;
         w.config.life.growth_cost = 1.0;
         w.config.life.growth_stall_mature = 3;
         // 目标 3 格，但一格都不给它长（能量 0）
@@ -3436,6 +3457,9 @@ mod tests {
     fn zero_stall_threshold_never_matures_early() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
+        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
+        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
+        w.config.life.growth_min_ticks = 0;
         w.config.life.growth_stall_mature = 0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
@@ -3448,5 +3472,104 @@ mod tests {
             w.organisms[0].growth_plan.is_some(),
             "阈值 0 时不该提前成熟"
         );
+    }
+
+    // ────────────── 批次 14：最短成长期（堵掉「1 格 = 出生即成年」）──────────────
+
+    /// 1 格目标的芽在满 `growth_min_ticks` 之前**不能成年**。
+    ///
+    /// 这条是整批的核心。`growth_plan` 是母体成熟时的体型，所以 1 格母体的后代
+    /// 目标就是 1 格——没有年龄门槛的话它出生那一 tick 就"长满了"，
+    /// 立刻成年、立刻繁殖。实测那会让整个种群塌到平均 1.69 格，
+    /// 而加上 20 tick 的门槛能到 4~8 格。
+    #[test]
+    fn a_one_cell_sprout_must_wait_the_minimum_time() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_min_ticks = 5;
+        w.config.life.growth_cost = 0.0;
+        // 1 格目标：出生就已经"长满"
+        w.organisms[0].growth_plan = Some(w.organisms[0].anatomy.clone());
+
+        for tick in 1..5 {
+            w.grow_organism(0);
+            assert!(
+                w.organisms[0].growth_plan.is_some(),
+                "第 {} tick 就成年了，应该等到第 5 tick",
+                tick
+            );
+        }
+        w.grow_organism(0);
+        assert!(
+            w.organisms[0].growth_plan.is_none(),
+            "满 5 tick 应该成年"
+        );
+    }
+
+    /// `growth_min_ticks = 0` 时**逐位等于旧行为**：1 格目标当 tick 成年。
+    #[test]
+    fn zero_min_time_matures_immediately() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_min_ticks = 0;
+        w.config.life.growth_cost = 0.0;
+        w.organisms[0].growth_plan = Some(w.organisms[0].anatomy.clone());
+        w.grow_organism(0);
+        assert!(w.organisms[0].growth_plan.is_none(), "0 应该立刻成年");
+    }
+
+    /// 年龄门槛**不阻止长身体**——它只管"什么时候算成年"。
+    ///
+    /// 如果实现成"不够年龄就不长"，大体型就永远长不出来，整批白做。
+    #[test]
+    fn the_minimum_time_does_not_block_growing() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_min_ticks = 10;
+        w.config.life.growth_cost = 1.0;
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 5.0;
+
+        w.grow_organism(0);
+        assert_eq!(w.organisms[0].cell_count(), 2, "第一 tick 就该长出第二格");
+        assert!(
+            w.organisms[0].growth_plan.is_some(),
+            "长满了但还不够年龄，仍算未成年"
+        );
+    }
+
+    /// 「长不动就提前成熟」这条路径**也要过年龄门槛**。
+    ///
+    /// 否则最短成长期会被绕过去——而"长不动"正好是最需要它的场景
+    /// （贫斑块里芽长不动，本来会立刻变成小体型）。
+    #[test]
+    fn early_maturity_also_respects_the_minimum_time() {
+        let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_min_ticks = 10;
+        w.config.life.growth_stall_mature = 1; // 卡一 tick 就该成熟
+        w.config.life.growth_cost = 1.0;
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        plan.add_cell(ct::PRODUCER, 0, 1, 0);
+        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].energy = 0.0; // 长不动
+
+        for tick in 1..10 {
+            w.grow_organism(0);
+            assert!(
+                w.organisms[0].growth_plan.is_some(),
+                "第 {} tick 就提前成熟了，应该等到第 10 tick",
+                tick
+            );
+        }
+        w.grow_organism(0);
+        assert!(
+            w.organisms[0].growth_plan.is_none(),
+            "满 10 tick 之后才允许提前成熟"
+        );
+        assert_eq!(w.organisms[0].cell_count(), 1, "提前成熟的体型停在 1 格");
     }
 }

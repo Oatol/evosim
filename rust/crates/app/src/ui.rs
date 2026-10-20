@@ -968,6 +968,32 @@ pub fn draw(
                     if st_v as u32 != before_st {
                         cfg.life.growth_stall_mature = st_v as u32;
                     }
+
+                    // 最短成长期：芽必须活够 N tick 才能成年。
+                    //
+                    // 这一项是「1 格目标 = 出生即成年 = 立刻繁殖」这条捷径的补丁。
+                    // 没有它，整个成长机制会塌成"1 格最优"（实测平均体型 1.69）；
+                    // 20 tick 能到 4~8 格，40 tick 能到 11 格。
+                    let before_mg = cfg.life.growth_min_ticks;
+                    let mut mg = before_mg.min(255) as u8;
+                    ui.add(
+                        egui::Slider::new(&mut mg, 0..=120)
+                            .text("最短成长期")
+                            .step_by(1.0),
+                    )
+                    .on_hover_text(
+                        "芽必须活够这么多 tick 才能成年，0 = 关闭。
+                         为什么需要它：`growth_plan` 是母体成熟时的体型，所以 1 格母体的
+                         后代目标就是 1 格——它出生那一 tick 就「长满了」，立刻成年、立刻繁殖。
+                         于是「小」变成免费策略，体型在任何环境里都涨不上去。
+                         实测（6000 tick）：0 → 体型 1.69；15 → 3.35；20 → 4 左右；
+                         25 → 7.33；40 → 11.58（人口从 2682 降到 519）。
+                         它是**下限**不是加时：3 格身体本来就要长 20~40 tick，
+                         所以这一项只惩罚「什么都不用长」的个体。建议 15~25。",
+                    );
+                    if mg as u32 != before_mg {
+                        cfg.life.growth_min_ticks = mg as u32;
+                    }
                 }
 
                 // ── 环境温度（批次 11）──

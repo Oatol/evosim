@@ -80,6 +80,7 @@ fn run(
     stall: u32,
     cloud: f64,
     rich: f64,
+    mingrow: u32,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -111,6 +112,8 @@ fn run(
     cfg.life.growth_cost = gcost;
     // `stall`：连续卡多少 tick 就提前成熟（0 = 必须长满）
     cfg.life.growth_stall_mature = stall;
+    // `mingrow`：最短成长期（0 = 关闭，1 格目标出生即成年）
+    cfg.life.growth_min_ticks = mingrow;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -253,6 +256,7 @@ fn run_seeds(
     stall: u32,
     cloud: f64,
     rich: f64,
+    mingrow: u32,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -276,7 +280,7 @@ fn run_seeds(
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud, rich,
+            ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -394,6 +398,11 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("rich=").and_then(|v| v.parse().ok()))
         .unwrap_or(0.0);
+    // `mingrow=N`：最短成长期（0 = 关闭）
+    let mingrow: u32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("mingrow=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
     // 位置参数：第一个数字是 ticks，其余是种子。
     // **必须把 ticks 从种子里剔掉**——第一版用 `filter_map(parse)` 全收，
     // 于是 `body_scan 10000 1001 1002 1003` 会把 10000 也当成种子跑（多跑一个）。
@@ -422,11 +431,15 @@ fn main() {
         temp_dmg,
         photo,
         if growth {
+            let mut t = format!("开(每格 {:.1}", gcost);
             if stall > 0 {
-                format!("开(每格 {:.1} · 卡 {} 就成熟)", gcost, stall)
-            } else {
-                format!("开(每格 {:.1} · 必须长满)", gcost)
+                t.push_str(&format!(" · 卡 {} 就成熟", stall));
             }
+            if mingrow > 0 {
+                t.push_str(&format!(" · 最短 {} tick", mingrow));
+            }
+            t.push(')');
+            t
         } else {
             "关".to_string()
         }
@@ -458,7 +471,7 @@ fn main() {
     for &p in &ps {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud, rich,
+            ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -570,7 +583,7 @@ fn main() {
     for cap in [0usize, 8, 16] {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
-            ambient, comfort, growth, gcost, stall, cloud, rich,
+            ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
