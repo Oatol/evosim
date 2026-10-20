@@ -85,7 +85,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// `bud_start_cost` / `bud_feed`，`Organism` 加了 `parent_id`（批次 15 出芽）。
 /// v20：`CombatCfg` 加了 `killer_bite_capped`（批次 16 整口咬合）。
 /// v21：`Organism` 加了四个收入来源计数器（批次 19 收入审计）。
-pub const VERSION: u32 = 21;
+/// v22：`LifeCfg` 加了 `mouth_one_bite`（批次 21 一张嘴一口）。
+pub const VERSION: u32 = 22;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

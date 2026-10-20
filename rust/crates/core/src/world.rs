@@ -1330,6 +1330,18 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 // 「一份食物值多少」不再由全局常数决定，而是看它被吃时还剩多少。
                 let mult = self.config.attr(cell.type_id, AttrField::BiteMult);
                 let my_id = self.organisms[i].id;
+                // 「一张嘴一口」：这一格嘴在这一 tick 只能对上一个活体目标。
+                //
+                // 批次 20 挖出的根因：下面这个四邻域循环原本对**每个**邻居各抽一次
+                // `bite_rate`，于是单嘴上限是 `4 × bite_rate`（0.30 时 1.2/tick，
+                // 满照光合只有 0.12）——嘴因此成了 10 倍收益的机器，76% 的个体都靠
+                // 它活着。嘴是一根管子，同一瞬间只能对上一个目标。
+                //
+                // 实现上分成两段：先走一遍四邻域**吃光所有够得着的食物**，顺手把
+                // 活体邻居记进 `victims`；再决定咬哪一个。食物不受配额限制——它是
+                // 躺在格子里的存量，一口能舔到几格由几何决定，不占"咬住不放"的配额。
+                let mut victims = [0usize; 4];
+                let mut nv = 0usize;
                 for k in 0..4 {
                     let n = NEIGHBORS_4[k];
                     let Some(index) = self.grid.index(col + n.0, row + n.1) else {
@@ -1363,6 +1375,32 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                     // 同一格既可能是食物又可能是活体？不可能——`grid.types` 是单层，
                     // 所以上面 `continue` 掉食物分支之后，剩下有主的一定是活体。
                     let owner = self.grid.owners[index];
+                    if owner < 0 || owner == my_id as i32 {
+                        continue;
+                    }
+                    victims[nv] = index;
+                    nv += 1;
+                }
+                if nv == 0 {
+                    return;
+                }
+                // 咬谁：有多个目标时随机挑一个，而不是"按四邻域顺序的第一个"。
+                //
+                // 顺序挑会引入**方向偏置**——`NEIGHBORS_4` 是上右下左，那嘴就永远
+                // 优先咬上方的邻居，生态里会长出一种假的方向性。也刻意不挑"最肥的"：
+                // 那等于给捕食者完美信息。单目标时不抽随机数，让 rng 流保持干净
+                // （旧路径 `mouth_one_bite = false` 更是一颗随机数都不碰）。
+                let one = self.config.life.mouth_one_bite;
+                let pick = if one && nv > 1 {
+                    self.rng.int(nv)
+                } else {
+                    0
+                };
+                let last = if one { pick + 1 } else { nv };
+                for j in pick..last {
+                    let index = victims[j];
+                    let owner = self.grid.owners[index];
+                    // 上一口可能把目标咬死了（尸体格换主），跳过。
                     if owner < 0 || owner == my_id as i32 {
                         continue;
                     }
@@ -2802,6 +2840,128 @@ mod tests {
         assert!(
             (w.organisms[pi].energy - 0.6).abs() < 1e-9,
             "摄取倍率 2.0 应该抽 0.6，实测 {}",
+            w.organisms[pi].energy
+        );
+    }
+
+    // ── 批次 21：一张嘴一口 ──
+
+    /// 一张嘴左右各贴一只猎物：这一 tick 只有**一只**被抽走能量。
+    ///
+    /// 批次 20 的扫描发现单嘴上限是 `4 × bite_rate`——嘴因此成了光合的 10 倍收益，
+    /// 76% 的个体都靠它活着。这个测试盯的就是那个"4 倍"消失。
+    #[test]
+    fn a_mouth_bites_only_one_target_per_tick() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 0.8;
+        let mut rng = Rng::new(1);
+        let mut mouth = Organism::new(&w.config, &mut rng, &w.grid, 5, 5);
+        mouth.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        mouth.anatomy.recompute();
+        let pid = w.add_organism(mouth);
+        // 左右各一只，都贴着这张嘴（四邻域里有两格是猎物）
+        for (col, row) in [(6, 5), (4, 5)] {
+            let mut p = Organism::new(&w.config, &mut rng, &w.grid, col, row);
+            p.anatomy.add_cell(ct::PRODUCER, 0, 0, 0);
+            p.anatomy.recompute();
+            let id = w.add_organism(p);
+            let i = w.organism_index(id).unwrap();
+            w.organisms[i].energy = 5.0;
+        }
+        let pi = w.organism_index(pid).unwrap();
+        let cell = w.organisms[pi].anatomy.cells[0];
+        w.run_cell_function(pi, cell);
+
+        let drained: f64 = w
+            .organisms
+            .iter()
+            .filter(|o| o.id != pid)
+            .map(|o| 5.0 - o.energy)
+            .sum();
+        assert!(
+            (drained - 0.3).abs() < 1e-9,
+            "两个邻居只该被抽走一口 0.3，实测共 {drained}"
+        );
+        assert!(
+            (w.organisms[pi].energy - 0.24).abs() < 1e-9,
+            "到账 0.3 × 0.8 = 0.24，实测 {}",
+            w.organisms[pi].energy
+        );
+    }
+
+    /// 关掉「一张嘴一口」退回批次 9.5 的行为：两个邻居各抽一次（0.6）。
+    #[test]
+    fn old_mouth_mode_bites_every_neighbour() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        w.config.life.bite_rate = 0.3;
+        w.config.life.bite_efficiency = 0.8;
+        w.config.life.mouth_one_bite = false;
+        let mut rng = Rng::new(1);
+        let mut mouth = Organism::new(&w.config, &mut rng, &w.grid, 5, 5);
+        mouth.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        mouth.anatomy.recompute();
+        let pid = w.add_organism(mouth);
+        for (col, row) in [(6, 5), (4, 5)] {
+            let mut p = Organism::new(&w.config, &mut rng, &w.grid, col, row);
+            p.anatomy.add_cell(ct::PRODUCER, 0, 0, 0);
+            p.anatomy.recompute();
+            let id = w.add_organism(p);
+            let i = w.organism_index(id).unwrap();
+            w.organisms[i].energy = 5.0;
+        }
+        let pi = w.organism_index(pid).unwrap();
+        let cell = w.organisms[pi].anatomy.cells[0];
+        w.run_cell_function(pi, cell);
+
+        let drained: f64 = w
+            .organisms
+            .iter()
+            .filter(|o| o.id != pid)
+            .map(|o| 5.0 - o.energy)
+            .sum();
+        assert!(
+            (drained - 0.6).abs() < 1e-9,
+            "旧行为应该两个邻居各抽 0.3，实测共 {drained}"
+        );
+    }
+
+    /// 「一口」只约束活体：四邻域的食物照样可以一次舔干净。
+    ///
+    /// 食物是躺在格子里的存量，一口能舔到几格由几何决定；"咬住不放"的配额
+    /// 不该被它占掉，否则嘴在尸体堆里反而变弱。
+    #[test]
+    fn one_bite_does_not_limit_food() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+        let mut mouth = Organism::new(&w.config, &mut rng, &w.grid, 5, 5);
+        mouth.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        mouth.anatomy.recompute();
+        let pid = w.add_organism(mouth);
+        let pi = w.organism_index(pid).unwrap();
+        // 四邻域全铺食物，每格 0.1
+        for (col, row) in [(5, 4), (6, 5), (5, 6), (4, 5)] {
+            let idx = w.grid.index(col, row).unwrap();
+            w.set_cell_at(idx, ct::FOOD, -1);
+            w.grid.food[idx] = 0.1;
+        }
+        let cell = w.organisms[pi].anatomy.cells[0];
+        w.run_cell_function(pi, cell);
+        assert!(
+            (w.organisms[pi].energy - 0.4).abs() < 1e-9,
+            "四格食物应该全吃掉（0.4），实测 {}",
             w.organisms[pi].energy
         );
     }

@@ -101,6 +101,7 @@ fn run(
     oldbite: bool,
     bite: f64,
     shade: f64,
+    oldmouth: bool,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -144,6 +145,8 @@ fn run(
     cfg.life.bite_rate = bite;
     // `shade=K`：遮挡强度（默认 0.25，0 = 关掉）
     cfg.life.shade_strength = shade;
+    // `oldmouth`：退回「一张嘴每 tick 咬满 4 个邻居」（批次 9.5 的行为）
+    cfg.life.mouth_one_bite = !oldmouth;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -328,6 +331,7 @@ fn run_seeds(
     oldbite: bool,
     bite: f64,
     shade: f64,
+    oldmouth: bool,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -356,7 +360,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade,
+            oldbite, bite, shade, oldmouth,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -508,6 +512,8 @@ fn main() {
         Config::default().life.budding_enabled
     };
     let oldbite = args.iter().any(|a| a == "oldbite");
+    // `oldmouth`：一张嘴每 tick 咬满 4 个邻居（批次 9.5 的行为）
+    let oldmouth = args.iter().any(|a| a == "oldmouth");
     // `shade=K`：遮挡强度（默认跟 Config 走）
     let shade: f64 = args
         .iter()
@@ -543,7 +549,7 @@ fn main() {
     assert!(!seeds.is_empty(), "至少要一个种子");
 
     println!(
-        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} · 成长 {} ──",
+        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} · 咬 {:.2}{} · 成长 {} ──",
         seeds,
         if free { "**不**" } else { "" },
         tries,
@@ -553,6 +559,8 @@ fn main() {
         heat,
         temp_dmg,
         photo,
+        bite,
+        if oldmouth { "(旧:四邻域各一口)" } else { "(一口一目标)" },
         if growth {
             let mut t = format!("开(每格 {:.1}", gcost);
             if stall > 0 {
@@ -598,7 +606,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade,
+            oldbite, bite, shade, oldmouth,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -734,7 +742,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade,
+            oldbite, bite, shade, oldmouth,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
