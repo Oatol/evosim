@@ -141,7 +141,7 @@ fn run(
     cfg.life.bud_feed = budfeed;
     // `oldbite`：退回旧的「按接触面积叠加」伤害
     cfg.combat.killer_bite_capped = !oldbite;
-    // `bite=R`：嘴每 tick 能从活体身上抽多少能量（默认 0.30，比满照光合的 0.12 还高）
+    // `bite=R`：嘴每 tick 能从活体身上抽多少能量（默认 0.06，是满照光合 0.12 的一半）
     cfg.life.bite_rate = bite;
     // `shade=K`：遮挡强度（默认 0.25，0 = 关掉）
     cfg.life.shade_strength = shade;
