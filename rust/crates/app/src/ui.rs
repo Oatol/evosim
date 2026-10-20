@@ -11,7 +11,7 @@ use evosim_core::cell_type::{self, ct, TERRAIN_BRUSH_TYPES};
 use evosim_core::world::World;
 use evosim_render::colors::build_palette;
 
-use crate::paint::{BrushShape, ERASER};
+use crate::paint::{BrushShape, CREATURE_ERASER, ERASER};
 use crate::panels::Panels;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +92,8 @@ impl Default for UiState {
             brush_shape: BrushShape::Square,
             tool: Tool::Paint,
             hover: String::new(),
-            show_tools: true,
-            show_params: true,
+            show_tools: false,
+            show_params: false,
             type_params_open: false,
             type_selected: ct::MOUTH,
             highlights: Vec::new(),
@@ -468,7 +468,10 @@ pub fn draw(
 
                 let palette = build_palette();
                 let mut ids: Vec<u8> = TERRAIN_BRUSH_TYPES.to_vec();
+                // 两个橡皮擦并排：擦地形 / 擦生物。分开是刻意的——
+                // "把这块地方清空"和"把这只生物删掉"是两种不同的意图。
                 ids.push(ERASER);
+                ids.push(CREATURE_ERASER);
 
                 for chunk in ids.chunks(2) {
                     ui.horizontal(|ui| {
@@ -493,6 +496,8 @@ pub fn draw(
                 });
                 let hint = if st.brush == ERASER {
                     "正在擦：地形（生物与食物不动）".to_string()
+                } else if st.brush == CREATURE_ERASER {
+                    "正在擦：生物（地形与食物不动）".to_string()
                 } else {
                     format!("正在画：{}", cell_type::label(st.brush))
                 };
@@ -501,6 +506,8 @@ pub fn draw(
                 // 选中笔刷的简介（文案来自注册表 desc，笔刷/工坊/参数共用一份）
                 let desc = if st.brush == ERASER {
                     "只擦地形（墙/岩浆/沼泽/辐射带/腐殖质），食物与生物一律不动".to_string()
+                } else if st.brush == CREATURE_ERASER {
+                    "只擦生物：整只移除，不留残骸（能量记进热池）。地形与食物不动".to_string()
                 } else {
                     cell_type::def(st.brush)
                         .map(|d| d.desc.to_string())
@@ -536,9 +543,20 @@ pub fn draw(
             .resizable(false)
             .collapsible(true)
             .open(&mut params_open)
-            .default_pos([1100.0, 42.0])
+            .default_pos([880.0, 42.0])
+            .default_width(680.0)
             .show(ctx, |ui| {
                 let cfg = &mut world.config;
+                // ── 双列 ──
+                //
+                // 参数太多了，单列一路排下去有 2000 多像素高，一打开就铺满屏幕。
+                // 分两列之后高度砍半，左右各自滚动（`horizontal_top` 保证两列从
+                // 同一条基线开始，不会因为一边短就错位）。
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        // 每列固定宽度：不指定的话 egui 会按内容自然宽度排，
+                        // 滑块宽度会忽大忽小，两列也参差不齐。
+                        ui.set_width(316.0);
                 // 活着的价格。批次 10 起默认 1.0（不再是 0）：
                 // 每个细胞的 `消耗` 已经是真实量级（生产者 0.010 对满照收入 0.12），
                 // 所以 1.0 就是"照价付账"。0 = 关掉代谢，细胞不吃饭也不饿死。
@@ -912,7 +930,11 @@ pub fn draw(
                 }
 
                 // ── 成长过程（批次 12）──
-                ui.separator();
+                    });
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_width(316.0);
                 ui.label(egui::RichText::new("成长").strong());
 
                 let mut grow = cfg.life.growth_enabled;
@@ -1184,6 +1206,8 @@ pub fn draw(
                         .color(Color32::from_rgb(130, 140, 155))
                         .size(11.0),
                 );
+                    });
+                });
             });
         st.show_params = params_open;
     }
@@ -1386,6 +1410,8 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
 
     let color = if id == ERASER {
         Color32::from_rgb(203, 213, 225)
+    } else if id == CREATURE_ERASER {
+        Color32::from_rgb(148, 163, 184)
     } else {
         let p = palette[(id as usize).min(255)];
         Color32::from_rgb(p[0], p[1], p[2])
@@ -1404,7 +1430,9 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
     );
 
     let name = if id == ERASER {
-        "橡皮擦"
+        "擦地形"
+    } else if id == CREATURE_ERASER {
+        "擦生物"
     } else {
         cell_type::label(id)
     };
@@ -1428,6 +1456,8 @@ fn brush_tile(ui: &mut egui::Ui, st: &mut UiState, palette: &[[u8; 4]], id: u8) 
 
     let desc = if id == ERASER {
         "只擦地形（墙/岩浆/沼泽/辐射带/腐殖质），食物与生物一律不动".to_string()
+    } else if id == CREATURE_ERASER {
+        "只擦生物：整只移除，不留残骸。地形与食物不动".to_string()
     } else {
         cell_type::def(id)
             .map(|d| d.desc.to_string())
@@ -1562,13 +1592,20 @@ mod tests {
     }
 
     #[test]
-    fn brush_list_covers_registry_and_eraser() {
+    fn brush_list_covers_registry_and_both_erasers() {
         let mut ids: Vec<u8> = evosim_core::cell_type::TERRAIN_BRUSH_TYPES.to_vec();
         ids.push(crate::paint::ERASER);
+        ids.push(crate::paint::CREATURE_ERASER);
         assert!(ids.contains(&evosim_core::cell_type::ct::WALL));
         assert!(ids.contains(&evosim_core::cell_type::ct::LAVA));
         assert!(ids.contains(&crate::paint::ERASER));
-        assert_eq!(ids.len(), 8, "7 个地形笔刷 + 橡皮擦");
+        assert!(ids.contains(&crate::paint::CREATURE_ERASER));
+        // 「空」不再是笔刷：擦除拆成擦地形 / 擦生物两个明确的意图。
+        assert!(
+            !ids.contains(&evosim_core::cell_type::ct::EMPTY),
+            "「空」不该出现在笔刷里"
+        );
+        assert_eq!(ids.len(), 8, "6 个地形笔刷 + 两个橡皮擦");
     }
 
     /// 回归：世界高亮必须画在**窗口下面**。

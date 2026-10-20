@@ -53,31 +53,20 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let cols = i32(u.grid.x);
     let rows = i32(u.grid.y);
 
-    // 世界在屏幕上的像素尺寸
-    let world_px = u.grid * u.zoom;
-
     var col = i32(floor(world.x));
     var row = i32(floor(world.y));
 
-    // ── 只在"世界比视口大"的方向做环绕 ──
+    // ── **视觉上永不环绕**：世界只有一份，越界就是背景色 ──
     //
-    // 两个方向都要单独判断：世界可能一边比视口宽、另一边比视口窄。
-    // 如果无条件取模，缩小到能看见整个世界时，画面会把同一个世界重复铺满屏幕
-    // —— 1.x 踩过这个坑，这里用世界尺寸和视口尺寸的比较来根治。
-    if (world_px.x < u.viewport.x) {
-        if (col < 0 || col >= cols) {
-            return BACKDROP;
-        }
-    } else {
-        col = ((col % cols) + cols) % cols;
-    }
-
-    if (world_px.y < u.viewport.y) {
-        if (row < 0 || row >= rows) {
-            return BACKDROP;
-        }
-    } else {
-        row = ((row % rows) + rows) % rows;
+    // 之前的做法是"世界比视口大的方向做取模"，本意是"放大时看不出接缝"。
+    // 但默认世界大小下，缩到某个比例时世界刚好比视口大一点点，
+    // 于是平移到边缘会看到同一个世界**重复铺好几份**——看着像 bug。
+    //
+    // 现在改成：画布上永远只画一份。世界的上下左右**在模拟里**仍然回环
+    // （`grid.index` 折回、光场环绕、生物从右边走出去从左边进来），
+    // 但那是模拟规则，不该在画面上重复显示。
+    if (col < 0 || col >= cols || row < 0 || row >= rows) {
+        return BACKDROP;
     }
 
     let uv = vec2<u32>(u32(col), u32(row));

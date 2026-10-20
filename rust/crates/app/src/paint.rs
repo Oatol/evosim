@@ -6,8 +6,11 @@
 use evosim_core::cell_type::{ct, is_terrain};
 use evosim_core::world::World;
 
-/// 橡皮擦的哨兵值（不是合法的细胞类型 id）
+/// 橡皮擦的哨兵值（不是合法的细胞类型 id）：**擦地形**
 pub const ERASER: u8 = 255;
+/// 另一个哨兵：**擦生物**。和擦地形分开是刻意的——
+/// "把这块地方清空"和"把这只生物删掉"是两种完全不同的意图。
+pub const CREATURE_ERASER: u8 = 254;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BrushShape {
@@ -79,9 +82,23 @@ pub fn apply_brush(world: &mut World, col: i32, row: i32, brush: u8, size: i32, 
                 }
             }
 
+            // **超出世界就截断**。
+            //
+            // `grid.index` 在 `wrap` 打开时会把越界坐标折回另一边，于是
+            // "在画布上侧外面画一笔"会真的画到世界**底部**去——玩家看到的
+            // 是"我明明画在外面"，世界却多了东西。画笔是玩家的手，不是模拟，
+            // 越界就该什么都不发生。
+            if c < 0 || r < 0 || c >= world.grid.cols as i32 || r >= world.grid.rows as i32 {
+                continue;
+            }
             let Some(idx) = world.grid.index(c, r) else {
                 continue;
             };
+
+            if brush == CREATURE_ERASER {
+                world.erase_creature_at(idx);
+                continue;
+            }
 
             if brush == ERASER {
                 // 只擦地形：墙 / 岩浆 / 沼泽 / 辐射带 / 腐殖质。食物与生物一律不动。
@@ -192,6 +209,50 @@ mod tests {
         apply_brush(&mut w, 5, 5, ERASER, 3, BrushShape::Square);
         assert_eq!(w.type_at(5, 5), ct::EMPTY, "墙应该被擦掉");
         assert_eq!(w.type_at(6, 5), ct::FOOD, "食物必须保留");
+    }
+
+    /// **越界就截断**，不能折回另一边。
+    ///
+    /// `grid.index` 在 `wrap` 打开时会把越界坐标折回对面，于是"在画布上侧
+    /// 外面画一笔"会真的画到世界**底部**。玩家看到的是"我明明画在外面"，
+    /// 世界却多了东西——画笔是玩家的手，越界就该什么都不发生。
+    #[test]
+    fn painting_outside_the_world_is_clipped() {
+        let mut w = small(); // 32×32，wrap 默认开
+        w.fill_grid(ct::EMPTY, false);
+        // 在世界上边外面画一笔（笔刷 5 格，中心 -5 → 覆盖 -7..-3，全在世界外）
+        apply_brush(&mut w, 16, -5, ct::WALL, 5, BrushShape::Square);
+        assert_eq!(count_of(&w, ct::WALL), 0, "世界外的一笔不该折到底部");
+        // 左边外面
+        apply_brush(&mut w, -5, 16, ct::WALL, 5, BrushShape::Square);
+        assert_eq!(count_of(&w, ct::WALL), 0, "世界左外的一笔不该折到右边");
+        // 贴着边界画：只画世界里面那一半
+        apply_brush(&mut w, 0, 0, ct::WALL, 3, BrushShape::Square);
+        let walls = count_of(&w, ct::WALL);
+        assert!(walls > 0 && walls <= 4, "边界上的笔刷只该落在世界内，实测 {}", walls);
+    }
+
+    /// 「擦生物」整只移除、不留残骸，而且地形与食物不动。
+    #[test]
+    fn creature_eraser_removes_the_whole_organism() {
+        let mut w = small();
+        w.fill_grid(ct::EMPTY, false);
+        w.set_cell(20, 20, ct::WALL, -1);
+        w.set_cell(21, 20, ct::FOOD, -1);
+        let org = create_origin_organism(&mut w, 10, 10);
+        w.add_organism(org);
+        w.organisms[0].energy = 5.0;
+        let heat_before = w.heat_pool;
+
+        // 擦身体上的一格：整只应该都没了
+        apply_brush(&mut w, 10, 10, CREATURE_ERASER, 1, BrushShape::Square);
+        assert!(!w.organisms[0].alive, "整只生物应该被移除");
+        assert_eq!(w.type_at(20, 20), ct::WALL, "地形不该动");
+        assert_eq!(w.type_at(21, 20), ct::FOOD, "食物不该动");
+        assert!(
+            w.heat_pool >= heat_before + 5.0 - 1e-9,
+            "死者的能量要进热池（不能凭空消失）"
+        );
     }
 
     #[test]

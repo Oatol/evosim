@@ -89,14 +89,22 @@ fn nearest_sampling_gives_solid_blocks() {
     assert_eq!(px(&rgba, 20, 15), palette_rgb(ct::EMPTY), "右边界外不该是墙");
 }
 
+/// **画布上永远只画一份世界**：相机越过边界就是背景色，不做视觉环绕。
+///
+/// 这条以前断言的是"折回"（`(-1,-1)` 显示成 `(7,7)`）。那个行为在默认世界
+/// 大小下会出事：缩到某个比例时世界刚好比视口大一点点，平移到边缘就会看到
+/// 同一个世界**重复铺好几份**。
+///
+/// 世界的回环**在模拟里**仍然成立（`grid.index` 折回、光场环绕、生物从右边
+/// 走出去从左边进来），只是不该在画面上重复显示——模拟规则和渲染是两件事。
 #[test]
-fn world_wraps_when_camera_goes_negative() {
+fn world_does_not_tile_visually() {
     let Some((device, queue)) = evosim_render::create_headless_device() else {
         return;
     };
     let mut world = small_world(8, 8);
     world.fill_grid(ct::EMPTY, false);
-    // 右下角放墙：相机往左上移一格时，它应该出现在左上角
+    // 右下角放墙：如果还有视觉环绕，相机往左上移一格时它会出现在左上角
     world.set_cell(7, 7, ct::WALL, -1);
 
     let mut r = GridRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, 8, 8);
@@ -108,11 +116,10 @@ fn world_wraps_when_camera_goes_negative() {
         zoom: 10.0,
     };
     let rgba = render_to_rgba(&mut r, W, H, &cam);
-    // 世界 (-1,-1) → 屏幕 (0,0)，而 (-1,-1) 折回就是 (7,7)
-    assert_eq!(
+    assert_ne!(
         px(&rgba, 5, 5),
         palette_rgb(ct::WALL),
-        "世界环绕没生效：(-1,-1) 应折回 (7,7)"
+        "画布上不该出现环绕出来的第二份世界"
     );
 }
 

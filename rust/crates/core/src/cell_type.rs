@@ -452,8 +452,10 @@ pub static VISIBLE_CELL_TYPES: [u8; 8] = [
 ];
 
 /// 可直接在世界画布上绘制的地形（画笔列表由它派生）
-pub static TERRAIN_BRUSH_TYPES: [u8; 7] = [
-    ct::EMPTY,
+/// 画笔面板里的地形类型。**不含「空」**——擦除走专门的橡皮擦
+/// （擦地形 / 擦生物两个），否则"画空"既能擦地形又能擦生物，
+/// 两种意图混在一个笔刷里，谁都不好使。
+pub static TERRAIN_BRUSH_TYPES: [u8; 6] = [
     ct::FOOD,
     ct::WALL,
     ct::LAVA,

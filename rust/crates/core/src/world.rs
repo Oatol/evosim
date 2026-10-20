@@ -1582,6 +1582,45 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         }
     }
 
+    /// 画笔「擦生物」用：把这一格上的那只生物整个抹掉，**不留残骸**。
+    ///
+    /// 和 `kill_organism` 的区别只有一条：不撒食物。这是玩家在擦画布，不是捕食。
+    /// 但死者的能量不能凭空消失，所以进热池（离开生物圈，账仍然对得上）。
+    ///
+    /// 返回是否真的擦掉了一只。
+    pub fn erase_creature_at(&mut self, index: usize) -> bool {
+        if index >= self.grid.len {
+            return false;
+        }
+        let owner = self.grid.owners[index];
+        if owner < 0 {
+            return false;
+        }
+        let Some(i) = self.organism_index(owner as u32) else {
+            return false;
+        };
+        self.heat_pool += self.organisms[i].energy.max(0.0);
+        self.organisms[i].alive = false;
+        self.organisms[i].energy = 0.0;
+        let coords: Vec<(i32, i32)> = self.organisms[i]
+            .anatomy
+            .cells
+            .iter()
+            .map(|c| {
+                (
+                    self.organisms[i].real_col(c),
+                    self.organisms[i].real_row(c),
+                )
+            })
+            .collect();
+        for (c, r) in coords {
+            if let Some(idx) = self.grid.index(c, r) {
+                self.set_cell_at(idx, ct::EMPTY, -1);
+            }
+        }
+        true
+    }
+
     pub fn kill_organism(&mut self, i: usize) {
         if i >= self.organisms.len() || !self.organisms[i].alive {
             return;
