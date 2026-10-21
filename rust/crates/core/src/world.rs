@@ -1557,7 +1557,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                     // 两个都关掉时恒为 1.0，逐位等于旧行为。
                     let adv = self.size_advantage(i, owner as u32);
                     let kin = self.kin_penalty(i, owner as u32);
-                    let gain = self.bite_from(owner as u32, index, mult * adv * kin);
+                    let spec = self.predator_specialization(i);
+                    let gain = self.bite_from(owner as u32, index, mult * adv * kin * spec);
                     // 同样要走容量检查：咬到嘴里的能量一旦超过容量，
                     // 直接 `+=` 会让下一次光合把个体往下 clamp，那一截就蒸发了。
                     let got = self.add_energy(i, gain);
@@ -1719,6 +1720,24 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let np = self.organisms[pred_i].cell_count().max(1) as f64;
         let nv = self.organisms[vi].cell_count().max(1) as f64;
         (np / nv).powf(k).clamp(MIN, MAX)
+    }
+
+    /// 捕食专精奖励（批次 31）：身体里**没有生产者细胞**时咬得更狠。
+    ///
+    /// `predator_specialization = 1.0`（默认）时恒为 1.0，逐位等于旧行为。
+    ///
+    /// 为什么需要它：混养体（生产者 + 嘴）永远赢——它有底薪又吃红利。
+    /// 想让它不赢，只有两条路：**禁止混养**（批次 30 诊断证明是灾难），
+    /// 或者**给放弃底薪的个体一个补偿**。这一项是后者。
+    fn predator_specialization(&self, i: usize) -> f64 {
+        let k = self.config.life.predator_specialization;
+        if !(k > 1.0) {
+            return 1.0;
+        }
+        if self.organisms[i].anatomy.has(Flags::PRODUCER) {
+            return 1.0;
+        }
+        k
     }
 
     /// 亲缘折扣（批次 24）：同种相残的收益倍率。
@@ -2972,6 +2991,11 @@ mod tests {
         let mut cfg = Config::default();
         cfg.world.cols = 12;
         cfg.world.rows = 12;
+        // 这一组测试量的是"这一口吃到多少"，不该被**专精奖励**污染：
+        // 它们构造的捕食者都是纯捕食者（没有生产者细胞），
+        // 默认 `predator_specialization = 2.0` 会让每一口都翻倍。
+        // 专精本身由 `spec_*` 那组测试单独覆盖。
+        cfg.life.predator_specialization = 1.0;
         let mut w = World::new(cfg, Rng::new(1));
         w.fill_grid(ct::EMPTY, false);
         let mut rng = Rng::new(1);
@@ -3129,6 +3153,8 @@ mod tests {
         w.fill_grid(ct::EMPTY, false);
         w.config.life.bite_rate = 0.3;
         w.config.life.bite_efficiency = 0.8;
+        // 纯捕食者 + 默认专精 2.0 会让每一口翻倍，这里量的是"咬几口"，先关掉
+        w.config.life.predator_specialization = 1.0;
         let mut rng = Rng::new(1);
         let mut mouth = Organism::new(&w.config, &mut rng, &w.grid, 5, 5);
         mouth.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
@@ -3174,6 +3200,7 @@ mod tests {
         w.fill_grid(ct::EMPTY, false);
         w.config.life.bite_rate = 0.3;
         w.config.life.bite_efficiency = 0.8;
+        w.config.life.predator_specialization = 1.0;
         w.config.life.mouth_one_bite = false;
         let mut rng = Rng::new(1);
         let mut mouth = Organism::new(&w.config, &mut rng, &w.grid, 5, 5);
@@ -3593,6 +3620,53 @@ mod tests {
             audit.eggs > 0.0,
             "卵里应该有能量（`growth_seed_fraction` 那一份），实测 {}",
             audit.eggs
+        );
+    }
+
+    // ── 批次 31：捕食专精奖励 ──
+
+    /// `predator_specialization = 1.0`（默认）必须逐位等于旧行为。
+    #[test]
+    fn spec_one_is_a_no_op() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.predator_specialization = 1.0;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!((w.organisms[vi].energy - 4.9).abs() < 1e-9);
+    }
+
+    /// 纯捕食者（无生产者细胞）拿到倍率；混养体拿不到。
+    #[test]
+    fn spec_rewards_pure_predators_only() {
+        // 纯捕食者：只有嘴
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.predator_specialization = 1.5;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.85).abs() < 1e-9,
+            "纯捕食者应该抽 0.15，实测剩 {}",
+            w.organisms[vi].energy
+        );
+
+        // 混养体：嘴 + 生产者
+        let (mut w2, pi2, vi2) = predator_and_prey(
+            &[(ct::MOUTH, 0, 0), (ct::PRODUCER, 1, 0)],
+            &[(ct::PRODUCER, 0, 0)],
+        );
+        w2.config.life.bite_rate = 0.1;
+        w2.config.life.bite_efficiency = 1.0;
+        w2.config.life.predator_specialization = 1.5;
+        w2.organisms[vi2].energy = 5.0;
+        bite_once(&mut w2, pi2);
+        assert!(
+            (w2.organisms[vi2].energy - 4.9).abs() < 1e-9,
+            "混养体不该拿到专精奖励，实测剩 {}",
+            w2.organisms[vi2].energy
         );
     }
 

@@ -875,6 +875,28 @@ pub fn draw(
                 if (kin - before_kin).abs() > 1e-9 {
                     cfg.life.kin_bite_penalty = kin;
                 }
+                // ── 捕食专精奖励（批次 31）──
+                //
+                // 混养体（生产者 + 嘴）永远赢：有底薪又吃红利。禁止混养是灾难
+                // （99.7% 的成体都是混养体），所以改成**给放弃底薪的个体一个补偿**。
+                let before_spec = cfg.life.predator_specialization;
+                let mut spec = before_spec;
+                ui.add(
+                    egui::Slider::new(&mut spec, 1.0..=3.0)
+                        .text("专精奖励")
+                        .step_by(0.1)
+                        .fixed_decimals(1),
+                )
+                .on_hover_text(
+                    "身体里**没有生产者细胞**时，咬合力乘这个数（1.0 = 关闭）。
+
+                     混养体完全不受影响——分化来自收益差，不是禁令。
+
+                     纯捕食者放弃了底薪，所以给它一个补偿。",
+                );
+                if (spec - before_spec).abs() > 1e-9 {
+                    cfg.life.predator_specialization = spec;
+                }
                 // ── 食物算不算路障 ──
                 //
                 // 拆成两个开关是因为它们是两件事：穿过一片尸体堆去追猎物（移动），

@@ -94,7 +94,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v25：`LifeCfg` 加了 `repro_cooldown`，`Organism` 加了 `repro_cooldown`（批次 26）。
 /// v26：`CellDef` 加了 `EGG`（id 16），`SaveFile` 加了 `eggs`，`LifeCfg` 加了
 /// `egging` / `egg_hatch_ticks`（批次 27 卵生）。
-pub const VERSION: u32 = 26;
+/// v27：`LifeCfg` 加了 `predator_specialization`（批次 31 捕食专精奖励）。
+pub const VERSION: u32 = 27;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
