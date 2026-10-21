@@ -102,6 +102,8 @@ fn run(
     bite: f64,
     shade: f64,
     oldmouth: bool,
+    day: u32,
+    night: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -147,6 +149,9 @@ fn run(
     cfg.life.shade_strength = shade;
     // `oldmouth`：退回「一张嘴每 tick 咬满 4 个邻居」（批次 9.5 的行为）
     cfg.life.mouth_one_bite = !oldmouth;
+    // `day=N`：昼夜周期（0 = 关闭 = 永远正午）；`night=k`：夜间剩余日照比例
+    cfg.world.day_length = day;
+    cfg.world.night_floor = night;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -332,6 +337,8 @@ fn run_seeds(
     bite: f64,
     shade: f64,
     oldmouth: bool,
+    day: u32,
+    night: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -360,7 +367,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth,
+            oldbite, bite, shade, oldmouth, day, night,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -514,6 +521,16 @@ fn main() {
     let oldbite = args.iter().any(|a| a == "oldbite");
     // `oldmouth`：一张嘴每 tick 咬满 4 个邻居（批次 9.5 的行为）
     let oldmouth = args.iter().any(|a| a == "oldmouth");
+    // `day=N`：昼夜周期（0 = 关闭 = 永远正午）
+    let day: u32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("day=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().world.day_length);
+    // `night=k`：夜间剩余日照比例（默认 0.05）
+    let night: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("night=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().world.night_floor);
     // `shade=K`：遮挡强度（默认跟 Config 走）
     let shade: f64 = args
         .iter()
@@ -549,7 +566,7 @@ fn main() {
     assert!(!seeds.is_empty(), "至少要一个种子");
 
     println!(
-        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} · 咬 {:.2}{} · 成长 {} ──",
+        "── 体型扫描 · {ticks} tick · 种子 {:?} · 繁殖失败{}扣钱 · 搜索 {} · 最小体型 {} · cost×{:.1} · 维持 {:.2} · 岩浆 {} 块 · 热伤害 {:.2} · 光合 {:.2} · 咬 {:.2}{} · 昼夜 {} / 夜 {:.2} · 成长 {} ──",
         seeds,
         if free { "**不**" } else { "" },
         tries,
@@ -561,6 +578,8 @@ fn main() {
         photo,
         bite,
         if oldmouth { "(旧:四邻域各一口)" } else { "(一口一目标)" },
+        if day == 0 { "关".to_string() } else { format!("{day} tick") },
+        night,
         if growth {
             let mut t = format!("开(每格 {:.1}", gcost);
             if stall > 0 {
@@ -606,7 +625,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth,
+            oldbite, bite, shade, oldmouth, day, night,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -742,7 +761,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth,
+            oldbite, bite, shade, oldmouth, day, night,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

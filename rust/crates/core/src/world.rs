@@ -646,6 +646,12 @@ impl World {
     pub fn step(&mut self) {
         self.tick += 1;
 
+        // ── 昼夜（批次 22）──
+        //
+        // 必须在感知之前：`think()` 里的视觉输入读的是当前光场，
+        // 光和行动要落在同一时刻上，否则"看见亮的却走进黑"会差半拍。
+        self.update_daylight();
+
         // ── 阶段 A：全体感知与决策（只读世界）──
         //
         // 这一阶段**只读世界**、只写个体自己的 plan/缓冲，所以可以安全并行。
@@ -695,6 +701,28 @@ impl World {
                 species.prune(crate::species::MAX_SPECIES, config.stats.min_discard);
             }
         }
+    }
+
+    /// 推进昼夜相位，把日照系数灌进光场（批次 22）。
+    ///
+    /// 曲线是**余弦**而不是方波：方波会让"日落"那一 tick 光合收入从满额直接掉到
+    /// `night_floor`，储能来不及补；余弦让个体有整个下午去填电池，
+    /// 也让"什么时候繁殖"变成一个真问题（黄昏出生的芽必须熬过整夜）。
+    ///
+    /// `phase = 0` 是正午（`daylight = 1`），`phase = 0.5` 是午夜（`= night_floor`）。
+    /// 起始相位取正午，因为世界生成时（`tick = 0`）是亮的——和"始祖生在光下"一致。
+    pub fn update_daylight(&mut self) {
+        let len = self.config.world.day_length;
+        if len == 0 {
+            // 关掉昼夜：确保回到满照（这条路径每 tick 都会走，但 `set_daylight`
+            // 在值没变时直接返回，所以零开销）
+            self.light.set_daylight(1.0);
+            return;
+        }
+        let phase = (self.tick % len as u64) as f64 / len as f64;
+        let floor = self.config.world.night_floor.clamp(0.0, 1.0);
+        let d = floor + (1.0 - floor) * (0.5 + 0.5 * (std::f64::consts::TAU * phase).cos());
+        self.light.set_daylight(d as f32);
     }
 
     /// 阶段 A：全体感知 + 决策。
@@ -2322,6 +2350,11 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let (mut movers, mut eyes, mut killers) = (0usize, 0usize, 0usize);
         let mut age = 0f64;
         let mut mutability = 0f64;
+        // 收入来源分布（批次 22.1）：按**实际到账能量**归类，不是看有没有嘴。
+        //
+        // 这是回答"到底有没有捕食者"的唯一正确口径——「生产者 + 嘴」在结构上是自养，
+        // 但九成收入来自咬活体时，它在生态里就是捕食者。
+        let mut income = [0usize; 5];
         for org in &self.organisms {
             let c = org.cell_count();
             cells += c;
@@ -2339,16 +2372,19 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             }
             age += org.age as f64;
             mutability += org.mutability;
+            income[org.income_source().slot()] += 1;
         }
+        let nf = n as f64;
         OrgStats {
             count: n,
-            avg_cells: cells as f64 / n as f64,
+            avg_cells: cells as f64 / nf,
             max_cells,
             movers,
             eyes,
             killers,
-            avg_age: age / n as f64,
-            avg_mutability: mutability / n as f64,
+            avg_age: age / nf,
+            avg_mutability: mutability / nf,
+            income: income.map(|k| k as f64 * 100.0 / nf),
         }
     }
 
@@ -2409,6 +2445,9 @@ pub struct OrgStats {
     pub killers: usize,
     pub avg_age: f64,
     pub avg_mutability: f64,
+    /// 按**实际收入来源**归类的个体占比（%），顺序见 `Income::slot`：
+    /// 光合 / 吃食物 / 咬活体 / 供养 / 没收入。五项加起来是 100。
+    pub income: [f64; 5],
 }
 
 #[cfg(test)]
@@ -2963,6 +3002,73 @@ mod tests {
             (w.organisms[pi].energy - 0.4).abs() < 1e-9,
             "四格食物应该全吃掉（0.4），实测 {}",
             w.organisms[pi].energy
+        );
+    }
+
+    // ── 批次 22：昼夜循环 ──
+
+    /// `day_length = 0`（默认）等于永远是正午。
+    #[test]
+    fn zero_day_length_keeps_permanent_noon() {
+        let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        assert_eq!(w.config.world.day_length, 0);
+        for t in [0u64, 1, 37, 1000] {
+            w.tick = t;
+            w.update_daylight();
+            assert_eq!(w.light.daylight, 1.0, "关闭昼夜时日照必须恒为 1");
+        }
+    }
+
+    /// 余弦相位：0 = 正午、1/4 = 半亮、1/2 = 午夜。
+    #[test]
+    fn daylight_follows_a_cosine() {
+        let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.world.day_length = 100;
+        w.config.world.night_floor = 0.1;
+
+        let at = |w: &mut World, t: u64| {
+            w.tick = t;
+            w.update_daylight();
+            w.light.daylight
+        };
+        assert!((at(&mut w, 0) - 1.0).abs() < 0.01, "phase 0 是正午");
+        assert!((at(&mut w, 25) - 0.55).abs() < 0.01, "phase 1/4 是半亮");
+        assert!((at(&mut w, 50) - 0.1).abs() < 0.01, "phase 1/2 是午夜");
+        assert!((at(&mut w, 75) - 0.55).abs() < 0.01, "phase 3/4 回到半亮");
+        // 周期性：下一轮的同一相位必须一样
+        assert!((at(&mut w, 150) - 0.1).abs() < 0.01, "第二天的午夜还是午夜");
+    }
+
+    /// 夜间光合收入必须明显低于正午——这是整个机制的落点。
+    #[test]
+    fn photosynthesis_drops_at_night() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.world.day_length = 100;
+        w.config.world.night_floor = 0.1;
+        w.refresh_light();
+        let i = w.organism_index(id).unwrap();
+        let cell = w.organisms[i].anatomy.cells[0];
+
+        w.tick = 0;
+        w.update_daylight();
+        w.organisms[i].energy = 0.0;
+        w.run_cell_function(i, cell);
+        let noon = w.organisms[i].energy;
+
+        w.tick = 50;
+        w.update_daylight();
+        w.organisms[i].energy = 0.0;
+        w.run_cell_function(i, cell);
+        let night = w.organisms[i].energy;
+
+        assert!(noon > 0.0, "正午必须有产出");
+        assert!(
+            night > 0.0,
+            "夜间不能全黑——月光要让个体能靠储能熬过去，而不是必然死亡"
+        );
+        assert!(
+            night < noon * 0.2,
+            "夜间产出应该只有正午的一成上下，实测 {night:.4} vs {noon:.4}"
         );
     }
 

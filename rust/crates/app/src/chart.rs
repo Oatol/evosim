@@ -22,7 +22,7 @@ pub struct MetricDef {
     pub unit: &'static str,
 }
 
-pub static METRICS: [MetricDef; 6] = [
+pub static METRICS: [MetricDef; 9] = [
     MetricDef {
         name: "种群",
         color: ACCENT,
@@ -66,6 +66,33 @@ pub static METRICS: [MetricDef; 6] = [
         get: |s| s.age,
         digits: 0,
         unit: " tick",
+    },
+    // ── 收入来源（批次 22.1）──
+    //
+    // 这三条线回答的是「到底有没有捕食者」。**判据是实际到账的能量**，
+    // 不是看有没有嘴——「生产者 + 嘴」在结构上是自养，但九成收入来自咬活体时，
+    // 它在生态里就是捕食者。批次 19 之前所有"异养占比"的读数都是结构判据，
+    // 所以一直显示 0，看起来像捕食者根本不存在。
+    MetricDef {
+        name: "光合收入",
+        color: Color32::from_rgb(134, 239, 172),
+        get: |s| s.photo,
+        digits: 1,
+        unit: "%",
+    },
+    MetricDef {
+        name: "捕食收入",
+        color: Color32::from_rgb(251, 146, 60),
+        get: |s| s.bite,
+        digits: 1,
+        unit: "%",
+    },
+    MetricDef {
+        name: "供养收入",
+        color: Color32::from_rgb(147, 197, 253),
+        get: |s| s.gift,
+        digits: 1,
+        unit: "%",
     },
 ];
 
@@ -376,8 +403,8 @@ mod tests {
 
     #[test]
     fn metric_table_covers_every_slot() {
-        // `Panels::chart_on` 是 [bool; 6]，指标表少一项就会越界/漏画
-        assert_eq!(METRICS.len(), 6);
+        // `Panels::chart_on` 是 [bool; 9]，指标表少一项就会越界/漏画
+        assert_eq!(METRICS.len(), 9);
         for m in METRICS.iter() {
             assert!(!m.name.is_empty());
         }
@@ -394,6 +421,9 @@ mod tests {
             body: 44.0,
             mutability: 55.0,
             age: 66.0,
+            photo: 77.0,
+            bite: 88.0,
+            gift: 99.0,
         };
         let vals: Vec<f32> = METRICS.iter().map(|m| (m.get)(&s)).collect();
         let mut uniq = vals.clone();

@@ -28,6 +28,12 @@ pub struct Sample {
     pub mutability: f32,
     /// 平均年龄（tick）
     pub age: f32,
+    /// 收入以**光合**为主的个体占比（%）
+    pub photo: f32,
+    /// 收入以**咬活体**为主的个体占比（%）
+    pub bite: f32,
+    /// 收入以**母体供养**为主的个体占比（%）
+    pub gift: f32,
 }
 
 /// 历史点上限。1200 个点 × 每条 36 字节 ≈ 43 KB，可以忽略；
@@ -50,7 +56,7 @@ pub struct Panels {
     /// 神经网络图是否画全部权重（默认只画强连接）
     pub brain_show_all: bool,
     /// 曲线：每个指标是否显示（顺序见 `chart::METRICS`）
-    pub chart_on: [bool; 6],
+    pub chart_on: [bool; 9],
     /// 曲线：视图窗口，单位是**采样点下标**（不是 tick）。`None` = 全览
     pub chart_view: Option<(f32, f32)>,
     /// 曲线：新采样进来时视图自动跟到最右
@@ -83,7 +89,9 @@ impl Default for Panels {
             show_species: false,
             show_chart: false,
             brain_show_all: false,
-            chart_on: [true, true, true, false, false, false],
+            // 前 3 项（种群 / 食物 / 存活物种）默认开；收入三线默认关——
+            // 它们和"存活物种"抢同一条 Y 轴，一起开会让图太挤
+            chart_on: [true, true, true, false, false, false, false, false, false],
             chart_view: None,
             chart_follow: true,
             sample_interval: 20,
@@ -175,6 +183,10 @@ impl Panels {
             body: org.avg_cells as f32,
             mutability: org.avg_mutability as f32,
             age: org.avg_age as f32,
+            // 收入来源分布（批次 22.1）。下标见 `Income::slot`。
+            photo: org.income[0] as f32,
+            bite: org.income[2] as f32,
+            gift: org.income[3] as f32,
         });
 
         if self.history.len() > MAX_SAMPLES {

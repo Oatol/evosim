@@ -65,6 +65,18 @@ pub struct Light {
     pub level: Vec<u8>,
     /// 天空光分量。被生物身体**垂直遮挡**的就是它。
     pub sky_level: Vec<u8>,
+    /// 天空光**正午基准**（昼夜系数 = 1 时的 `sky_level`）。
+    ///
+    /// 昼夜每 tick 都要改 `sky_level`，但重跑 BFS 是 200~400 µs。所以拆成两层：
+    /// `rebuild` 只算一次基准，之后 `set_daylight` 只是拿基准乘一个标量。
+    /// **不进存档**：它是 `rebuild` 的纯产物，读档后会重算。
+    #[serde(skip)]
+    pub sky_base: Vec<u8>,
+    /// 当前日照系数 0~1（1 = 正午，`night_floor` = 午夜）。
+    ///
+    /// 只作用于**天空光**：云挡得住太阳，挡不住玩家放的灯，昼夜也一样。
+    /// 默认 1.0 = 逐位等于没有昼夜机制。
+    pub daylight: f32,
     /// 点光源分量。不被身体遮挡（近似：灯可以从侧面照进来）。
     pub lamp_level: Vec<u8>,
     /// 玩家放置的点光源
@@ -124,6 +136,8 @@ impl Default for Light {
             len: 0,
             level: Vec::new(),
             sky_level: Vec::new(),
+            sky_base: Vec::new(),
+            daylight: 1.0,
             lamp_level: Vec::new(),
             sources: Vec::new(),
             absorb: 3,
@@ -143,6 +157,7 @@ impl Light {
         l.len = cols * rows;
         l.level = vec![0; l.len];
         l.sky_level = vec![0; l.len];
+        l.sky_base = vec![0; l.len];
         l.lamp_level = vec![0; l.len];
         l.absorb = absorb_for(rows);
         l
@@ -155,6 +170,7 @@ impl Light {
         self.len = cols * rows;
         self.level = vec![0; self.len];
         self.sky_level = vec![0; self.len];
+        self.sky_base = vec![0; self.len];
         self.lamp_level = vec![0; self.len];
         self.absorb = absorb_for(rows);
         // 尺寸变了，噪声图必须重算
@@ -168,6 +184,7 @@ impl Light {
     pub fn clear(&mut self) {
         self.level.fill(0);
         self.sky_level.fill(0);
+        self.sky_base.fill(0);
         self.lamp_level.fill(0);
     }
 
@@ -217,6 +234,15 @@ impl Light {
             }
         }
 
+        // ── 存下"正午基准" ──
+        //
+        // 昼夜要逐 tick 改天空光，但重跑 BFS 是 200~400 µs。所以基准只算一次，
+        // 之后 `set_daylight` 只是拿它乘一个标量（30k 次浮点乘 ≈ 30 µs）。
+        if self.sky_base.len() != self.len {
+            self.sky_base = vec![0; self.len];
+        }
+        self.sky_base.copy_from_slice(&self.sky_level);
+
         // ── 点光源 ──
         let mut lamp_seeds: Vec<(usize, u8)> = Vec::new();
         for s in &self.sources {
@@ -230,9 +256,44 @@ impl Light {
         }
         self.lamp_level = self.propagate(grid, &lamp_seeds);
 
+        // 天空光乘日照系数、再和点光源相加（点光源**不随太阳转**）
+        self.apply_daylight();
+    }
+
+    /// 把当前日照系数作用到天空光上，并刷新总和 `level`。
+    ///
+    /// `daylight >= 1.0` 走快速路径（直接拷基准），保证**默认配置逐位不变**。
+    fn apply_daylight(&mut self) {
+        if self.sky_base.len() != self.len {
+            self.sky_base = self.sky_level.clone();
+        }
+        let d = self.daylight;
+        if d >= 1.0 {
+            self.sky_level.copy_from_slice(&self.sky_base);
+        } else {
+            let d = d.max(0.0);
+            for i in 0..self.len {
+                self.sky_level[i] = (self.sky_base[i] as f32 * d)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
         for i in 0..self.len {
             self.level[i] = self.sky_level[i].saturating_add(self.lamp_level[i]);
         }
+    }
+
+    /// 设置日照系数（0~1）。
+    ///
+    /// 变化小于 1/512 时直接返回：昼夜是逐 tick 连续变化的，每 tick 重算 30k 格
+    /// 纯属浪费——一个 600 tick 的白天最多只需要约 255 次重算（正好是 u8 的级数）。
+    pub fn set_daylight(&mut self, d: f32) {
+        let d = d.clamp(0.0, 1.0);
+        if (d - self.daylight).abs() < 1.0 / 512.0 {
+            return;
+        }
+        self.daylight = d;
+        self.apply_daylight();
     }
 
     /// 桶排序多源 BFS，返回一张场。
@@ -938,5 +999,86 @@ mod patch_tests {
         // 只开云影时暗廊是全黑的
         let pure_cloud = build(1.0, 1.0);
         assert_eq!(*pure_cloud.iter().min().unwrap(), 0, "只开云影时暗廊全黑");
+    }
+}
+
+#[cfg(test)]
+mod daylight_tests {
+    use super::*;
+
+    /// `daylight = 1.0`（默认）必须**逐位**等于没有昼夜机制。
+    ///
+    /// 这是默认配置的守门测试：昼夜是可选的，不能悄悄改掉所有既有生态基线。
+    #[test]
+    fn daylight_one_is_a_no_op() {
+        let g = Grid::new(40, 30, true);
+        let mut plain = Light::new(40, 30);
+        plain.rebuild(&g);
+        let before = plain.level.clone();
+        let sky_before = plain.sky_level.clone();
+
+        let mut with_day = Light::new(40, 30);
+        with_day.daylight = 1.0;
+        with_day.rebuild(&g);
+        assert_eq!(with_day.level, before, "daylight = 1 不应改变任何一格");
+        assert_eq!(with_day.sky_level, sky_before);
+    }
+
+    /// 日照只压**天空光**，点光源照旧——灯不随太阳转。
+    #[test]
+    fn daylight_dims_sky_but_not_lamps() {
+        let g = Grid::new(40, 40, true);
+        let mut l = Light::new(40, 40);
+        l.set_source(20, 30, 255);
+        l.rebuild(&g);
+        let lamp_before = l.lamp_level.clone();
+        let sky_noon = l.sky_at(&g, 20, 0);
+
+        l.set_daylight(0.1);
+        assert_eq!(l.lamp_level, lamp_before, "点光源不该随昼夜变暗");
+        let sky_night = l.sky_at(&g, 20, 0);
+        assert!(
+            sky_night < sky_noon,
+            "夜间天空光应该更暗（正午 {} → 夜间 {}）",
+            sky_noon,
+            sky_night
+        );
+        // 0.1 × 255 ≈ 26，允许 ±2 的取整误差
+        assert!(
+            (sky_night as i32 - 26).abs() <= 2,
+            "night_floor 0.1 时顶行应该约 26，实测 {}",
+            sky_night
+        );
+        // 灯所在的格子仍然有光（夜里唯一的光源）
+        assert!(l.at(&g, 20, 30) >= 200, "夜里灯自己那格应该还是亮的");
+    }
+
+    /// 日照系数的变化有量化：差不到 1/512 就不重算（性能守门）。
+    #[test]
+    fn tiny_daylight_changes_are_skipped() {
+        let g = Grid::new(20, 20, true);
+        let mut l = Light::new(20, 20);
+        l.rebuild(&g);
+        let before = l.sky_level.clone();
+        l.set_daylight(1.0 - 1.0 / 1024.0); // 小于阈值
+        assert_eq!(l.sky_level, before, "微小变化不该触发重算");
+        l.set_daylight(0.5);
+        assert_ne!(l.sky_level, before, "显著变化必须生效");
+    }
+
+    /// 重跑 `rebuild` 之后必须仍然按当前日照系数生效，而不是回到满照。
+    ///
+    /// 这条守的是「画地形 / 放灯触发 rebuild 时，夜晚不能突然变成白天」。
+    #[test]
+    fn rebuild_keeps_the_current_daylight() {
+        let g = Grid::new(20, 20, true);
+        let mut l = Light::new(20, 20);
+        l.set_daylight(0.2);
+        l.rebuild(&g);
+        let dark = l.sky_at(&g, 10, 0);
+        assert!(dark < 80, "rebuild 之后应该还是夜里，实测 {}", dark);
+
+        l.rebuild(&g); // 再 rebuild 一次，结果必须一样
+        assert_eq!(l.sky_at(&g, 10, 0), dark, "rebuild 必须幂等");
     }
 }

@@ -684,6 +684,47 @@ pub fn draw(
                 if (rich - before_rich).abs() > 1e-9 {
                     cfg.world.patch_richness = rich;
                 }
+
+                // ── 昼夜（批次 22）──
+                //
+                // 光场在此之前完全是空间性的。加时间轴之后**储能第一次有独立价值**：
+                // 白天攒、夜里烧；而容量正比于细胞数，所以大体型 = 大电池。
+                // 这是给大体型找实质收益最自然的一条路。
+                let before_day = cfg.world.day_length;
+                let mut day = before_day as f64;
+                ui.add(
+                    egui::Slider::new(&mut day, 0.0..=2000.0)
+                        .text("昼长")
+                        .step_by(50.0)
+                        .fixed_decimals(0),
+                )
+                .on_hover_text(
+                    "一个昼夜周期多少 tick。0（默认）= 关闭，永远是正午。\n\
+                     600 ≈ 10 秒（60 tick/s 下）；1200 更接近真实的一天。\n\
+                     日照走余弦：正午满照、午夜降到「夜间日照」。\n\
+                     点光源不受影响——夜里灯是唯一的收入来源。",
+                );
+                if (day - before_day as f64).abs() > 0.5 {
+                    cfg.world.day_length = day.round().max(0.0) as u32;
+                }
+                let before_night = cfg.world.night_floor;
+                let mut night = before_night;
+                ui.add(
+                    egui::Slider::new(&mut night, 0.0..=0.5)
+                        .text("夜间日照")
+                        .step_by(0.01)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "午夜还剩多少比例的天空光（默认 0.085 = 收支平衡点）。\n\
+                     低于它，夜里净亏钱，刚繁殖完（能量 0）的个体会被饿死，\n\
+                     出生全挤到白天，人口掉一半以上（实测 0.05 时 904 → 148）。\n\
+                     注意：平均日照 = (1 + 本值) / 2，所以开昼夜会让世界整体变穷；\n\
+                     想保住人口就同时把「天空光」或「光合速率」提上去。",
+                );
+                if (night - before_night).abs() > 1e-9 {
+                    cfg.world.night_floor = night;
+                }
                 let before_photo = cfg.life.photosynthesis_rate;
                 let mut photo = before_photo;
                 ui.add(

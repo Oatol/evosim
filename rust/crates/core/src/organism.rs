@@ -127,6 +127,22 @@ pub enum Income {
 }
 
 impl Income {
+    /// 在统计数组里的下标（`OrgStats::income` 用这个顺序）。
+    ///
+    /// 顺序固定：光合 / 吃食物 / 咬活体 / 供养 / 没收入。UI 的图例和横条按这个排。
+    #[inline]
+    pub fn slot(self) -> usize {
+        match self {
+            Income::Photo => 0,
+            Income::Scavenge => 1,
+            Income::Predate => 2,
+            Income::Gift => 3,
+            Income::Nothing => 4,
+        }
+    }
+}
+
+impl Income {
     /// 给人看的短标签（检视器 / 诊断工具共用）。
     pub fn label(self) -> &'static str {
         match self {

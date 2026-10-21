@@ -138,6 +138,35 @@ pub fn draw_body(
                 );
             }
         });
+        // 收入构成横条（批次 22.1）——
+        // 文字读起来要一行行数，横条一眼就能看出"这只生物是不是捕食者"。
+        // 和曲线窗口那三条线是同一套口径（实际到账能量，不是解剖结构）。
+        ui.add_space(2.0);
+        let bar_w = ui.available_width().max(40.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, 7.0), Sense::hover());
+        let painter = ui.painter();
+        let mut x = rect.left();
+        for (v, color) in [
+            (org.gain_photo, Color32::from_rgb(134, 239, 172)),
+            (org.gain_food, Color32::from_rgb(125, 147, 168)),
+            (org.gain_bite, Color32::from_rgb(251, 146, 60)),
+            (org.gain_gift, Color32::from_rgb(147, 197, 253)),
+        ] {
+            let frac = (v.max(0.0) / total) as f32;
+            if frac <= 0.0 {
+                continue;
+            }
+            let w = bar_w * frac;
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(w, rect.height()),
+                ),
+                CornerRadius::ZERO,
+                color,
+            );
+            x += w;
+        }
     } else {
         ui.label(
             egui::RichText::new("靠什么活着：还没挣到能量")
