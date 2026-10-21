@@ -82,6 +82,17 @@ pub struct Organism {
     #[serde(default)]
     pub grow_age: u32,
 
+    /// 繁殖失败后的冷却计时（批次 26）。
+    ///
+    /// `repro_fail_costs_energy = false` 让失败的个体**下一 tick 立刻重试**，
+    /// 于是"找不到空地"的个体会每 tick 白跑一遍四邻域搜索：
+    /// 实测尝试次数涨 20 倍、tick 耗时 ×1.67。这个计数器让它们歇一会儿。
+    ///
+    /// 它同时有个生态上的副作用（可能比性能收益更重要）：
+    /// **"什么时候繁殖"变成一件要等的事**，而不是"攒够就立刻生"。
+    #[serde(default)]
+    pub repro_cooldown: u32,
+
     // ── 收入来源（诊断用：不进任何判定、只累加）──
     //
     // 存在的理由：光看解剖结构判"自养 / 异养"是不够的。
@@ -222,6 +233,7 @@ impl Organism {
             growth_plan: None,
             grow_stall: 0,
             grow_age: 0,
+            repro_cooldown: 0,
             gain_photo: 0.0,
             gain_food: 0.0,
             gain_bite: 0.0,

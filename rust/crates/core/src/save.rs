@@ -88,7 +88,10 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v22：`LifeCfg` 加了 `mouth_one_bite`（批次 21 一张嘴一口）。
 /// v23：`WorldCfg` 加了 `day_length` / `night_floor`，`Light` 加了 `daylight`
 /// （批次 22 昼夜循环；`sky_base` 是 rebuild 的纯产物，不进档）。
-pub const VERSION: u32 = 23;
+/// v24：`WorldCfg` 加了 `cave_count`，`LifeCfg` 加了 `size_advantage` /
+/// `kin_bite_penalty`（批次 23/24/25）。
+/// v25：`LifeCfg` 加了 `repro_cooldown`，`Organism` 加了 `repro_cooldown`（批次 26）。
+pub const VERSION: u32 = 25;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

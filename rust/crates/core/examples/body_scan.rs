@@ -106,6 +106,8 @@ fn run(
     night: f64,
     sizeadv: f64,
     kin: f64,
+    cave: i32,
+    cooldown: u32,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -158,6 +160,10 @@ fn run(
     cfg.life.size_advantage = sizeadv;
     // `kin=P`：同种相残惩罚（0 = 关闭，1 = 同种咬不动）
     cfg.life.kin_bite_penalty = kin;
+    // `cave=N`：世界生成时挖几条带顶隧道（0 = 关闭）
+    cfg.world.cave_count = cave;
+    // `cd=N`：繁殖失败后的冷却 tick（0 = 关闭）
+    cfg.life.repro_cooldown = cooldown;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -347,6 +353,8 @@ fn run_seeds(
     night: f64,
     sizeadv: f64,
     kin: f64,
+    cave: i32,
+    cooldown: u32,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -375,7 +383,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, cave, cooldown,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -549,6 +557,16 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("kin=").and_then(|v| v.parse().ok()))
         .unwrap_or(Config::default().life.kin_bite_penalty);
+    // `cave=N`：洞穴数量（0 = 关闭）
+    let cave: i32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("cave=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().world.cave_count);
+    // `cd=N`：繁殖失败冷却（0 = 关闭）
+    let cooldown: u32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("cd=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.repro_cooldown);
     // `shade=K`：遮挡强度（默认跟 Config 走）
     let shade: f64 = args
         .iter()
@@ -643,7 +661,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, cave, cooldown,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
@@ -779,7 +797,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, cave, cooldown,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

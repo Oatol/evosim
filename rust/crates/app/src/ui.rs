@@ -725,6 +725,28 @@ pub fn draw(
                 if (night - before_night).abs() > 1e-9 {
                     cfg.world.night_floor = night;
                 }
+
+                // ── 洞穴（批次 25）──
+                //
+                // 云影已经证明「有暗区」不够——暗区还得有饭吃才可能住人。
+                // 这里把现成的两样东西摆在一起：墙挡光做顶、腐殖质产食做底。
+                let before_cave = cfg.world.cave_count;
+                let mut cave = before_cave as f64;
+                ui.add(
+                    egui::Slider::new(&mut cave, 0.0..=12.0)
+                        .text("洞穴")
+                        .step_by(1.0)
+                        .fixed_decimals(0),
+                )
+                .on_hover_text(
+                    "世界生成时挖几条带顶的隧道（0 = 默认，关闭）。\n\
+                     顶是墙（挡光）、底是腐殖质（每 tick 产食），每条挖一个竖井通地表。\n\
+                     竖井会变成「光柱」：洞口亮、越往里越暗，正好是个梯度。\n\
+                     只在新建 / 重置世界时生效，中途改不会重挖。",
+                );
+                if (cave - before_cave as f64).abs() > 0.5 {
+                    cfg.world.cave_count = cave.round().max(0.0) as i32;
+                }
                 let before_photo = cfg.life.photosynthesis_rate;
                 let mut photo = before_photo;
                 ui.add(
@@ -966,6 +988,26 @@ pub fn draw(
                     .changed()
                 {
                     cfg.life.repro_fail_costs_energy = !free;
+                }
+
+                // ── 繁殖失败冷却（批次 26）──
+                let before_cd = cfg.life.repro_cooldown;
+                let mut cd = before_cd as f64;
+                ui.add(
+                    egui::Slider::new(&mut cd, 0.0..=60.0)
+                        .text("繁殖冷却")
+                        .step_by(1.0)
+                        .fixed_decimals(0),
+                )
+                .on_hover_text(
+                    "繁殖失败后歇多少 tick 才能再试（0 = 默认，不歇）。\n\
+                     不歇的话「找不到空地」的个体会每 tick 白跑一遍搜索：\n\
+                     实测尝试次数涨 20 倍、tick 耗时 ×1.67。\n\
+                     副作用可能比性能收益更有意思：\n\
+                     「什么时候繁殖」第一次变成一件要等的事。",
+                );
+                if (cd - before_cd as f64).abs() > 0.5 {
+                    cfg.life.repro_cooldown = cd.round().max(0.0) as u32;
                 }
 
                 let before_tries = cfg.life.repro_search_tries;

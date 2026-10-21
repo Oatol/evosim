@@ -159,8 +159,69 @@ pub fn generate_demo_world(world: &mut World, wall_density: f64, food_density: f
             }
         }
     }
+    // ── 4. 洞穴（批次 25）──
+    //
+    // 放在最后：洞穴要覆盖掉墙体与草甸，才能保证"顶是完整的、底是腐殖质"。
+    let caves = world.config.world.cave_count;
+    if caves > 0 {
+        carve_caves(world, caves);
+    }
 }
 
+/// 挖几条带顶的隧道，洞底铺腐殖质（批次 25）。
+///
+/// 为什么是"顶 + 腐殖质"这个组合：云影已经证明「有暗区」不够——暗区还得有饭吃
+/// 才可能住人（批次 10.5 的结论）。`WALL` 挡光、`HUMUS` 每 tick 产食，
+/// 两样都是现成的，缺的只是把它们摆在一起。
+///
+/// 每条隧道起点挖一条竖井通到地表：不然生物进不去，洞穴就只是装饰。
+/// 竖井会变成"光柱"——洞口那一小段是亮的，越往里越暗，正好是个梯度。
+fn carve_caves(world: &mut World, count: i32) {
+    let cols = world.grid.cols as i32;
+    let rows = world.grid.rows as i32;
+    if cols < 16 || rows < 16 {
+        return;
+    }
+    // 只挖下半部分：太靠上会和地表连成一片，失去"隔离"的意义
+    let top = (rows as f64 * 0.50) as i32;
+    let bottom = ((rows as f64 * 0.90) as i32).max(top + 4);
+    for _ in 0..count {
+        let cy = world.rng.int_range(top as i64, bottom as i64) as i32;
+        let cx0 = world.rng.int_range(0, cols as i64 - 1) as i32;
+        let len = world.rng.int_range((cols / 6).max(8) as i64, (cols / 2).max(10) as i64) as i32;
+        let h = world.rng.int_range(2, 3) as i32;
+
+        for dx in 0..len {
+            let x = (cx0 + dx).rem_euclid(cols);
+            // 隧道本体挖空
+            for dy in 0..h {
+                if let Some(i) = world.grid.index(x, cy + dy) {
+                    world.set_cell_at(i, ct::EMPTY, -1);
+                }
+            }
+            // 洞顶两层墙（挡光）——没有它，洞穴就只是一条沟
+            for dy in 1..=2 {
+                if let Some(i) = world.grid.index(x, cy - dy) {
+                    world.set_cell_at(i, ct::WALL, -1);
+                }
+            }
+            // 洞底腐殖质（每 tick 产食）
+            if let Some(i) = world.grid.index(x, cy + h) {
+                world.set_cell_at(i, ct::HUMUS, -1);
+            }
+        }
+
+        // 竖井：从隧道起点往上打通到地表
+        let sx = cx0;
+        for y in 0..cy {
+            if let Some(i) = world.grid.index(sx, y) {
+                world.set_cell_at(i, ct::EMPTY, -1);
+            }
+        }
+    }
+}
+
+/// 空世界：只清场，什么都不画（画笔 / 工坊投放用）。
 pub fn generate_empty_world(world: &mut World) {
     world.reset(false);
 }
@@ -266,6 +327,75 @@ mod tests {
                 want,
                 got
             );
+        }
+    }
+
+    // ── 批次 25：洞穴 ──
+
+    /// `cave_count = 0`（默认）时世界里一个腐殖质都没有——默认世界逐位不变。
+    #[test]
+    fn zero_caves_is_a_no_op() {
+        let w = build(0.0, 11);
+        assert_eq!(w.config.world.cave_count, 0);
+        let humus = w.grid.floor.iter().filter(|&&t| t == ct::HUMUS).count();
+        assert_eq!(humus, 0, "默认世界不该有腐殖质，实测 {humus}");
+    }
+
+    /// 洞穴必须有**顶**（墙）和**底**（腐殖质），否则它就只是一条沟。
+    #[test]
+    fn caves_have_a_roof_and_a_humus_floor() {
+        let mut cfg = Config::default();
+        cfg.world.cols = COLS;
+        cfg.world.rows = ROWS;
+        cfg.world.cave_count = 3;
+        let mut w = World::new(cfg, Rng::new(7));
+        generate_demo_world(&mut w, 1.0, 1.0);
+
+        let mut roofed = 0usize;
+        for i in 0..w.grid.len {
+            if w.grid.floor[i] != ct::HUMUS {
+                continue;
+            }
+            let col = (i % COLS) as i32;
+            let row = (i / COLS) as i32;
+            // 洞底往上 3~5 行里必须有墙（隧道高度 2~3 + 顶 2 层）
+            let has_roof = (-5..=-3).any(|dy| {
+                w.grid
+                    .index(col, row + dy)
+                    .map(|j| w.grid.floor[j] == ct::WALL)
+                    .unwrap_or(false)
+            });
+            if has_roof {
+                roofed += 1;
+            }
+        }
+        let total = w.grid.floor.iter().filter(|&&t| t == ct::HUMUS).count();
+        assert!(total > 20, "三条隧道应该铺出不少腐殖质，实测 {total}");
+        assert!(
+            roofed * 100 / total.max(1) > 80,
+            "腐殖质上方应该基本都有顶，实测 {roofed}/{total}"
+        );
+    }
+
+    /// 洞穴在地下一半以下：不能挖到地表附近，否则"隔离"就不成立。
+    #[test]
+    fn caves_stay_underground() {
+        let mut cfg = Config::default();
+        cfg.world.cols = COLS;
+        cfg.world.rows = ROWS;
+        cfg.world.cave_count = 4;
+        let mut w = World::new(cfg, Rng::new(3));
+        generate_demo_world(&mut w, 1.0, 1.0);
+        let half = ROWS / 2;
+        for i in 0..w.grid.len {
+            if w.grid.floor[i] == ct::HUMUS {
+                let row = i / COLS;
+                assert!(
+                    row >= half,
+                    "第 {} 行出现了腐殖质，洞穴挖得太靠上了",
+                    row
+                );
+            }
         }
     }
 }

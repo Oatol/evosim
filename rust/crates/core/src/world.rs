@@ -776,6 +776,10 @@ impl World {
     fn act_organism_inner(&mut self, i: usize) {
         // 年龄
         self.organisms[i].age += 1;
+        // 繁殖失败冷却（批次 26）：每 tick 递减
+        if self.organisms[i].repro_cooldown > 0 {
+            self.organisms[i].repro_cooldown -= 1;
+        }
         let lifespan = self.organisms[i].lifespan(&self.config);
         if self.organisms[i].age as f64 > lifespan {
             self.kill_organism(i);
@@ -876,7 +880,10 @@ impl World {
         };
         // **未成年不能繁殖**：芽攒再多能量也得先长成成体。
         // 这一条是整个成长机制的意义所在——它让「1 格」不再等于「完整个体」。
-        if self.organisms[i].energy >= at && self.organisms[i].growth_plan.is_none() {
+        if self.organisms[i].energy >= at
+            && self.organisms[i].growth_plan.is_none()
+            && self.organisms[i].repro_cooldown == 0
+        {
             self.reproduce_organism(i);
         }
     }
@@ -2032,7 +2039,25 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         paid
     }
 
+    /// 繁殖（外层）：负责**失败冷却**，逻辑本身在 `reproduce_organism_inner`。
+    ///
+    /// 为什么包一层而不是在每个 `return false` 上各写一句：`inner` 里有 5 条失败
+    /// 路径（太小 / 到达上限 / 找不到空地 / 路径被挡 / 变异把身体删空），
+    /// 逐条维护迟早漏一条。包一层就只有一个地方需要关心。
     fn reproduce_organism(&mut self, i: usize) -> bool {
+        let ok = self.reproduce_organism_inner(i);
+        if !ok {
+            let cd = self.config.life.repro_cooldown;
+            if cd > 0 {
+                if let Some(o) = self.organisms.get_mut(i) {
+                    o.repro_cooldown = cd;
+                }
+            }
+        }
+        ok
+    }
+
+    fn reproduce_organism_inner(&mut self, i: usize) -> bool {
         // 有芽位才出芽；**没有芽位就退回普通繁殖**。
         //
         // 第一版这里是"出芽开着就一律走芽"，于是 `bud_slots = 0` 的小个体
@@ -3267,6 +3292,65 @@ mod tests {
         w.organisms[vi].energy = 5.0;
         bite_once(&mut w, pi);
         assert_eq!(w.organisms[vi].energy, 5.0, "同种完全咬不动");
+    }
+
+    // ── 批次 26：繁殖失败冷却 ──
+
+    /// 繁殖失败之后必须设上冷却，冷却期内不再尝试。
+    #[test]
+    fn failed_reproduction_sets_a_cooldown() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.repro_cooldown = 5;
+        // 走普通繁殖（出芽不需要空地，测不出"失败"）
+        w.config.life.budding_enabled = false;
+        // 把整个世界填满墙：一定找不到空地
+        for i in 0..w.grid.len {
+            if w.grid.types[i] == ct::EMPTY {
+                w.set_cell_at(i, ct::WALL, -1);
+            }
+        }
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].energy = 100.0;
+        w.act_organism(i);
+        assert!(
+            w.organisms[i].repro_cooldown > 0,
+            "繁殖失败之后应该进入冷却，实测 {}",
+            w.organisms[i].repro_cooldown
+        );
+
+        // 冷却期内不该再尝试
+        let tries_before = w.repro_tries;
+        w.organisms[i].energy = 100.0;
+        w.act_organism(i);
+        assert_eq!(
+            w.repro_tries, tries_before,
+            "冷却期内不该再发起繁殖尝试"
+        );
+    }
+
+    /// `repro_cooldown = 0`（默认）逐位等于旧行为：失败了下一 tick 立刻重试。
+    #[test]
+    fn zero_repro_cooldown_retries_immediately() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.repro_cooldown = 0;
+        w.config.life.budding_enabled = false;
+        for i in 0..w.grid.len {
+            if w.grid.types[i] == ct::EMPTY {
+                w.set_cell_at(i, ct::WALL, -1);
+            }
+        }
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].energy = 100.0;
+        w.act_organism(i);
+        assert_eq!(w.organisms[i].repro_cooldown, 0);
+
+        let tries_before = w.repro_tries;
+        w.organisms[i].energy = 100.0;
+        w.act_organism(i);
+        assert!(
+            w.repro_tries > tries_before,
+            "关掉冷却时应该每 tick 都重试"
+        );
     }
 
     // ── 批次 9.6：食物算不算路障（移动 / 繁殖两个开关）──
