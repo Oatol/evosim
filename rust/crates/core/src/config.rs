@@ -586,6 +586,21 @@ pub struct LifeCfg {
     /// 喂得足（0.5）时芽的成长时间被压到「最短成长期」那个固定值上，
     /// 芽位周转快，大体型才真正赢（实测体型 5.57）。
     pub bud_feed: f64,
+    /// **卵生**（默认 `false`）。打开后普通繁殖产下的是**卵**，不是直接的芽。
+    ///
+    /// 和出芽是两条并行的路，生态学上正好是 r / K 两端：
+    /// - **出芽**（K）：芽贴在母体身上、母体每 tick 供养，成活率高、但占母体的资源；
+    /// - **卵生**（r）：一次性产在空地上，母体不管，**卵挡路、能被吃**。
+    ///
+    /// 卵的独特价值不在"繁殖更快"，而在**把捕食压力搬到繁殖环节**：
+    /// 吃一个卵等于消灭一个未来的个体，而且不用打赢母体。
+    /// 这需要批次 24 的亲缘识别才有意义——否则捕食者会先把自己的卵吃光。
+    pub egging: bool,
+    /// 卵孵化需要多少 tick（默认 120）。
+    ///
+    /// 这个数是"卵在世界上暴露多久"。太长 = 全被吃光；太短 = 等于直接生。
+    /// 120 tick 在 60 tick/s 下是 2 秒，对捕食者有足够的机会发现它。
+    pub egg_hatch_ticks: u32,
     /// **繁殖失败后的冷却**（tick，0 = 关闭，**默认 10**）。
     ///
     /// `repro_fail_costs_energy = false` 让失败的个体**下一 tick 立刻重试**。
@@ -641,6 +656,8 @@ impl Default for LifeCfg {
             bud_cells_per_slot: 8.0,
             bud_start_cost: 1.0,
             bud_feed: 0.5,
+            egging: false,
+            egg_hatch_ticks: 120,
             repro_cooldown: 10,
         }
     }
@@ -922,12 +939,12 @@ pub struct Config {
     pub brain: BrainCfg,
     pub sim: SimCfg,
     /// 按类型 id 索引的细胞属性（JS 版是 `cells[KEY][attr]`，这里直接用 id 查，更快）
-    pub cells: [CellAttrs; 16],
+    pub cells: [CellAttrs; 17],
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let mut cells = [CellAttrs::default(); 16];
+        let mut cells = [CellAttrs::default(); 17];
         for d in cell_type::CELL_DEFS.iter() {
             // 前 5 项从 CELL_DEFS 取（出厂值唯一真源），后面的倍率一律走默认 1.0
             // —— 以后再加字段也不用回来改这里。

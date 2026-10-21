@@ -43,6 +43,7 @@ use crate::fields::Fields;
 use crate::grid::Grid;
 use crate::light::Light;
 use crate::organism::Organism;
+use crate::world::Egg;
 use crate::rng::Rng;
 use crate::species::SpeciesRegistry;
 use crate::world::{TerrainSet, World};
@@ -91,7 +92,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v24：`WorldCfg` 加了 `cave_count`，`LifeCfg` 加了 `size_advantage` /
 /// `kin_bite_penalty`（批次 23/24/25）。
 /// v25：`LifeCfg` 加了 `repro_cooldown`，`Organism` 加了 `repro_cooldown`（批次 26）。
-pub const VERSION: u32 = 25;
+/// v26：`CellDef` 加了 `EGG`（id 16），`SaveFile` 加了 `eggs`，`LifeCfg` 加了
+/// `egging` / `egg_hatch_ticks`（批次 27 卵生）。
+pub const VERSION: u32 = 26;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
@@ -125,6 +128,8 @@ pub struct SaveFile {
     pub heat_pool: f64,
     pub energy_wasted: f64,
     pub energy_injected: f64,
+    /// 还没孵化的卵（批次 27）。`HashMap` 无序，摊成 `Vec` 存。
+    pub eggs: Vec<(usize, Egg)>,
 }
 
 /// 只读文件头就能拿到的摘要（世界窗口列存档用）
@@ -197,6 +202,7 @@ pub fn encode(world: &World) -> Vec<u8> {
         heat_pool: world.heat_pool,
         energy_wasted: world.energy_wasted,
         energy_injected: world.energy_injected,
+        eggs: world.eggs.iter().map(|(&k, v)| (k, v.clone())).collect(),
     };
 
     let body = bincode::serialize(&save).expect("存档序列化失败");
@@ -288,6 +294,7 @@ fn into_world(save: SaveFile) -> World {
         heat_pool,
         energy_wasted,
         energy_injected,
+        eggs,
     } = save;
 
     // 先按 config 建一个空世界（拿到尺寸正确的索引表），随后整体覆盖
@@ -324,6 +331,7 @@ fn into_world(save: SaveFile) -> World {
     world.heat_pool = heat_pool;
     world.energy_wasted = energy_wasted;
     world.energy_injected = energy_injected;
+    world.eggs = eggs.into_iter().collect();
 
     world
 }

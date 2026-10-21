@@ -1163,6 +1163,43 @@ pub fn draw(
                         cfg.life.growth_min_ticks = mg as u32;
                     }
 
+                    // ── 卵生（批次 27）──
+                    //
+                    // 和出芽是两条并行的路，生态学上正好是 r / K 两端：
+                    // 出芽（K）芽贴母体、母体供养；卵生（r）产在空地上、母体不管。
+                    // 卵**占一格、挡路、能被嘴吃** —— 捕食压力第一次进到繁殖环节。
+                    let mut egging = cfg.life.egging;
+                    if ui
+                        .checkbox(&mut egging, "卵生")
+                        .on_hover_text(
+                            "勾上：普通繁殖改成产卵。卵占一格、挡路、可以被嘴吃掉，
+                             到期才孵出一格芽。
+
+                             和「出芽」是两条路：出芽是 K（母体养），卵生是 r（自己扛）。
+                             建议和「同种相残」一起用 —— 否则捕食者会先把自己的卵吃光。",
+                        )
+                        .changed()
+                    {
+                        cfg.life.egging = egging;
+                    }
+                    if cfg.life.egging {
+                        let before_eh = cfg.life.egg_hatch_ticks;
+                        let mut eh = before_eh as f64;
+                        ui.add(
+                            egui::Slider::new(&mut eh, 20.0..=600.0)
+                                .text("孵化时间")
+                                .step_by(10.0)
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text(
+                            "卵在世界上暴露多少 tick 才孵化（默认 120 ≈ 2 秒）。
+                             太长 = 全被吃光；太短 = 等于直接生。",
+                        );
+                        if (eh - before_eh as f64).abs() > 0.5 {
+                            cfg.life.egg_hatch_ticks = eh.round().max(1.0) as u32;
+                        }
+                    }
+
                     // ── 出芽（批次 15）──
                     //
                     // 芽不生在 4~6 格外的空地，而是**紧贴母体**，由母体每 tick 供养。

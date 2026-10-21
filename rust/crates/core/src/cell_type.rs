@@ -26,6 +26,9 @@ pub mod ct {
     pub const STORAGE: u8 = 13;
     pub const REGEN: u8 = 14;
     pub const SPIKE: u8 = 15;
+    /// 卵（批次 27）：母体产下的、**占一格**的中间态。孵化成 1 格芽，
+    /// 在此之前可以被嘴吃掉、也可以挡路。
+    pub const EGG: u8 = 16;
 }
 
 /// 能力标志位（Anatomy 用它做派生缓存）
@@ -136,7 +139,7 @@ const fn base(id: u8, key: &'static str, name: &'static str, label: &'static str
 }
 
 /// 全部细胞类型（按 id 顺序）
-pub static CELL_DEFS: [CellDef; 16] = [
+pub static CELL_DEFS: [CellDef; 17] = [
     // 索引必须等于 id：def(id) 直接按下标取，顺序错了会拿到别人的定义
     CellDef {
         desc: "真空，生物可以自由穿过。",
@@ -363,6 +366,22 @@ pub static CELL_DEFS: [CellDef; 16] = [
         cost: 0.020,
         colors: [0x94a3b8, 0xe0e6ee, 0xb8c0cc],
         ..base(ct::SPIKE, "SPIKE", "spike", "刺")
+    },
+    // ── 卵（批次 27）──
+    //
+    // 唯一一个"既不是地形、也不是身体细胞"的类型：它是**别人生的东西**。
+    //
+    // - `paintable: false`：玩家不该凭空画卵，那是模拟内部状态。
+    // - `passable: false`：卵挡路。它挡住移动和繁殖，于是"产卵"第一次有了
+    //   空间代价——一窝卵会把周围占满，这正是 r 策略该付的账。
+    // - `visible: true` 但**不进 `VISIBLE_CELL_TYPES`**：画面上看得见，
+    //   但大脑感知不到（那 8 个槽位已经满了，加第 9 个会改输入维度）。
+    CellDef {
+        desc: "母体产下的卵。孵化前可以被嘴吃掉——捕食压力第一次出现在繁殖环节。",
+        visible: true,
+        passable: false,
+        colors: [0xf9a8d4, 0xffd6ec, 0xe9a8c9],
+        ..base(ct::EGG, "EGG", "egg", "卵")
     },
 ];
 

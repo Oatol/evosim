@@ -53,18 +53,35 @@ pub struct EnergyAudit {
     pub wasted: f64,
     /// 累计注入（光合 + 腐殖质 + 手工放置）
     pub injected: f64,
+    /// **卵里存着的能量**（批次 27）：既不在个体里、也不在食物里，
+    /// 但它确实还在生物圈内——不单独记一笔，审计会凭空少一块。
+    pub eggs: f64,
 }
 
 impl EnergyAudit {
     /// 现在世界上一共有多少能量（含已经离开生物圈的那部分）。
     pub fn stored(&self) -> f64 {
-        self.organisms + self.food + self.heat + self.wasted
+        self.organisms + self.food + self.eggs + self.heat + self.wasted
     }
 
     /// 守恒残差：`stored - injected`。**应该恒等于 0**。
     pub fn drift(&self) -> f64 {
         self.stored() - self.injected
     }
+}
+
+/// 一枚还没孵化的卵（批次 27）。
+///
+/// 存的是**完整的后代个体**，不是蓝图：这样 RNG 消耗发生在产卵那一刻
+/// （和普通繁殖完全一致），孵化只是"把它放进世界"。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Egg {
+    /// 到这一 tick 孵化
+    pub hatch_at: u64,
+    /// 母体 id（只用于诊断 / 谱系；母体可能已经死了）
+    pub parent: u32,
+    /// 还没出生的那个个体（`col` / `row` 已经指向卵所在格）
+    pub child: Organism,
 }
 
 pub struct World {
@@ -134,6 +151,16 @@ pub struct World {
     /// 出芽模式下芽位已满（母体已经挂着 `bud_slots` 个未成熟的芽）
     pub repro_blocked_buds: u64,
 
+    /// **卵**（批次 27）：格子下标 → 还没孵化的后代。
+    ///
+    /// 卵是**占一格**的中间态：它挡住移动和繁殖，可以被嘴吃掉。
+    /// 这是"捕食压力第一次出现在繁殖环节"——吃一个卵等于消灭一个未来的个体，
+    /// 而且不用打赢母体。
+    ///
+    /// 存完整的 `Organism` 而不是只存蓝图：这样 `Organism::new` 的 RNG 消耗
+    /// 发生在**产卵那一刻**（和普通繁殖一致），孵化时不碰 RNG。
+    pub eggs: HashMap<usize, Egg>,
+
     /// 本 tick 这个攻击者**已经咬过**的目标 id（「整口咬合」用）。
     ///
     /// 每个个体行动前清空，所以它天然是"per 攻击者、per tick"的。
@@ -194,6 +221,7 @@ impl World {
             repro_blocked_mutated: 0,
             repro_blocked_too_small: 0,
             repro_blocked_buds: 0,
+            eggs: HashMap::new(),
             killer_hits: HashSet::new(),
             energy_injected: 0.0,
             light_dirty: true,
@@ -674,6 +702,12 @@ impl World {
 
         self.compact_organisms();
 
+        // ── 孵化（批次 27）──
+        //
+        // 放在个体结算之后：这一 tick 里刚产下的卵不该立刻孵化
+        // （`hatch_at` 至少是 `tick + egg_hatch_ticks`，天然保证了这点）。
+        self.hatch_eggs();
+
         // ── 环境更新 ──
         self.apply_terrain_tick();
         self.apply_food_decay();
@@ -723,6 +757,59 @@ impl World {
         let floor = self.config.world.night_floor.clamp(0.0, 1.0);
         let d = floor + (1.0 - floor) * (0.5 + 0.5 * (std::f64::consts::TAU * phase).cos());
         self.light.set_daylight(d as f32);
+    }
+
+    /// 孵化到期的卵（批次 27）。
+    ///
+    /// 三条边界：
+    /// - **格子必须还是卵**：可能已经被嘴吃掉、或者被地形覆盖了。
+    /// - **位置必须还放得下**：卵挡路时别人进不来，但被吃掉的卵会让出位置，
+    ///   那时可能已经有别人站在上面了。
+    /// - **顺序按格子下标排序**：`HashMap` 的迭代顺序不稳定，
+    ///   不排序的话同一次孵化在不同运行里会换顺序 → 不可复现。
+    fn hatch_eggs(&mut self) {
+        if self.eggs.is_empty() {
+            return;
+        }
+        let now = self.tick;
+        let mut ready: Vec<usize> = self
+            .eggs
+            .iter()
+            .filter(|(_, e)| e.hatch_at <= now)
+            .map(|(&i, _)| i)
+            .collect();
+        ready.sort_unstable();
+        for idx in ready {
+            let Some(egg) = self.eggs.remove(&idx) else {
+                continue;
+            };
+            if self.grid.types.get(idx).copied() != Some(ct::EGG) {
+                continue; // 卵已经被吃 / 被覆盖
+            }
+            // **用 reveal_floor 而不是 set_cell_at(EMPTY)**：卵可能产在一格
+            // 地形上（腐殖质），直接设 EMPTY 会把那层地形一起抹掉。
+            self.reveal_floor(idx);
+            if !self.can_add_organism() {
+                self.repro_blocked_cap += 1;
+                continue;
+            }
+            let col = (idx % self.grid.cols) as i32;
+            let row = (idx / self.grid.cols) as i32;
+            let rot = egg.child.rotation;
+            if !egg.child.can_place_at(
+                &self.grid,
+                &self.config,
+                col,
+                row,
+                rot,
+                &egg.child.anatomy,
+            ) {
+                // 位置被占了：这一枚就没了（卵里的能量进热池）
+                self.heat_pool += egg.child.energy;
+                continue;
+            }
+            self.add_organism(egg.child);
+        }
     }
 
     /// 阶段 A：全体感知 + 决策。
@@ -1106,12 +1193,14 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             .map(|o| o.energy)
             .sum();
         let food: f64 = self.food_cells.iter().map(|&k| self.grid.food[k]).sum();
+        let eggs: f64 = self.eggs.values().map(|e| e.child.energy).sum();
         EnergyAudit {
             organisms,
             food,
             heat: self.heat_pool,
             wasted: self.energy_wasted,
             injected: self.energy_injected,
+            eggs,
         }
     }
 
@@ -1394,6 +1483,30 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                         // 摄取倍率不是 1 的时候，吃这一口**改变**了世界里的能量：
                         // > 1 等于凭空放大（记成注入），< 1 等于消化损耗（记成丢弃）。
                         // 不记的话账上会凭空多/少一块，审计立刻红。
+                        if gain > e {
+                            self.energy_injected += gain - e;
+                        } else {
+                            self.energy_wasted += e - gain;
+                        }
+                        continue;
+                    }
+                    // ── 吃卵（批次 27）──
+                    //
+                    // 卵是"还没出生的个体"，但它躺在格子里、不还手——
+                    // 对嘴来说这就是一块会孵化的肉。这是捕食压力第一次
+                    // 出现在**繁殖环节**：吃一枚卵等于消灭一个未来的个体，
+                    // 而且不用打赢母体。
+                    if self.grid.types[index] == ct::EGG {
+                        let e = self
+                            .eggs
+                            .remove(&index)
+                            .map(|egg| egg.child.energy)
+                            .unwrap_or(0.0);
+                        // 先拿走再铺地板，理由同食物：否则会被记两次
+                        self.reveal_floor(index);
+                        let gain = e * mult;
+                        let got = self.add_energy(i, gain);
+                        self.organisms[i].gain_food += got;
                         if gain > e {
                             self.energy_injected += gain - e;
                         } else {
@@ -2207,6 +2320,44 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 self.charge_repro(i, 0.0);
             }
             return false;
+        }
+
+        // ── 卵生（批次 27）──
+        //
+        // 和出芽是两条并行的路：出芽是 K（芽贴母体、母体每 tick 供养），
+        // 卵生是 r（产在空地上、母体不管）。卵**占一格、挡路、能被吃**——
+        // 这就是"捕食压力第一次出现在繁殖环节"。
+        //
+        // 收费和普通繁殖完全一样（含 `seed_frac` 那笔给后代的投资），
+        // 只是去向从"直接生成个体"变成"塞进一枚卵"。
+        if self.config.life.egging {
+            let seed_frac = if growth {
+                self.config.life.growth_seed_fraction.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if !strict {
+                paid = self.charge_repro(i, seed_frac);
+            } else if seed_frac > 0.0 {
+                // strict 模式开头已经按全款进热池收过了，把该给后代那份挪回来
+                self.heat_pool -= paid * seed_frac;
+            }
+            child.energy = paid * seed_frac;
+            let Some(idx) = self.grid.index(new_col, new_row) else {
+                return false;
+            };
+            self.set_cell_at(idx, ct::EGG, -1);
+            let hatch_at = self.tick + self.config.life.egg_hatch_ticks.max(1) as u64;
+            self.eggs.insert(
+                idx,
+                Egg {
+                    hatch_at,
+                    parent: self.organisms[i].id,
+                    child,
+                },
+            );
+            self.repro_ok += 1;
+            return true;
         }
 
         // 所有检查都过了，这时候才真正收费（非 strict 模式）
@@ -3350,6 +3501,98 @@ mod tests {
         assert!(
             w.repro_tries > tries_before,
             "关掉冷却时应该每 tick 都重试"
+        );
+    }
+
+    // ── 批次 27：卵生 ──
+
+    /// `egging = false`（默认）时繁殖直接产出个体，不产卵。
+    #[test]
+    fn egging_off_births_directly() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.budding_enabled = false;
+        w.config.life.egging = false;
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].energy = 100.0;
+        assert!(w.reproduce_organism(i));
+        assert!(w.eggs.is_empty(), "关掉卵生时不该有卵");
+        assert_eq!(w.organisms.len(), 2, "应该直接多一个个体");
+    }
+
+    /// 打开卵生：先产卵（个体数不变），到期才孵出芽。
+    #[test]
+    fn egging_lays_then_hatches() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.budding_enabled = false;
+        w.config.life.egging = true;
+        w.config.life.egg_hatch_ticks = 5;
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].energy = 100.0;
+
+        assert!(w.reproduce_organism(i), "产卵应该算繁殖成功");
+        assert_eq!(w.eggs.len(), 1, "应该产下一枚卵");
+        assert_eq!(w.organisms.len(), 1, "孵化前不该多出个体");
+
+        // 卵还没到期：孵不出来
+        w.tick += 1;
+        w.hatch_eggs();
+        assert_eq!(w.organisms.len(), 1, "没到期不该孵化");
+
+        // 推到到期
+        for _ in 0..6 {
+            w.tick += 1;
+            w.hatch_eggs();
+        }
+        assert!(w.eggs.is_empty(), "到期后卵应该消失");
+        assert_eq!(w.organisms.len(), 2, "卵应该孵出一个个体");
+    }
+
+    /// 嘴可以吃卵：吃掉之后卵消失，能量进捕食者。
+    #[test]
+    fn a_mouth_can_eat_an_egg() {
+        let (mut w, id) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        let idx = w.grid.index(4, 3).unwrap();
+        let mut rng = Rng::new(1);
+        let mut child = Organism::new(&w.config, &mut rng, &w.grid, 4, 3);
+        child.energy = 1.0;
+        w.set_cell_at(idx, ct::EGG, -1);
+        w.eggs.insert(
+            idx,
+            Egg {
+                hatch_at: 10_000,
+                parent: 999,
+                child,
+            },
+        );
+
+        let i = w.organism_index(id).unwrap();
+        let cell = w.organisms[i].anatomy.cells[0];
+        w.run_cell_function(i, cell);
+
+        assert!(w.eggs.is_empty(), "卵应该被吃掉");
+        assert_eq!(w.grid.types[idx], ct::EMPTY, "格子应该空出来");
+        assert!(
+            w.organisms[i].energy > 0.0,
+            "捕食者应该拿到卵里的能量，实测 {}",
+            w.organisms[i].energy
+        );
+    }
+
+    /// 卵里存着的能量必须进审计，否则 `注入 == 存量` 会凭空少一块。
+    #[test]
+    fn egg_energy_counts_in_the_audit() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.budding_enabled = false;
+        w.config.life.egging = true;
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].energy = 100.0;
+        assert!(w.reproduce_organism(i));
+
+        let audit = w.energy_audit();
+        assert!(
+            audit.eggs > 0.0,
+            "卵里应该有能量（`growth_seed_fraction` 那一份），实测 {}",
+            audit.eggs
         );
     }
 
