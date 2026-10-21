@@ -1432,7 +1432,12 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                     if owner < 0 || owner == my_id as i32 {
                         continue;
                     }
-                    let gain = self.bite_from(owner as u32, index, mult);
+                    // 体型差（批次 23）：大咬小加成、小咬大打折。
+                    // 亲缘折扣（批次 24）：同种相残打折。
+                    // 两个都关掉时恒为 1.0，逐位等于旧行为。
+                    let adv = self.size_advantage(i, owner as u32);
+                    let kin = self.kin_penalty(i, owner as u32);
+                    let gain = self.bite_from(owner as u32, index, mult * adv * kin);
                     // 同样要走容量检查：咬到嘴里的能量一旦超过容量，
                     // 直接 `+=` 会让下一次光合把个体往下 clamp，那一截就蒸发了。
                     let got = self.add_energy(i, gain);
@@ -1568,6 +1573,56 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 }
             }
             Behavior::Eye => {}
+        }
+    }
+
+    /// 体型差带来的咬合倍率（批次 23）。
+    ///
+    /// `clamp((n_捕食者 / n_猎物)^k, 0.25, 4.0)`。`k = 0`（默认）时恒为 1.0。
+    ///
+    /// 上下限不是随手拍的：
+    /// - **上限 4.0** 防止"大者通吃"。20 格咬 1 格在 k=0.5 时是 4.47，夹到 4.0——
+    ///   再高的话捕食收益会压过光合（满照 0.12，4 倍咬合 = 0.24/tick），
+    ///   生态会瞬间倒向"长得越大越好"，而那正是这批改动想避免的。
+    /// - **下限 0.25** 保留"蚂蚁咬大象也能啃下一口"，但只有四分之一。
+    ///   归零会让小个体彻底失去捕食这条路，而小个体正是生态里的多数。
+    fn size_advantage(&self, pred_i: usize, victim_id: u32) -> f64 {
+        const MIN: f64 = 0.25;
+        const MAX: f64 = 4.0;
+        let k = self.config.life.size_advantage;
+        if !(k > 0.0) {
+            return 1.0;
+        }
+        let Some(vi) = self.organism_index(victim_id) else {
+            return 1.0;
+        };
+        let np = self.organisms[pred_i].cell_count().max(1) as f64;
+        let nv = self.organisms[vi].cell_count().max(1) as f64;
+        (np / nv).powf(k).clamp(MIN, MAX)
+    }
+
+    /// 亲缘折扣（批次 24）：同种相残的收益倍率。
+    ///
+    /// 同种返回 `1 - kin_bite_penalty`，异种返回 1.0。`kin_bite_penalty = 0`（默认）
+    /// 时恒为 1.0。
+    ///
+    /// 判据是 `species_fingerprint`（身体蓝图的逐格哈希）。**它很脆**：
+    /// 变异一次指纹就变，母子可能被判成不同种。这一批先按它做，是为了量出
+    /// "同种相残到底占多少"——如果惩罚开满也没有效果，说明真正的问题不是亲缘，
+    /// 而是捕食本身太弱。
+    fn kin_penalty(&self, pred_i: usize, victim_id: u32) -> f64 {
+        let p = self.config.life.kin_bite_penalty.clamp(0.0, 1.0);
+        if p <= 0.0 {
+            return 1.0;
+        }
+        let Some(vi) = self.organism_index(victim_id) else {
+            return 1.0;
+        };
+        let a = self.organisms[pred_i].species_fingerprint.as_deref();
+        let b = self.organisms[vi].species_fingerprint.as_deref();
+        match (a, b) {
+            (Some(x), Some(y)) if x == y => 1.0 - p,
+            _ => 1.0,
         }
     }
 
@@ -3070,6 +3125,148 @@ mod tests {
             night < noon * 0.2,
             "夜间产出应该只有正午的一成上下，实测 {night:.4} vs {noon:.4}"
         );
+    }
+
+    // ── 批次 23：捕食端体型差 ──
+
+    /// `size_advantage = 0`（默认）必须逐位等于旧行为。
+    #[test]
+    fn zero_size_advantage_is_a_no_op() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.size_advantage = 0.0;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.9).abs() < 1e-9,
+            "关掉体型差时应该还是抽 0.1，实测剩 {}",
+            w.organisms[vi].energy
+        );
+    }
+
+    /// 大咬小加成、小咬大打折——这是给大体型的第一条**进攻性**收益。
+    #[test]
+    fn size_advantage_rewards_big_predators() {
+        // 3 格捕食者（1 嘴 + 2 储食）咬 1 格猎物
+        let (mut w, pi, vi) = predator_and_prey(
+            &[(ct::MOUTH, 0, 0), (ct::STORAGE, 0, 1), (ct::STORAGE, 0, -1)],
+            &[(ct::PRODUCER, 0, 0)],
+        );
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.size_advantage = 0.5;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        let want = 0.1 * 3f64.sqrt();
+        assert!(
+            (w.organisms[vi].energy - (5.0 - want)).abs() < 1e-9,
+            "3 格咬 1 格应该抽 0.1×√3 = {want:.4}，实测剩 {}",
+            w.organisms[vi].energy
+        );
+
+        // 反过来：1 格捕食者咬 3 格猎物 → 打折
+        let (mut w2, pi2, vi2) = predator_and_prey(
+            &[(ct::MOUTH, 0, 0)],
+            &[(ct::PRODUCER, 0, 0), (ct::STORAGE, 0, 1), (ct::STORAGE, 0, -1)],
+        );
+        w2.config.life.bite_rate = 0.1;
+        w2.config.life.bite_efficiency = 1.0;
+        w2.config.life.size_advantage = 0.5;
+        w2.organisms[vi2].energy = 5.0;
+        bite_once(&mut w2, pi2);
+        let want2 = 0.1 / 3f64.sqrt();
+        assert!(
+            (w2.organisms[vi2].energy - (5.0 - want2)).abs() < 1e-9,
+            "1 格咬 3 格应该只抽 0.1/√3 = {want2:.4}，实测剩 {}",
+            w2.organisms[vi2].energy
+        );
+    }
+
+    /// 倍率有上下限：20 格咬 1 格夹到 4.0，1 格咬 20 格夹到 0.25。
+    #[test]
+    fn size_advantage_is_clamped() {
+        let mut big = vec![(ct::MOUTH, 0, 0)];
+        for k in 1..20 {
+            big.push((ct::STORAGE, (k % 5) as i32 - 2, (k / 5) as i32 + 1));
+        }
+        let (mut w, pi, vi) = predator_and_prey(&big, &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.size_advantage = 0.5;
+        let vi_id = w.organisms[vi].id;
+        let adv = w.size_advantage(pi, vi_id);
+        assert!(
+            (adv - 4.0).abs() < 1e-9,
+            "20 格咬 1 格应该被夹到 4.0，实测 {adv}"
+        );
+
+        let (mut w2, pi2, vi2) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &big[..]);
+        w2.config.life.size_advantage = 0.5;
+        let vi2_id = w2.organisms[vi2].id;
+        let adv2 = w2.size_advantage(pi2, vi2_id);
+        assert!(
+            (adv2 - 0.25).abs() < 1e-9,
+            "1 格咬 20 格应该被夹到 0.25，实测 {adv2}"
+        );
+    }
+
+    // ── 批次 24：同种相残惩罚 ──
+
+    /// `kin_bite_penalty = 0`（默认）必须逐位等于旧行为。
+    #[test]
+    fn zero_kin_penalty_is_a_no_op() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.kin_bite_penalty = 0.0;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!((w.organisms[vi].energy - 4.9).abs() < 1e-9);
+    }
+
+    /// 同种之间咬的收益打折；异种不受影响。
+    #[test]
+    fn same_species_bites_are_discounted() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.kin_bite_penalty = 0.5;
+
+        // 不同种（默认指纹不同）→ 全额
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.9).abs() < 1e-9,
+            "异种应该抽满 0.1，实测剩 {}",
+            w.organisms[vi].energy
+        );
+
+        // 同种 → 打对折
+        let fp: std::sync::Arc<str> = std::sync::Arc::from("同一个蓝图");
+        w.organisms[pi].species_fingerprint = Some(fp.clone());
+        w.organisms[vi].species_fingerprint = Some(fp);
+        w.organisms[vi].energy = 5.0;
+        w.organisms[pi].energy = 0.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.95).abs() < 1e-9,
+            "同种应该只抽 0.05，实测剩 {}",
+            w.organisms[vi].energy
+        );
+    }
+
+    /// 惩罚开到 1.0 = 同种完全咬不动。
+    #[test]
+    fn full_kin_penalty_blocks_cannibalism() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.kin_bite_penalty = 1.0;
+        let fp: std::sync::Arc<str> = std::sync::Arc::from("同一个蓝图");
+        w.organisms[pi].species_fingerprint = Some(fp.clone());
+        w.organisms[vi].species_fingerprint = Some(fp);
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert_eq!(w.organisms[vi].energy, 5.0, "同种完全咬不动");
     }
 
     // ── 批次 9.6：食物算不算路障（移动 / 繁殖两个开关）──

@@ -816,6 +816,43 @@ pub fn draw(
                          关：退回旧行为——四个邻居各抽一次，上限是咬合速率的 4 倍。\n\
                          食物不受这条限制：能舔到几格食物由几何决定。",
                     );
+                // ── 捕食端体型差（批次 23）──
+                let before_adv = cfg.life.size_advantage;
+                let mut adv = before_adv;
+                ui.add(
+                    egui::Slider::new(&mut adv, 0.0..=1.0)
+                        .text("体型压制")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "咬的收益 × (捕食者格数 / 猎物格数)^指数，夹在 0.25~4.0。\n\
+                     0（默认）= 关闭，体型对捕食完全中性。\n\
+                     0.5 是推荐起点：10 格咬 1 格 = 3.2 倍，1 格咬 10 格 = 0.32 倍。\n\
+                     这是给大体型的第一条「进攻性」收益——之前它的好处全是防御性的。",
+                );
+                if (adv - before_adv).abs() > 1e-9 {
+                    cfg.life.size_advantage = adv;
+                }
+                // ── 同种相残惩罚（批次 24）──
+                let before_kin = cfg.life.kin_bite_penalty;
+                let mut kin = before_kin;
+                ui.add(
+                    egui::Slider::new(&mut kin, 0.0..=1.0)
+                        .text("同种相残")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "同种之间咬的收益乘 (1 - 本值)。0（默认）= 关闭。\n\
+                     打开之后捕食压力才会落到**别的物种**身上，\n\
+                     红皇后 / 军备竞赛才有舞台。\n\
+                     注意：判据是身体蓝图的指纹，变异一次就换种，\n\
+                     所以母子可能被判成不同种——这一层保护会漏。",
+                );
+                if (kin - before_kin).abs() > 1e-9 {
+                    cfg.life.kin_bite_penalty = kin;
+                }
                 // ── 食物算不算路障 ──
                 //
                 // 拆成两个开关是因为它们是两件事：穿过一片尸体堆去追猎物（移动），
