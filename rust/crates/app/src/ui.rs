@@ -731,6 +731,25 @@ pub fn draw(
                     cfg.world.night_floor = night;
                 }
 
+                // ── 丰富地形（批次 44）──
+                //
+                // 地形这一层从阶段 8 就有笔刷，但默认世界里**一格都没有**，
+                // 于是「绕路 / 蹚水 / 冒险穿过辐射带」从来没在默认体验里出现过。
+                let mut rich = cfg.world.rich_terrain;
+                if ui
+                    .checkbox(&mut rich, "丰富地形（新建世界时生效）")
+                    .on_hover_text(
+                        "勾上（默认）：新世界自动铺一整套地形——\n\
+                         河流（水）+ 河岸结冰 + 沼泽 + 辐射带 + 地表腐殖质\n\
+                         + 世界底部岩浆带 + 地下洞穴网络（洞顶墙 / 洞底腐殖质 / 两个竖井）。\n\
+                         取消：退回「墙 + 草甸 + 零散食物」的老世界（A/B 对照用）。\n\
+                         注意：只影响**新建 / 重置**的世界，当前世界不会重铺。",
+                    )
+                    .changed()
+                {
+                    cfg.world.rich_terrain = rich;
+                }
+
                 // ── 洞穴（批次 25）──
                 //
                 // 云影已经证明「有暗区」不够——暗区还得有饭吃才可能住人。
@@ -744,10 +763,11 @@ pub fn draw(
                         .fixed_decimals(0),
                 )
                 .on_hover_text(
-                    "世界生成时挖几条带顶的隧道（0 = 默认，关闭）。\n\
-                     顶是墙（挡光）、底是腐殖质（每 tick 产食），每条挖一个竖井通地表。\n\
+                    "世界生成时挖几条带顶的隧道（0 = 自动）。\n\
+                     顶是墙（挡光）、底是腐殖质（每 tick 产食），每条挖两个竖井通地表。\n\
                      竖井会变成「光柱」：洞口亮、越往里越暗，正好是个梯度。\n\
-                     只在新建 / 重置世界时生效，中途改不会重挖。",
+                     0 的含义按世界类型分叉：丰富地形 = 按面积自动（3~8 条）；\n\
+                     经典地形 = 一条都不挖。改完按下面的「重挖洞穴」立刻生效。",
                 );
                 if (cave - before_cave as f64).abs() > 0.5 {
                     cfg.world.cave_count = cave.round().max(0.0) as i32;
@@ -1787,7 +1807,9 @@ pub fn draw(
     //
     // 放在这里执行：上面那段闭包已经把 `&mut world.config` 还回来了。
     if act.recarve_caves {
-        let n = world.config.world.cave_count;
+        // 用 `cave_tunnels` 而不是直接读 `cave_count`：默认世界是 `cave_count = 0`
+        // （丰富地形下代表"自动"），直接读会得到 0，按钮就成了假的。
+        let n = evosim_core::worldgen::cave_tunnels(world);
         if n > 0 {
             evosim_core::worldgen::recarve_caves(world, n);
         }

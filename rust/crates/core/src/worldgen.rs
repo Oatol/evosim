@@ -159,12 +159,214 @@ pub fn generate_demo_world(world: &mut World, wall_density: f64, food_density: f
             }
         }
     }
-    // ── 4. 洞穴（批次 25）──
+    // ── 4. 丰富地形（批次 44）──
+    //
+    // 顺序是有讲究的：河流先挖（要穿过草甸），结冰跟着河岸，
+    // 然后是斑块类（沼泽 / 辐射 / 腐殖质），最后是岩浆——
+    // 岩浆是"熔掉一切"的东西，放最后才不会把别的点缀掉。
+    let rich = world.config.world.rich_terrain;
+    if rich {
+        paint_rich_terrain(world);
+    }
+
+    // ── 5. 洞穴（批次 25 / 44）──
     //
     // 放在最后：洞穴要覆盖掉墙体与草甸，才能保证"顶是完整的、底是腐殖质"。
-    let caves = world.config.world.cave_count;
+    //
+    // `cave_count = 0` 的含义按世界类型分叉：
+    // - 丰富地形：**自动**（按面积算 3~8 条）——默认世界里就该有洞；
+    // - 经典地形：一条都不挖（逐位等于批次 43 之前）。
+    let caves = cave_tunnels(world);
     if caves > 0 {
         carve_caves(world, caves);
+    }
+}
+
+/// 这个世界该挖几条洞穴（批次 44）。
+///
+/// `cave_count = 0` 的含义按世界类型分叉：丰富地形 = 按面积自动（3~8 条），
+/// 经典地形 = 一条都不挖。抽成公开函数是因为**「重挖」按钮也要用同一个数**——
+/// 否则默认世界（`cave_count = 0`）按重挖会一格都不挖，按钮等于假的。
+pub fn cave_tunnels(world: &World) -> i32 {
+    let n = world.config.world.cave_count;
+    if n > 0 {
+        return n;
+    }
+    if !world.config.world.rich_terrain {
+        return 0;
+    }
+    ((world.grid.cols * world.grid.rows) / 20_000).clamp(3, 8) as i32
+}
+
+// ────────────────────────── 丰富地形（批次 44）──────────────────────────
+
+/// 只在「空 / 草甸」上铺地形，**不动墙、不叠已有地形**。
+///
+/// 为什么不直接用 `paint_blob`：那个无条件覆盖，几块沼泽就能把山脉抹平，
+/// 世界会越挖越平。地形应该"填在空处"，不是"重画一遍"。
+fn paint_terrain_blob(world: &mut World, cx: f64, cy: f64, radius: f64, ty: u8, jitter: f64) {
+    let r2 = radius * radius;
+    let c0 = (cx - radius - 1.0).floor() as i32;
+    let c1 = (cx + radius + 1.0).ceil() as i32;
+    let r0 = (cy - radius - 1.0).floor() as i32;
+    let r1 = (cy + radius + 1.0).ceil() as i32;
+    for row in r0..=r1 {
+        for col in c0..=c1 {
+            let dx = col as f64 - cx;
+            let dy = row as f64 - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 {
+                continue;
+            }
+            if jitter > 0.0 && d2 > r2 * (1.0 - jitter) {
+                continue;
+            }
+            let Some(i) = world.grid.index(col, row) else {
+                continue;
+            };
+            let cur = world.grid.types[i];
+            if cur != ct::EMPTY && cur != ct::FOOD {
+                continue;
+            }
+            world.set_cell_at(i, ty, -1);
+        }
+    }
+}
+
+/// 蜿蜒河道：从上到下贯穿，**每隔几行留一处浅滩**。
+///
+/// 浅滩是关键：一条完整不断的水带等于一堵墙（水要花能量才能过），
+/// 有浅滩才叫"走廊"——**绕路远一点，还是蹚水贵一点**，这个取舍才是水存在的意义。
+///
+/// 河撞到墙就断（不覆盖墙），那正好是"峡谷尽头"和"此路不通"的来源。
+fn carve_rivers(world: &mut World, count: i32) {
+    let cols = world.grid.cols as i32;
+    let rows = world.grid.rows as i32;
+    if rows < 12 {
+        return;
+    }
+    for _ in 0..count {
+        let mut x = world.rng.range(0.0, cols as f64);
+        let width = world.rng.int_range(1, 2) as i32;
+        let mut fords: Vec<i32> = Vec::new();
+        for _ in 0..world.rng.int_range(2, 4) {
+            fords.push(world.rng.int_range(2, rows as i64 - 3) as i32);
+        }
+        for y in 0..rows {
+            // 浅滩：这一行不放水，留一条能走的路
+            if fords.iter().any(|&f| f == y) {
+                continue;
+            }
+            x += world.rng.gaussian(0.0, 0.6);
+            let cx = x.round() as i32;
+            for d in 0..width {
+                let Some(i) = world.grid.index(cx + d, y) else {
+                    continue;
+                };
+                let cur = world.grid.types[i];
+                if cur == ct::EMPTY || cur == ct::FOOD {
+                    world.set_cell_at(i, ct::WATER, -1);
+                }
+            }
+        }
+    }
+}
+
+/// 河岸结冰：沿岸随机挑几格冻上。
+///
+/// 冰是唯一一种**改"落点"不改收支**的地形（批次 43），所以它在河岸上的效果是
+/// "踩上去会滑进/滑出水面"——一个纯几何的意外，正好是移动策略最需要的那种变数。
+fn freeze_banks(world: &mut World) {
+    let len = world.grid.len;
+    let cols = world.grid.cols as i32;
+    for i in 0..len {
+        if world.grid.types[i] != ct::WATER {
+            continue;
+        }
+        let col = (i as i32) % cols;
+        let row = (i as i32) / cols;
+        // ① 水面结冰：整格从水变成冰 → 一段「能滑过去的浅滩」。
+        //    这比"岸边结冰"有用得多：滑行本身就有位移，冻住的河段会把人送过去。
+        if world.rng.bernoulli(0.12) {
+            world.set_cell_at(i, ct::ICE, -1);
+            continue;
+        }
+        // ② 岸边挂霜：偶尔把一格空地冻上，让冰出现在水边而不是只有水面上。
+        if world.rng.bernoulli(0.10) {
+            let (dc, dr) = [(1, 0), (-1, 0), (0, 1), (0, -1)][world.rng.int(4)];
+            if let Some(j) = world.grid.index(col + dc, row + dr) {
+                if world.grid.types[j] == ct::EMPTY {
+                    world.set_cell_at(j, ct::ICE, -1);
+                }
+            }
+        }
+    }
+}
+
+/// 一整套地形（批次 44）。每个世界都长这样，但细节随种子不同。
+fn paint_rich_terrain(world: &mut World) {
+    let cols = world.grid.cols as i32;
+    let rows = world.grid.rows as i32;
+    // 太小的世界放不下河流 + 洞穴，直接不铺（那些尺寸只在单测里出现）
+    if cols < 24 || rows < 24 {
+        return;
+    }
+    let rf = |w: &mut World, lo: f64, hi: f64| w.rng.range(lo, hi);
+
+    // ── 1. 河流 ──
+    let rivers = world.rng.int_range(2, 3) as i32;
+    carve_rivers(world, rivers);
+
+    // ── 2. 河岸结冰 ──
+    freeze_banks(world);
+
+    // ── 3. 沼泽：低洼（下半部分），比水更贵 → 真正的禁区 ──
+    for _ in 0..world.rng.int_range(3, 5) {
+        let cx = rf(world, 0.0, cols as f64);
+        let cy = rf(world, rows as f64 * 0.45, rows as f64 * 0.95);
+        let r = rf(world, 3.0, 7.0);
+        paint_terrain_blob(world, cx, cy, r, ct::SWAMP, 0.35);
+    }
+
+    // ── 4. 辐射带：风险/收益对称的斑块（变异率 ×3） ──
+    for _ in 0..world.rng.int_range(3, 5) {
+        let cx = rf(world, 0.0, cols as f64);
+        let cy = rf(world, rows as f64 * 0.15, rows as f64 * 0.85);
+        let r = rf(world, 3.0, 5.0);
+        paint_terrain_blob(world, cx, cy, r, ct::RAD, 0.30);
+    }
+
+    // ── 5. 地表腐殖质：森林地表，暗处也有饭吃 ──
+    //
+    // 批次 10.5 的老结论："有暗区不够，暗区还得有饭吃"。
+    // 地表这层腐殖质就是给"被墙遮住的格子"配的饭。
+    for _ in 0..world.rng.int_range(3, 5) {
+        let cx = rf(world, 0.0, cols as f64);
+        let cy = rf(world, rows as f64 * 0.15, rows as f64 * 0.60);
+        let r = rf(world, 2.0, 4.0);
+        paint_terrain_blob(world, cx, cy, r, ct::HUMUS, 0.30);
+    }
+
+    // ── 6. 底部岩浆带 ──
+    //
+    // 世界的"地板"：一条烧红的地层，加上几个探到中段的岩浆池。
+    // 它是这个世界唯一的**绝对禁区**（不像沼泽只是贵），
+    // 所以位置放在最低处——生物得先有理由往下走，才会遇到它。
+    let lava_top = (rows as f64 * 0.93) as i32;
+    for row in lava_top..rows {
+        for col in 0..cols {
+            if world.rng.bernoulli(0.55) {
+                if let Some(i) = world.grid.index(col, row) {
+                    world.set_cell_at(i, ct::LAVA, -1);
+                }
+            }
+        }
+    }
+    for _ in 0..world.rng.int_range(2, 3) {
+        let cx = rf(world, 0.0, cols as f64);
+        let cy = rf(world, rows as f64 * 0.72, rows as f64 * 0.93);
+        let r = rf(world, 2.0, 4.0);
+        paint_terrain_blob(world, cx, cy, r, ct::LAVA, 0.30);
     }
 }
 
@@ -209,12 +411,18 @@ fn carve_caves_inner(world: &mut World, count: i32, skip_occupied: bool) {
     let top = (rows as f64 * 0.50) as i32;
     let bottom = ((rows as f64 * 0.90) as i32).max(top + 4);
     for _ in 0..count {
-        let cy = world.rng.int_range(top as i64, bottom as i64) as i32;
+        let mut cy = world.rng.int_range(top as i64, bottom as i64) as i32;
+        let start_y = cy;
         let cx0 = world.rng.int_range(0, cols as i64 - 1) as i32;
-        let len = world.rng.int_range((cols / 6).max(8) as i64, (cols / 2).max(10) as i64) as i32;
+        let len = world.rng.int_range((cols / 4).max(10) as i64, (cols / 2).max(12) as i64) as i32;
         let h = world.rng.int_range(2, 3) as i32;
 
         for dx in 0..len {
+            // **蜿蜒**（批次 44）：主体一直往前推，偶尔上下漂一两格。
+            // 直线隧道看着像地铁，弯的才像洞；漂移不改长度，所以挖出来的量级不变。
+            if dx > 0 && world.rng.bernoulli(0.30) {
+                cy = (cy + world.rng.int_range(-1, 1) as i32).clamp(top, bottom);
+            }
             let x = (cx0 + dx).rem_euclid(cols);
             // 隧道本体挖空
             for dy in 0..h {
@@ -242,14 +450,19 @@ fn carve_caves_inner(world: &mut World, count: i32, skip_occupied: bool) {
             }
         }
 
-        // 竖井：从隧道起点往上打通到地表
-        let sx = cx0;
-        for y in 0..cy {
-            if let Some(i) = world.grid.index(sx, y) {
-                if skip_occupied && world.grid.owners[i] >= 0 {
-                    continue;
+        // 竖井：起点一个、中段一个。
+        //
+        // 两个入口才像"洞"：只有一个口的话，洞里没光、外面有光，
+        // 生物进去等于走进死胡同（批次 25 时只有一个口，也是暗区人口偏少的原因之一）。
+        let mid_x = (cx0 + len / 2).rem_euclid(cols);
+        for (sx, sy) in [(cx0, start_y), (mid_x, cy)] {
+            for y in 0..sy {
+                if let Some(i) = world.grid.index(sx, y) {
+                    if skip_occupied && world.grid.owners[i] >= 0 {
+                        continue;
+                    }
+                    world.set_cell_at(i, ct::EMPTY, -1);
                 }
-                world.set_cell_at(i, ct::EMPTY, -1);
             }
         }
     }
@@ -269,10 +482,14 @@ mod tests {
     const COLS: usize = 140;
     const ROWS: usize = 90;
 
+    /// 经典地形（`rich_terrain = false`）：这一组测试量的是**旧的生成管线**
+    /// （成簇墙体 / 草甸 / 富贫斑块 / 洞穴），要把批次 44 的丰富地形关掉，
+    /// 否则河流和岩浆会混进统计里。丰富地形由 `rich_*` 那组单独覆盖。
     fn build(richness: f64, seed: u32) -> World {
         let mut cfg = Config::default();
         cfg.world.cols = COLS;
         cfg.world.rows = ROWS;
+        cfg.world.rich_terrain = false;
         cfg.world.patch_richness = richness;
         let mut w = World::new(cfg, Rng::new(seed));
         generate_demo_world(&mut w, 1.0, 1.0);
@@ -381,6 +598,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.world.cols = COLS;
         cfg.world.rows = ROWS;
+        cfg.world.rich_terrain = false; // 只量洞穴，别混进地表腐殖质
         cfg.world.cave_count = 3;
         let mut w = World::new(cfg, Rng::new(7));
         generate_demo_world(&mut w, 1.0, 1.0);
@@ -417,6 +635,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.world.cols = COLS;
         cfg.world.rows = ROWS;
+        cfg.world.rich_terrain = false;
         cfg.world.cave_count = 4;
         let mut w = World::new(cfg, Rng::new(3));
         generate_demo_world(&mut w, 1.0, 1.0);
@@ -431,5 +650,134 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── 批次 44：丰富地形 ──
+
+    fn build_rich(seed: u32) -> World {
+        let mut cfg = Config::default();
+        cfg.world.cols = COLS;
+        cfg.world.rows = ROWS;
+        let mut w = World::new(cfg, Rng::new(seed));
+        generate_demo_world(&mut w, 1.0, 1.0);
+        w
+    }
+
+    fn count(w: &World, ty: u8) -> usize {
+        w.grid.floor.iter().filter(|&&t| t == ty).count()
+    }
+
+    /// 默认世界必须**六种地形全都有**——这是这一批的全部意义。
+    #[test]
+    fn rich_world_has_every_terrain() {
+        let w = build_rich(21);
+        for (ty, name) in [
+            (ct::WALL, "墙"),
+            (ct::WATER, "水"),
+            (ct::ICE, "冰"),
+            (ct::SWAMP, "沼泽"),
+            (ct::RAD, "辐射带"),
+            (ct::HUMUS, "腐殖质"),
+            (ct::LAVA, "岩浆"),
+        ] {
+            let n = count(&w, ty);
+            assert!(n > 0, "默认世界里没有{}（{name}），实测 0 格", name);
+        }
+    }
+
+    /// 关掉丰富地形时，除墙和食物之外一格地形都不该有（逐位等于批次 43 之前）。
+    #[test]
+    fn classic_world_has_only_walls_and_food() {
+        let w = build(0.0, 22);
+        for ty in [ct::WATER, ct::ICE, ct::SWAMP, ct::RAD, ct::HUMUS, ct::LAVA] {
+            assert_eq!(
+                count(&w, ty),
+                0,
+                "关掉丰富地形之后还冒出了地形 {}",
+                crate::cell_type::label(ty)
+            );
+        }
+        assert!(count(&w, ct::WALL) > 0, "经典世界也该有墙");
+    }
+
+    /// `cave_count = 0` 的含义按世界类型分叉——「重挖」按钮靠这条才不会变成假的。
+    #[test]
+    fn cave_tunnels_reads_zero_as_auto_only_when_rich() {
+        let rich = build_rich(66);
+        assert_eq!(rich.config.world.cave_count, 0);
+        let auto = cave_tunnels(&rich);
+        assert!(
+            (3..=8).contains(&auto),
+            "丰富地形下 0 应该自动算成 3~8 条，实测 {auto}"
+        );
+
+        let classic = build(0.0, 66);
+        assert_eq!(
+            cave_tunnels(&classic),
+            0,
+            "经典地形下 0 就该是一条都不挖"
+        );
+
+        let mut w = build_rich(66);
+        w.config.world.cave_count = 2;
+        assert_eq!(cave_tunnels(&w), 2, "手填的正数优先");
+    }
+
+    /// 同一 seed 必须生成同一个世界——地形是随机的，但**不能不可复现**。
+    #[test]
+    fn rich_world_is_deterministic() {
+        let a = build_rich(33);
+        let b = build_rich(33);
+        assert_eq!(a.grid.floor, b.grid.floor, "同 seed 的地形必须逐格相同");
+    }
+
+    /// 岩浆只在最低处：它是绝对禁区，不该出现在生物日常活动的中上段。
+    #[test]
+    fn lava_stays_at_the_bottom() {
+        let w = build_rich(44);
+        let rows = w.grid.rows;
+        let mut top_lava = rows;
+        for i in 0..w.grid.len {
+            if w.grid.floor[i] == ct::LAVA {
+                top_lava = top_lava.min(i / w.grid.cols);
+            }
+        }
+        assert!(top_lava < rows, "应该真的有岩浆");
+        assert!(
+            top_lava as f64 > rows as f64 * 0.6,
+            "岩浆跑到了第 {} 行（共 {} 行），太靠上了",
+            top_lava,
+            rows
+        );
+    }
+
+    /// 水不能把世界切成两半：浅滩必须存在，否则"蹚水 vs 绕路"这个取舍不存在。
+    #[test]
+    fn rivers_have_fords() {
+        let w = build_rich(55);
+        // 逐行数水：只要有水，就说明河存在；再检查**至少有一行几乎没有水**
+        // （浅滩行），否则整条河是连续的墙。
+        let mut wet_rows = 0;
+        let mut dry_rows_in_river_cols = 0;
+        for row in 0..w.grid.rows {
+            let n = (0..w.grid.cols)
+                .filter(|&c| {
+                    w.grid
+                        .index(c as i32, row as i32)
+                        .map(|i| w.grid.floor[i] == ct::WATER)
+                        .unwrap_or(false)
+                })
+                .count();
+            if n > 0 {
+                wet_rows += 1;
+            } else {
+                dry_rows_in_river_cols += 1;
+            }
+        }
+        assert!(wet_rows > 10, "应该有一条从上到下的河，实测只有 {wet_rows} 行有水");
+        assert!(
+            dry_rows_in_river_cols > 5,
+            "整张图每一行都有水——河没有浅滩，等于一堵墙"
+        );
     }
 }
