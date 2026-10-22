@@ -250,6 +250,15 @@ impl Organism {
         self.anatomy.cells.len()
     }
 
+    /// **基因组意义上的身体**：芽用它要长成的蓝图，成体用自己的身体（批次 32）。
+    ///
+    /// 为什么必须有这一层：芽的 `anatomy` 只有 1 格（蓝图在 `growth_plan` 里），
+    /// 拿它算"构成"会把每个芽都当成 1 格的陌生生物——物种数会炸、亲缘识别会漏掉
+    /// 最该保护的那一层（母子）。
+    pub fn genome(&self) -> &Anatomy {
+        self.growth_plan.as_ref().unwrap_or(&self.anatomy)
+    }
+
     /// 繁殖实际扣掉的**基础成本**
     ///
     /// `cell_count^p`，p 来自 `LifeCfg::breed_cost_exponent`，见 [`breed_cost`]。

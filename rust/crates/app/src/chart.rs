@@ -22,7 +22,7 @@ pub struct MetricDef {
     pub unit: &'static str,
 }
 
-pub static METRICS: [MetricDef; 9] = [
+pub static METRICS: [MetricDef; 11] = [
     MetricDef {
         name: "种群",
         color: ACCENT,
@@ -93,6 +93,24 @@ pub static METRICS: [MetricDef; 9] = [
         get: |s| s.gift,
         digits: 1,
         unit: "%",
+    },
+    // ── 口径校准（批次 32）──
+    //
+    // 上面那条「体型」是**全体**平均，被 1 格的芽稀释（实测芽占 47%）。
+    // 这两条是同一件事的正确读数：成体多大、有多少种形态。
+    MetricDef {
+        name: "成体体型",
+        color: Color32::from_rgb(253, 224, 71),
+        get: |s| s.body_adult,
+        digits: 2,
+        unit: " 格",
+    },
+    MetricDef {
+        name: "物种(聚类)",
+        color: Color32::from_rgb(192, 132, 252),
+        get: |s| s.species_clustered,
+        digits: 0,
+        unit: "",
     },
 ];
 
@@ -403,8 +421,8 @@ mod tests {
 
     #[test]
     fn metric_table_covers_every_slot() {
-        // `Panels::chart_on` 是 [bool; 9]，指标表少一项就会越界/漏画
-        assert_eq!(METRICS.len(), 9);
+        // `Panels::chart_on` 是 [bool; 11]，指标表少一项就会越界/漏画
+        assert_eq!(METRICS.len(), 11);
         for m in METRICS.iter() {
             assert!(!m.name.is_empty());
         }
@@ -424,6 +442,8 @@ mod tests {
             photo: 77.0,
             bite: 88.0,
             gift: 99.0,
+            body_adult: 111.0,
+            species_clustered: 122.0,
         };
         let vals: Vec<f32> = METRICS.iter().map(|m| (m.get)(&s)).collect();
         let mut uniq = vals.clone();

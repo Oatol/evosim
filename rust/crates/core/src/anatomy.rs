@@ -210,6 +210,47 @@ impl Anatomy {
         hash_string(&parts.join("|"))
     }
 
+    /// **身体构成**：每种细胞各几个。索引 = 细胞类型 id。
+    ///
+    /// 这是「物种」的**连续**判据用的量（批次 32）。和 `fingerprint()` 的分工：
+    /// - `fingerprint()` 是**离散**的：变异一格就换一个指纹。它管**谱系**（谁从谁变来）。
+    /// - `composition()` 是**连续**的：加一格只让一个数 +1。它管**物种**（差几格还算同一种）。
+    ///
+    /// 为什么不用逐格位置：位置版本（多重集对称差）要排序，而这条路径在**每次咬**都会走。
+    /// 类型计数是 O(格数) 且不分配，够快。代价是分不出「5 格一字长蛇」和「5 格团」——
+    /// 但项目里人读的物种名本来也是 `describe()` 那种构成描述（"嘴×1 生产者×2"），
+    /// 所以这个粒度和界面口径是一致的。
+    pub fn composition(&self) -> [u16; 17] {
+        let mut c = [0u16; 17];
+        for cell in &self.cells {
+            c[(cell.type_id as usize).min(16)] += 1;
+        }
+        c
+    }
+
+    /// **构成距离**（0~1）：两个身体"差多少"。0 = 完全一样，1 = 一格都不重合。
+    ///
+    /// 用 Jaccard 距离（`1 - Σmin / Σmax`）而不是绝对格数差，是因为绝对差**不看体型**：
+    /// 「1 格嘴」和「1 格生产者」绝对差是 2，「14 格身体多一格」也是 1——前者该是
+    /// 完全不同的东西，后者几乎没变。归一化之后前者是 1.0、后者是 0.07。
+    ///
+    /// 这是**物种**的连续判据：指纹（逐格哈希）管谱系，这个管"多少种形态在共存"。
+    pub fn composition_distance(&self, other: &Anatomy) -> f32 {
+        let a = self.composition();
+        let b = other.composition();
+        let mut inter = 0u32;
+        let mut union = 0u32;
+        for i in 0..17 {
+            let (x, y) = (a[i] as u32, b[i] as u32);
+            inter += x.min(y);
+            union += x.max(y);
+        }
+        if union == 0 {
+            return 0.0;
+        }
+        1.0 - inter as f32 / union as f32
+    }
+
     /// 可读的结构描述，例如 "嘴×1 生产者×2"
     pub fn describe(&self) -> String {
         let mut counts = [0u32; 16];
@@ -305,5 +346,69 @@ mod storage_tests {
         let mut b = Anatomy::default();
         b.copy_from(&a);
         assert!(b.has(Flags::STORAGE), "copy_from 后应保留 STORAGE");
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+    use crate::cell_type::ct;
+
+    fn body(cells: &[(u8, i32, i32)]) -> Anatomy {
+        let mut a = Anatomy::default();
+        for (t, dx, dy) in cells {
+            a.add_cell(*t, *dx, *dy, 0);
+        }
+        a.recompute();
+        a
+    }
+
+    /// 构成距离：一样是 0，多一格是小值，换一种细胞是完全不同的东西。
+    #[test]
+    fn composition_distance_is_scale_free() {
+        let a = body(&[
+            (ct::PRODUCER, 0, 0),
+            (ct::PRODUCER, 1, 0),
+            (ct::PRODUCER, 2, 0),
+            (ct::MOUTH, 3, 0),
+        ]);
+        assert_eq!(a.composition_distance(&a), 0.0, "自己和自己应该是 0");
+
+        // 14 格身体多一格：距离很小
+        let mut big = Anatomy::default();
+        for k in 0..10 {
+            big.add_cell(ct::PRODUCER, k, 0, 0);
+        }
+        for k in 0..4 {
+            big.add_cell(ct::MOUTH, k, 1, 0);
+        }
+        big.recompute();
+        let mut bigger = big.clone();
+        bigger.add_cell(ct::PRODUCER, 10, 0, 0);
+        bigger.recompute();
+        let d = big.composition_distance(&bigger);
+        assert!(d < 0.1, "14 格多一格应该 < 0.1，实测 {}", d);
+
+        // 1 格嘴 vs 1 格生产者：完全不同的东西
+        let m = body(&[(ct::MOUTH, 0, 0)]);
+        let p = body(&[(ct::PRODUCER, 0, 0)]);
+        assert_eq!(
+            m.composition_distance(&p),
+            1.0,
+            "一格全换掉应该是 1.0（Jaccard 归一化的意义就在这里）"
+        );
+    }
+
+    /// 位置不算：同构成不同摆法 = 距离 0（这是"物种"口径，不是"谱系"口径）。
+    #[test]
+    fn composition_ignores_layout_but_fingerprint_does_not() {
+        let a = body(&[(ct::PRODUCER, 0, 0), (ct::MOUTH, 1, 0)]);
+        let b = body(&[(ct::PRODUCER, 0, 0), (ct::MOUTH, 0, 1)]);
+        assert_eq!(a.composition_distance(&b), 0.0, "构成一样就是 0");
+        assert_ne!(
+            a.fingerprint(),
+            b.fingerprint(),
+            "指纹应该不同（位置变了）——两个口径本来就要分开"
+        );
     }
 }

@@ -1757,12 +1757,64 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let Some(vi) = self.organism_index(victim_id) else {
             return 1.0;
         };
+        // 批次 32：可选按**构成聚类**判同种。默认还是指纹（行为不变）——
+        // 聚类口径比指纹粗得多，切过去会让"同种相残打折"从少数情况变成多数情况，
+        // 那是行为改动，得单独扫过再决定。
+        if self.config.life.kin_by_species {
+            let d = self.organisms[pred_i]
+                .genome()
+                .composition_distance(self.organisms[vi].genome());
+            let k = self.config.life.species_distance as f32;
+            return if d <= k { 1.0 - p } else { 1.0 };
+        }
         let a = self.organisms[pred_i].species_fingerprint.as_deref();
         let b = self.organisms[vi].species_fingerprint.as_deref();
         match (a, b) {
             (Some(x), Some(y)) if x == y => 1.0 - p,
             _ => 1.0,
         }
+    }
+
+    /// **聚类物种数**（批次 32）：按身体构成贪心聚类，返回个体数 ≥ `min_pop` 的簇数。
+    ///
+    /// 为什么不能用 `species.alive_count`：那个是**精确指纹**判据——变异一格就换一个
+    /// 指纹，所以它数的是"结构变体的累计"，会单调上涨且不封顶（实测 48000 tick 到 67.5
+    /// 还在涨）。物种数要回答的是"生态里有多少种**形态**在共存"，那必须是连续的判据。
+    ///
+    /// 阈值是 `species_distance`（Jaccard 构成距离，默认 0.15）。`kin_by_species`
+    /// 打开时亲缘判定用同一个阈值——两处口径不一致的话，"同种相残打折"和"物种数"
+    /// 会互相打架。
+    ///
+    /// 贪心、顺序相关、代表取第一次出现的那个：这样结果**可复现**（`organisms` 是
+    /// 有序 `Vec`）。簇直径 ≤ 2 × 阈值，不会像"链式聚类"那样一路串成一坨。
+    pub fn species_clusters(&self, min_pop: usize) -> usize {
+        let k = self.config.life.species_distance as f32;
+        let mut reps: Vec<[u16; 17]> = Vec::new();
+        let mut counts: Vec<usize> = Vec::new();
+        for org in &self.organisms {
+            let comp = org.genome().composition();
+            let mut hit = None;
+            for (i, rep) in reps.iter().enumerate() {
+                let (mut inter, mut union) = (0u32, 0u32);
+                for j in 0..17 {
+                    let (x, y) = (rep[j] as u32, comp[j] as u32);
+                    inter += x.min(y);
+                    union += x.max(y);
+                }
+                if union > 0 && 1.0 - inter as f32 / union as f32 <= k {
+                    hit = Some(i);
+                    break;
+                }
+            }
+            match hit {
+                Some(i) => counts[i] += 1,
+                None => {
+                    reps.push(comp);
+                    counts.push(1);
+                }
+            }
+        }
+        counts.iter().filter(|&&c| c >= min_pop).count()
     }
 
     /// 从 `victim_id` 身上抽走一点能量，返回**实际到账**的量（已扣消化损耗）。
@@ -2625,9 +2677,27 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             income[org.income_source().slot()] += 1;
         }
         let nf = n as f64;
+        let adult_n = self
+            .organisms
+            .iter()
+            .filter(|o| o.growth_plan.is_none())
+            .count();
+        let adult_cells: usize = self
+            .organisms
+            .iter()
+            .filter(|o| o.growth_plan.is_none())
+            .map(|o| o.cell_count())
+            .sum();
         OrgStats {
             count: n,
             avg_cells: cells as f64 / nf,
+            avg_cells_adult: if adult_n == 0 {
+                0.0
+            } else {
+                adult_cells as f64 / adult_n as f64
+            },
+            buds_pct: (n - adult_n) as f64 * 100.0 / nf,
+            species_clustered: self.species_clusters(2),
             max_cells,
             movers,
             eyes,
@@ -2688,7 +2758,17 @@ pub struct WorldStats {
 #[derive(Debug, Default, Clone)]
 pub struct OrgStats {
     pub count: usize,
+    /// 全体平均体型。**注意：被 1 格的芽稀释**（实测芽占 47%），
+    /// 要"长成的身体多大"看 `avg_cells_adult`。
     pub avg_cells: f64,
+    /// **成体**平均体型（批次 32）。这是"长成的身体多大"的正确读数。
+    pub avg_cells_adult: f64,
+    /// 芽（`growth_plan` 还在）占全体的百分比。芽占比**随参数变**，
+    /// 所以跨配置比 `avg_cells` 时必须把它一起看，否则量的是芽的多少。
+    pub buds_pct: f64,
+    /// **聚类物种数**（构成距离 ≤ `kin_distance`，个体数 ≥ 2）。
+    /// 和 `species.alive_count`（精确指纹）是两个口径，前者才是"多少种形态"。
+    pub species_clustered: usize,
     pub max_cells: usize,
     pub movers: usize,
     pub eyes: usize,
@@ -3667,6 +3747,107 @@ mod tests {
             (w2.organisms[vi2].energy - 4.9).abs() < 1e-9,
             "混养体不该拿到专精奖励，实测剩 {}",
             w2.organisms[vi2].energy
+        );
+    }
+
+    // ── 批次 32：物种聚类与构成判据 ──
+
+    /// 同构成的两个身体算一个物种，构成差得远的分开。
+    #[test]
+    fn species_clusters_groups_similar_bodies() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+
+        for (col, cells) in [
+            (2, vec![(ct::PRODUCER, 0, 0), (ct::MOUTH, 0, 1)]),
+            (5, vec![(ct::PRODUCER, 0, 0), (ct::MOUTH, 0, 1)]),
+            // 位置换了，构成一样 → 还是同一种
+            (8, vec![(ct::PRODUCER, 0, 0), (ct::MOUTH, 1, 0)]),
+            // 只有一格生产者 → 完全不同的一种
+            (10, vec![(ct::PRODUCER, 0, 0)]),
+        ] {
+            let mut o = Organism::new(&w.config, &mut rng, &w.grid, col, 3);
+            for (t, dx, dy) in cells {
+                o.anatomy.add_cell(t, dx, dy, 0);
+            }
+            o.anatomy.recompute();
+            w.add_organism(o);
+        }
+        assert_eq!(
+            w.species_clusters(1),
+            2,
+            "三个「生产者+嘴」（摆法不同）算一种，单独的 1 格生产者算另一种"
+        );
+        // 精确指纹是另一个口径：同构成不同摆法也算不同指纹
+        assert_eq!(
+            w.species.map.len(),
+            3,
+            "指纹口径会把「嘴在右边」和「嘴在下边」算成两个物种"
+        );
+    }
+
+    /// `kin_by_species` 打开后，芽按**它要长成的蓝图**判亲缘——母子算同种。
+    ///
+    /// 这是批次 24 那个「已知脆弱点」的直接修补：指纹判据下母子差一格就是异种。
+    #[test]
+    fn kin_by_species_treats_a_bud_as_family() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 12;
+        cfg.world.rows = 12;
+        cfg.life.predator_specialization = 1.0;
+        cfg.life.bite_rate = 0.1;
+        cfg.life.bite_efficiency = 1.0;
+        cfg.life.kin_bite_penalty = 0.5;
+        cfg.life.kin_by_species = true;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+
+        let mut mom = Organism::new(&w.config, &mut rng, &w.grid, 3, 3);
+        mom.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        mom.anatomy.add_cell(ct::PRODUCER, 0, 1, 0);
+        mom.anatomy.recompute();
+        let mid = w.add_organism(mom);
+        let plan = w.organisms[w.organism_index(mid).unwrap()].anatomy.clone();
+
+        // 芽：anatomy 只有 1 格，蓝图是母体那一份
+        let mut bud = Organism::new(&w.config, &mut rng, &w.grid, 4, 3);
+        bud.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
+        bud.anatomy.recompute();
+        bud.growth_plan = Some(plan);
+        bud.energy = 1.0;
+        let bid = w.add_organism(bud);
+        let bi = w.organism_index(bid).unwrap();
+
+        let mi = w.organism_index(mid).unwrap();
+        let cell = w.organisms[mi].anatomy.cells[0];
+        w.run_cell_function(mi, cell);
+
+        assert!(
+            (w.organisms[bi].energy - 0.95).abs() < 1e-9,
+            "芽应该被当成亲缘（抽 0.05 而不是 0.1），实测剩 {}",
+            w.organisms[bi].energy
+        );
+    }
+
+    /// `kin_by_species = false`（默认）时行为必须和批次 31 逐位相同：只看指纹。
+    #[test]
+    fn kin_by_species_off_keeps_fingerprint_rule() {
+        let (mut w, pi, vi) = predator_and_prey(&[(ct::MOUTH, 0, 0)], &[(ct::PRODUCER, 0, 0)]);
+        w.config.life.bite_rate = 0.1;
+        w.config.life.bite_efficiency = 1.0;
+        w.config.life.kin_bite_penalty = 0.5;
+        w.config.life.kin_by_species = false;
+        w.organisms[vi].energy = 5.0;
+        bite_once(&mut w, pi);
+        assert!(
+            (w.organisms[vi].energy - 4.9).abs() < 1e-9,
+            "不同指纹不该打折，实测剩 {}",
+            w.organisms[vi].energy
         );
     }
 

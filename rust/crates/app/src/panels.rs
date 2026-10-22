@@ -34,6 +34,12 @@ pub struct Sample {
     pub bite: f32,
     /// 收入以**母体供养**为主的个体占比（%）
     pub gift: f32,
+    /// **成体**平均体型（格）。批次 32：`body` 被 1 格的芽稀释，
+    /// 实测芽占 47%，所以「长成的身体多大」必须单画一条。
+    pub body_adult: f32,
+    /// **聚类物种数**（构成距离 ≤ `species_distance`）。批次 32：
+    /// `species` 是精确指纹（变异一格就换种），数的是结构变体累计。
+    pub species_clustered: f32,
 }
 
 /// 历史点上限。1200 个点 × 每条 36 字节 ≈ 43 KB，可以忽略；
@@ -56,7 +62,7 @@ pub struct Panels {
     /// 神经网络图是否画全部权重（默认只画强连接）
     pub brain_show_all: bool,
     /// 曲线：每个指标是否显示（顺序见 `chart::METRICS`）
-    pub chart_on: [bool; 9],
+    pub chart_on: [bool; 11],
     /// 曲线：视图窗口，单位是**采样点下标**（不是 tick）。`None` = 全览
     pub chart_view: Option<(f32, f32)>,
     /// 曲线：新采样进来时视图自动跟到最右
@@ -91,7 +97,7 @@ impl Default for Panels {
             brain_show_all: false,
             // 前 3 项（种群 / 食物 / 存活物种）默认开；收入三线默认关——
             // 它们和"存活物种"抢同一条 Y 轴，一起开会让图太挤
-            chart_on: [true, true, true, false, false, false, false, false, false],
+            chart_on: [true, true, true, false, false, false, false, false, false, false, false],
             chart_view: None,
             chart_follow: true,
             sample_interval: 20,
@@ -181,6 +187,8 @@ impl Panels {
             // JS 版（main.js:431 / ui/Stats.js:100）一直用的是 aliveCount，这里是移植时写错。
             species: world.species.alive_count as f32,
             body: org.avg_cells as f32,
+            body_adult: org.avg_cells_adult as f32,
+            species_clustered: org.species_clustered as f32,
             mutability: org.avg_mutability as f32,
             age: org.avg_age as f32,
             // 收入来源分布（批次 22.1）。下标见 `Income::slot`。

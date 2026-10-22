@@ -870,10 +870,48 @@ pub fn draw(
                      打开之后捕食压力才会落到**别的物种**身上，\n\
                      红皇后 / 军备竞赛才有舞台。\n\
                      注意：判据是身体蓝图的指纹，变异一次就换种，\n\
-                     所以母子可能被判成不同种——这一层保护会漏。",
+                     所以母子可能被判成不同种——判据见下面的「同种按物种判」。",
                 );
                 if (kin - before_kin).abs() > 1e-9 {
                     cfg.life.kin_bite_penalty = kin;
+                }
+                // ── 同种判据（批次 32）──
+                //
+                // 指纹判据「变异一格就换种」，母子经常被判成异种——那正好是
+                // 最该保护的一层。切成构成聚类之后母子/近亲都算得上，
+                // 但口径**粗得多**（同一构成可能有几十个互不相干的个体），
+                // 所以默认关：这是行为改动，不是口径改动。
+                let mut kinspec = cfg.life.kin_by_species;
+                if ui
+                    .checkbox(&mut kinspec, "同种按物种判")
+                    .on_hover_text(
+                        "勾上：同种相残按**身体构成聚类**判（差得不多就算同种），母子、近亲都保护得到。
+                         不勾（默认）：按身体蓝图指纹判——变异一格就换种，母子经常被判成异种。
+                         注意：聚类口径粗得多，切过去会让「同种相残」从少数情况变成多数情况，
+                         捕食可能整体塌掉。建议先看曲线再决定。",
+                    )
+                    .changed()
+                {
+                    cfg.life.kin_by_species = kinspec;
+                }
+                if cfg.life.kin_by_species {
+                    let before_sd = cfg.life.species_distance;
+                    let mut sd = before_sd;
+                    ui.add(
+                        egui::Slider::new(&mut sd, 0.02..=0.60)
+                            .text("物种阈值")
+                            .step_by(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "两个身体的构成距离 ≤ 本值就算同一物种（默认 0.15）。
+                         距离是 Jaccard 比例，和体型无关：14 格多一格 ≈ 0.07（同种）、
+                         1 格嘴 vs 1 格生产者 = 1.0（完全不同的东西）。
+                         这个阈值同时也是曲线里「物种(聚类)」那条线的判据。",
+                    );
+                    if (sd - before_sd).abs() > 1e-9 {
+                        cfg.life.species_distance = sd;
+                    }
                 }
                 // ── 捕食专精奖励（批次 31）──
                 //
