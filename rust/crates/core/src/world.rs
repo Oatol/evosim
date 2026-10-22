@@ -181,6 +181,12 @@ pub struct World {
     /// 有了它，[`World::energy_audit`] 才能给出「存量 − 注入」这个恒为 0 的残差。
     pub energy_injected: f64,
 
+    /// **地力**（批次 35）：每格 0~255。光合细胞吃它，空格按 `soil_recover` 回。
+    ///
+    /// 只在 `soil_deplete > 0` 时有意义；关掉时这张表一直是 255，
+    /// 不参与任何计算（连恢复循环都不跑）。
+    pub soil: Vec<u8>,
+
     /// 光场需要重算吗。
     ///
     /// 光场是「地形 + 光源 + 天空光」的纯函数，这三样都变得远比 60 Hz 慢，
@@ -210,6 +216,7 @@ impl World {
             terrain: HashMap::new(),
             species: SpeciesRegistry::default(),
             fields: Fields::new(len),
+            soil: vec![255; len],
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
             heat_pool: 0.0,
@@ -711,6 +718,7 @@ impl World {
         // ── 环境更新 ──
         self.apply_terrain_tick();
         self.apply_food_decay();
+        self.apply_soil_recover();
         self.apply_food_drop();
 
         // ── 物种统计 ──
@@ -822,12 +830,21 @@ impl World {
             grid,
             config,
             organisms,
+            soil,
             ..
         } = self;
-        organisms
-            .par_iter_mut()
-            .filter(|o| o.alive)
-            .for_each(|o| o.think(grid, config));
+        let soil_on = config.life.soil_deplete > 0;
+        organisms.par_iter_mut().filter(|o| o.alive).for_each(|o| {
+            // 批次 36：把"脚下地力"喂给大脑。关掉地力时恒为 1.0（逐位等于旧行为）。
+            let s = if soil_on {
+                grid.index(o.col, o.row)
+                    .map(|i| soil[i] as f64 / 255.0)
+                    .unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            o.think(grid, config, s)
+        });
     }
 
     /// 单个体版（测试与串行对照用）
@@ -838,7 +855,14 @@ impl World {
             organisms,
             ..
         } = self;
-        organisms[i].think(grid, config);
+        let s = if config.life.soil_deplete > 0 {
+            grid.index(organisms[i].col, organisms[i].row)
+                .map(|k| self.soil[k] as f64 / 255.0)
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        organisms[i].think(grid, config, s);
     }
 
     /// 阶段 B：结算
@@ -990,6 +1014,17 @@ impl World {
             ((base as f64) * m).round() as i32
         } else {
             base
+        }
+    }
+
+    /// 地力恢复（批次 35）。关掉时直接返回，连循环都不跑。
+    pub fn apply_soil_recover(&mut self) {
+        if self.config.life.soil_deplete == 0 || self.config.life.soil_recover == 0 {
+            return;
+        }
+        let r = self.config.life.soil_recover;
+        for v in self.soil.iter_mut() {
+            *v = v.saturating_add(r);
         }
     }
 
@@ -1613,11 +1648,27 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 // 注意：**不要再乘 `sun_intensity`**：`lit` 已经是最终光强，
                 // 天空光和点光源都在里面了（`sun_intensity` 只决定天空光注入多亮）。
                 // 乘第二次的后果是「关掉天空光 → 点光源也一起熄」，实测直接把生态打死。
-                let gain = lit
+                let mut gain = lit
                     * self.config.life.photosynthesis_rate
                     * self.config.attr(cell.type_id, AttrField::ProdMult);
                 if gain <= 0.0 {
                     return;
+                }
+                // ── 地力（批次 35）──
+                //
+                // 光合从**脚下这一格**抽地力：同一格连着吃会越来越瘦，换一块生地
+                // 就吃满额。这是"移动"第一次有收益的地方——批次 33 量出来移动细胞
+                // 只占 0.1%，根因就是"站着不动免费"。
+                //
+                // 乘在 `gain` 上而不是改 `photosynthesis_rate`：这样点光源、遮挡、
+                // 光照分带那些逻辑全都不动，只是在最后乘一个 0.25~1 的系数。
+                if self.config.life.soil_deplete > 0 {
+                    if let Some(si) = self.grid.index(col, row) {
+                        let f = self.soil[si] as f64 / 255.0;
+                        let floor = self.config.life.soil_floor.clamp(0.0, 1.0);
+                        gain *= floor + (1.0 - floor) * f;
+                        self.soil[si] = self.soil[si].saturating_sub(self.config.life.soil_deplete);
+                    }
                 }
                 // 容量上限：光合直充体内之后必须有，否则能量无限膨胀。
                 // **注入记的是 `gain` 全额**，装不下的那部分由 `add_energy`
@@ -2490,6 +2541,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         self.organisms.clear();
         self.id_index.clear();
         self.grid = Grid::new(cols, rows, self.config.world.wrap_edges);
+        self.soil = vec![255; self.grid.len];
         self.fields.resize(self.grid.len);
         self.fields.clear();
         self.light.resize(cols, rows);
@@ -3766,6 +3818,66 @@ mod tests {
             "混养体不该拿到专精奖励，实测剩 {}",
             w2.organisms[vi2].energy
         );
+    }
+
+    // ── 批次 35：地力耗竭 ──
+
+    /// 光合抽地力、恢复加地力。
+    #[test]
+    fn soil_depletes_under_a_producer_and_recovers() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.soil_deplete = 8;
+        w.config.life.soil_recover = 1;
+        let i = w.organism_index(id).unwrap();
+        let idx = w.grid.index(w.organisms[i].col, w.organisms[i].row).unwrap();
+        assert_eq!(w.soil[idx], 255, "新世界地力应该是满的");
+
+        let cell = w.organisms[i].anatomy.cells[0];
+        w.run_cell_function(i, cell);
+        assert_eq!(w.soil[idx], 247, "光合应该抽走 8 点地力");
+
+        w.apply_soil_recover();
+        assert_eq!(w.soil[idx], 248, "恢复 1 点");
+    }
+
+    /// 地力耗尽时产量掉到 `soil_floor`——这是「移动」的收益来源。
+    #[test]
+    fn depleted_soil_cuts_photosynthesis_to_the_floor() {
+        let make = |soil: u8| {
+            let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+            w.config.life.soil_deplete = 8;
+            w.config.life.soil_floor = 0.25;
+            let i = w.organism_index(id).unwrap();
+            let idx = w.grid.index(w.organisms[i].col, w.organisms[i].row).unwrap();
+            w.soil[idx] = soil;
+            let cell = w.organisms[i].anatomy.cells[0];
+            w.run_cell_function(i, cell);
+            (w.organisms[i].gain_photo, w.organisms[i].energy)
+        };
+        let (full, e_full) = make(255);
+        let (dry, e_dry) = make(0);
+        assert!(full > 0.0, "满地下应该有产出（检查 tiny_world 的光照），实测 {}", full);
+        let ratio = dry / full;
+        assert!(
+            (ratio - 0.25).abs() < 0.02,
+            "地力 0 时应该只剩 25%，实测 {:.3}（满 {} / 干 {}）",
+            ratio,
+            e_full,
+            e_dry
+        );
+    }
+
+    /// `soil_deplete = 0`（默认）时地力一动不动，逐位等于旧行为。
+    #[test]
+    fn soil_off_means_no_change() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        assert_eq!(w.config.life.soil_deplete, 0, "默认应该是关的");
+        let i = w.organism_index(id).unwrap();
+        let idx = w.grid.index(w.organisms[i].col, w.organisms[i].row).unwrap();
+        let cell = w.organisms[i].anatomy.cells[0];
+        w.run_cell_function(i, cell);
+        w.apply_soil_recover();
+        assert_eq!(w.soil[idx], 255, "关掉时地力不该变");
     }
 
     // ── 批次 33 / 34：大脑消融 + 捕食者抗饿 ──

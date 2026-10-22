@@ -420,7 +420,8 @@ impl Organism {
     // ────────────────────────────── 阶段 A：决策 ──────────────────────────────
 
     /// 感知 → 决策。**只读世界**，不写任何格子（可以并行）。
-    pub fn think(&mut self, grid: &Grid, cfg: &Config) {
+    /// `soil`：脚下这一格的地力（0~1）。地力关闭时传 1.0（= 旧行为）。
+    pub fn think(&mut self, grid: &Grid, cfg: &Config, soil: f64) {
         self.plan_turn = false;
 
         let has_mover = self.anatomy.has(Flags::MOVER);
@@ -436,7 +437,7 @@ impl Organism {
                 id: self.id,
                 energy_ratio,
                 age_ratio,
-                has_mover,
+                soil,
             };
             sensors::sense(&view, grid, cfg, &mut inputs);
         }

@@ -82,6 +82,8 @@ struct Row {
     body_adult: f64,
     /// 有运动细胞的个体占比（%）。大脑只在这部分个体上起作用。
     movers: f64,
+    /// 全图平均地力（0~100%）。关掉地力时恒为 100。
+    soil: f64,
     /// **聚类物种数**（构成距离 ≤ `kin_distance`，个体数 ≥ 2）。
     /// `species` 那一列是精确指纹——变异一格就换一个，数的是结构变体累计。
     species_clustered: f64,
@@ -125,6 +127,10 @@ fn run(
     kinspec: bool,
     brain: u8,
     starve: f64,
+    produce: bool,
+    soil: u8,
+    soilr: u8,
+    soilf: f64,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -189,6 +195,12 @@ fn run(
     cfg.life.brain_ablation = brain;
     // `starve=M`：纯捕食者的抗饿倍率（1.0 = 关闭）
     cfg.life.predator_starve_mult = starve;
+    // `produce`：有运动细胞也能光合
+    cfg.life.movers_can_produce = produce;
+    // `soil=D` / `soilr=R` / `soilf=F`：地力耗竭
+    cfg.life.soil_deplete = soil;
+    cfg.life.soil_recover = soilr;
+    cfg.life.soil_floor = soilf;
     // `cave=N`：世界生成时挖几条带顶隧道（0 = 关闭）
     cfg.world.cave_count = cave;
     // `cd=N`：繁殖失败后的冷却 tick（0 = 关闭）
@@ -362,6 +374,12 @@ fn run(
         body_adult,
         species_clustered: st.species_clustered as f64,
         movers: st.movers as f64 * 100.0 / n as f64,
+        soil: if w.soil.is_empty() {
+            0.0
+        } else {
+            w.soil.iter().map(|&v| v as f64).sum::<f64>() * 100.0
+                / (255.0 * w.soil.len() as f64)
+        },
         occ: {
             let lit = w.light.level.iter().filter(|&&v| v > 0).count().max(1);
             let occ = w.grid.owners.iter().filter(|&&o| o >= 0).count();
@@ -458,6 +476,10 @@ fn run_seeds(
     kinspec: bool,
     brain: u8,
     starve: f64,
+    produce: bool,
+    soil: u8,
+    soilr: u8,
+    soilf: f64,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -479,6 +501,7 @@ fn run_seeds(
         body_adult: 0.0,
         species_clustered: 0.0,
         movers: 0.0,
+        soil: 0.0,
         pred_pure: 0.0,
         pred_mix: 0.0,
         occ: 0.0,
@@ -496,7 +519,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -514,6 +537,7 @@ fn run_seeds(
         acc.body_adult += r.body_adult;
         acc.species_clustered += r.species_clustered;
         acc.movers += r.movers;
+        acc.soil += r.soil;
         acc.pred_pure += r.pred_pure;
         acc.pred_mix += r.pred_mix;
         acc.occ += r.occ;
@@ -551,6 +575,7 @@ fn run_seeds(
     acc.body_adult /= n;
     acc.species_clustered /= n;
     acc.movers /= n;
+    acc.soil /= n;
     acc.pred_pure /= n;
     acc.pred_mix /= n;
     acc.occ /= n;
@@ -697,6 +722,21 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("starve=").and_then(|v| v.parse().ok()))
         .unwrap_or(Config::default().life.predator_starve_mult);
+    // `produce`：有运动细胞也能光合（默认不能）
+    let produce = args.iter().any(|a| a == "produce");
+    // `soil=D` / `soilr=R` / `soilf=F`：地力耗竭（D=0 关闭）
+    let soil: u8 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("soil=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.soil_deplete);
+    let soilr: u8 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("soilr=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.soil_recover);
+    let soilf: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("soilf=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.soil_floor);
     // `cave=N`：洞穴数量（0 = 关闭）
     let cave: i32 = args
         .iter()
@@ -796,9 +836,9 @@ fn main() {
     // ── 第一轮：只动指数 p，不限体型 ──
     println!("【1】繁殖成本指数 p（max_body_cells = 0，不限）");
     println!(
-        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>8}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>7}  {:>6}",
+        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>8}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>7}  {:>6}  {:>6}",
         "p", "个体", "平均体型", "最大体型", "存活种", "有光占用", "异养%", "嘴%", "杀手%",
-        "成体体型", "芽%", "物种(聚类)", "移动%"
+        "成体体型", "芽%", "物种(聚类)", "移动%", "地力%"
     );
     // 往 1 以下扫是重点：p < 1 让大体型便宜，才有向上的选择压力。
     // 只留 4 个点是为了控功耗——这台机器长时间满载会过热（clock_watchdog_timeout），
@@ -820,12 +860,12 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
         );
         println!(
-            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}",
+            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
             p, r.pop, r.body_avg, r.body_max, r.species, r.occ, r.hetero, r.mouth, r.killer,
-            r.body_adult, r.buds, r.species_clustered, r.movers
+            r.body_adult, r.buds, r.species_clustered, r.movers, r.soil
         );
         rows.push((p, r));
     }
@@ -959,7 +999,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

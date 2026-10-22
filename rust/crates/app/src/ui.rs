@@ -762,6 +762,69 @@ pub fn draw(
                 if (photo - before_photo).abs() > 1e-9 {
                     cfg.life.photosynthesis_rate = photo;
                 }
+                // ── 地力耗竭（批次 35）──
+                //
+                // 批次 33 的结论：移动没有收益 → 移动细胞 0.1% → 大脑是装饰品。
+                // 地力把"站着不动"从免费变成有代价：同一格连着光合会越来越瘦。
+                // **必须配合「运动可光合」**：不然能动的个体根本不能光合，换地方也没意义。
+                let before_soil = cfg.life.soil_deplete;
+                let mut soil = before_soil as f64;
+                ui.add(
+                    egui::Slider::new(&mut soil, 0.0..=16.0)
+                        .text("地力耗竭")
+                        .step_by(1.0)
+                        .fixed_decimals(0),
+                )
+                .on_hover_text(
+                    "光合细胞每 tick 从脚下那一格抽走多少地力（0 = 关闭）。
+                     255 ÷ 本值 = 一块生地能被吃多少 tick（8 ≈ 32 tick 见底）。
+                     这是「移动」唯一的收益来源——不走，产量就掉到「地力下限」。
+                     注意：调到 8 以上容易把生态打死（实测 8 直接灭绝）。",
+                );
+                if (soil - before_soil as f64).abs() > 0.5 {
+                    cfg.life.soil_deplete = soil.round().max(0.0) as u8;
+                }
+                if cfg.life.soil_deplete > 0 {
+                    let before_sr = cfg.life.soil_recover;
+                    let mut sr = before_sr as f64;
+                    ui.add(
+                        egui::Slider::new(&mut sr, 0.0..=8.0)
+                            .text("地力恢复")
+                            .step_by(1.0)
+                            .fixed_decimals(0),
+                    )
+                    .on_hover_text("每 tick 全图每格回多少地力。恢复远慢于消耗，换地方才有价值。");
+                    if (sr - before_sr as f64).abs() > 0.5 {
+                        cfg.life.soil_recover = sr.round().max(0.0) as u8;
+                    }
+                    let before_sf = cfg.life.soil_floor;
+                    let mut sf = before_sf;
+                    ui.add(
+                        egui::Slider::new(&mut sf, 0.0..=1.0)
+                            .text("地力下限")
+                            .step_by(0.05)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "地力耗尽时产量还剩几成（默认 0.25）。
+                         不能是 0——全枯会让「停在原地」等于必死，生态直接崩。",
+                    );
+                    if (sf - before_sf).abs() > 1e-9 {
+                        cfg.life.soil_floor = sf;
+                    }
+                }
+                let mut mcp = cfg.life.movers_can_produce;
+                if ui
+                    .checkbox(&mut mcp, "运动可光合")
+                    .on_hover_text(
+                        "默认关：有运动细胞就完全不能光合，世界被切成「光合不能动 / 能动不能光合」两半。
+                         批次 33 量到移动细胞只占 0.1%——因为最划算的「移动 + 光合」被禁掉了。
+                         打开后配合「地力耗竭」，移动第一次能靠换地方挣钱（实测 0.1% → 17%）。",
+                    )
+                    .changed()
+                {
+                    cfg.life.movers_can_produce = mcp;
+                }
 
                 // 遮挡：给「光合生物挤成一道墙」定价。
                 //

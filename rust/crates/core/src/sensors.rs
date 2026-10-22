@@ -3,8 +3,15 @@
 //! [ 0..35]  视觉：4 个相对方向 × 9 维（8 类型 one-hot + 1 距离）
 //! [36]      能量比例
 //! [37]      年龄比例
-//! [38]      会移动
+//! [38]      **脚下地力**（批次 36；地力关闭时恒为 1.0）
 //! [39]      偏置 1
+//!
+//! `[38]` 原本是「会移动」——但 `think()` 对没有运动细胞的个体**直接返回**，
+//! 所以那个位在任何真正用到它的个体身上恒为 1.0，是一维**死信息**。
+//! 批次 35 发现"地力耗竭后随机乱走反而比演化出来的大脑更好"，根因正是
+//! **大脑看不见地力**（40 维里没有这个通道）。于是把这一维换成地力：
+//! 维度不变、大脑形状不变、旧存档不会错位，而地力关闭时它恒为 1.0，
+//! **逐位等于旧行为**。
 
 use crate::anatomy::{rotate_col, rotate_row, BodyCell};
 use crate::cell_type::{self, ct, DIR_VECTORS, VISION_SLOT, VISIBLE_CELL_TYPES};
@@ -27,7 +34,8 @@ pub struct SenseView<'a> {
     pub id: u32,
     pub energy_ratio: f64,
     pub age_ratio: f64,
-    pub has_mover: bool,
+    /// 脚下这一格的地力（0~1）。地力关闭时传 1.0。
+    pub soil: f64,
 }
 
 /// 填充输入向量。就地改写 `out`（长度 = SENSE_DIM）。
@@ -115,7 +123,7 @@ pub fn sense(v: &SenseView, grid: &Grid, cfg: &Config, out: &mut [f32]) {
         out[STATE_BASE + 1] = v.age_ratio as f32;
     }
     if out.len() > STATE_BASE + 2 {
-        out[STATE_BASE + 2] = if v.has_mover { 1.0 } else { 0.0 };
+        out[STATE_BASE + 2] = v.soil as f32;
     }
     if out.len() > STATE_BASE + 3 {
         out[STATE_BASE + 3] = 1.0;
@@ -134,7 +142,7 @@ pub fn input_labels() -> Vec<String> {
     }
     labels.push("能量".into());
     labels.push("年龄".into());
-    labels.push("会移动".into());
+    labels.push("地力".into());
     labels.push("偏置".into());
     labels
 }

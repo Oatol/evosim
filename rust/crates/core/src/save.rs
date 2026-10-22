@@ -98,7 +98,9 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v28：`LifeCfg` 加了 `kin_by_species` / `species_distance`（批次 32 口径校准）。
 /// v29：`LifeCfg` 加了 `brain_ablation`（批次 33 大脑消融）。
 /// v30：`LifeCfg` 加了 `predator_starve_mult`（批次 34 捕食者抗饿）。
-pub const VERSION: u32 = 30;
+/// v31：`LifeCfg` 加了 `soil_deplete` / `soil_recover` / `soil_floor`，
+/// `World` 加了 `soil`，`SaveFile` 加了 `soil`（批次 35 地力耗竭）。
+pub const VERSION: u32 = 31;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
@@ -134,6 +136,9 @@ pub struct SaveFile {
     pub energy_injected: f64,
     /// 还没孵化的卵（批次 27）。`HashMap` 无序，摊成 `Vec` 存。
     pub eggs: Vec<(usize, Egg)>,
+    /// 地力场（批次 35）。关掉地力时是全 255，但照样存——不然读档后
+    /// 打开开关会看到一片"满血"的假象。
+    pub soil: Vec<u8>,
 }
 
 /// 只读文件头就能拿到的摘要（世界窗口列存档用）
@@ -207,6 +212,7 @@ pub fn encode(world: &World) -> Vec<u8> {
         energy_wasted: world.energy_wasted,
         energy_injected: world.energy_injected,
         eggs: world.eggs.iter().map(|(&k, v)| (k, v.clone())).collect(),
+        soil: world.soil.clone(),
     };
 
     let body = bincode::serialize(&save).expect("存档序列化失败");
@@ -299,6 +305,7 @@ fn into_world(save: SaveFile) -> World {
         energy_wasted,
         energy_injected,
         eggs,
+        soil,
     } = save;
 
     // 先按 config 建一个空世界（拿到尺寸正确的索引表），随后整体覆盖
@@ -336,6 +343,9 @@ fn into_world(save: SaveFile) -> World {
     world.energy_wasted = energy_wasted;
     world.energy_injected = energy_injected;
     world.eggs = eggs.into_iter().collect();
+    if soil.len() == world.grid.len {
+        world.soil = soil;
+    }
 
     world
 }
