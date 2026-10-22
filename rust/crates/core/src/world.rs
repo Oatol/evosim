@@ -1083,7 +1083,8 @@ impl World {
         }
     }
 
-    fn attempt_move(&mut self, i: usize) -> bool {
+    /// 一步移动（不含冰的滑行）。拆出来是为了让滑行能复用完整的合法性检查。
+    fn try_step(&mut self, i: usize) -> bool {
         let (nc, nr) = self.organisms[i].step_target();
         let rot = self.organisms[i].rotation;
         if !self.organisms[i].is_clear(&self.grid, &self.config, nc, nr, rot) {
@@ -1109,6 +1110,38 @@ impl World {
             self.apply_terrain_enter(i, dest_type);
         }
         true
+    }
+
+    /// 移动 + **冰面滑行**（批次 43）。
+    ///
+    /// 进入冰格之后顺着**同一方向**再走一格，最多滑 2 格（防止环形边界上无限绕圈）。
+    /// 滑行的那一步照样走完整的 `is_clear` 检查：撞墙就停，不会穿墙。
+    ///
+    /// 这是这个模拟里第一种"**这一步的落点 ≠ 这一步的目标**"的地形。
+    /// 它让 `step_target()` 从一个"答案"变成一个"中间量"——预判两格第一次有价值。
+    fn attempt_move(&mut self, i: usize) -> bool {
+        if !self.try_step(i) {
+            return false;
+        }
+        if !self.config.terrain.ice_slide {
+            return true;
+        }
+        let mut slid = 0;
+        while slid < 2 && self.organism_on_ice(i) {
+            if !self.try_step(i) {
+                break;
+            }
+            slid += 1;
+        }
+        true
+    }
+
+    /// 脚下这一格是不是冰。冰的滑行靠它判断"还要不要继续滑"。
+    fn organism_on_ice(&self, i: usize) -> bool {
+        self.grid
+            .index(self.organisms[i].col, self.organisms[i].row)
+            .map(|k| self.grid.floor[k] == ct::ICE)
+            .unwrap_or(false)
     }
 
     fn attempt_rotate(&mut self, i: usize) -> bool {
@@ -1139,6 +1172,25 @@ impl World {
                     self.harm_organism(id, dmg, None);
                 }
             }
+            EnterFx::Slow => {
+                let cost = self.config.terrain.water_move_cost;
+                if cost > 0.0 {
+                    // 和水/沼泽一样：耗掉的能量要进热池，否则能量账每走一步就漏一笔。
+                    let paid: f64;
+                    {
+                        let org = &mut self.organisms[i];
+                        paid = cost.min(org.energy.max(0.0));
+                        org.energy -= cost;
+                        if org.energy < 0.0 {
+                            org.energy = 0.0;
+                        }
+                    }
+                    self.heat_pool += paid;
+                }
+            }
+            // 冰的滑行不在这里做：它要"再走一步"，而这一步必须回到 `attempt_move` 里
+            // 走完整的 `is_clear` 检查。见 `attempt_move` 的滑行循环。
+            EnterFx::Slide => {}
             EnterFx::Bog => {
                 let cost = self.config.terrain.swamp_move_cost;
                 if cost > 0.0 {
@@ -2635,6 +2687,14 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     }
 
     /// 重算光场（改了光源或天空光之后调）。
+    /// 立刻重算光场（批次 43：重挖洞穴之后要调）。
+    ///
+    /// 和 `refresh_light` 的区别只是可见性——`worldgen` 里改完地形要能马上看到效果，
+    /// 不然洞顶的墙要等下一 tick 才挡光，画面上会闪一下"挖了个假洞"。
+    pub fn refresh_light_now(&mut self) {
+        self.refresh_light();
+    }
+
     fn refresh_light(&mut self) {
         let sky = self.sky_level();
         let patch = self.patchiness();
@@ -3970,6 +4030,104 @@ mod tests {
             w.organisms[i].plan_turn,
             "转身输出最强时应该产生转身计划"
         );
+    }
+
+    // ── 批次 43：水与冰 ──
+
+    /// 水：踏入多耗一份能量，而且那笔能量进热池（否则能量账每走一步就漏一笔）。
+    #[test]
+    fn water_charges_extra_energy_on_enter() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        w.config.terrain.water_move_cost = 0.3;
+        let i = w.organism_index(id).unwrap();
+        let (tc, tr) = w.organisms[i].step_target();
+        let ti = w.grid.index(tc, tr).unwrap();
+        w.set_cell_at(ti, ct::WATER, -1);
+        w.organisms[i].energy = 5.0;
+        let heat_before = w.heat_pool;
+
+        assert!(w.attempt_move(i), "水是可穿过的，不该挡住移动");
+        assert!(
+            (w.organisms[i].energy - 4.7).abs() < 1e-9,
+            "涉水应该多扣 0.3，实测剩 {}",
+            w.organisms[i].energy
+        );
+        assert!(w.heat_pool > heat_before, "耗掉的能量要进热池，不能凭空消失");
+    }
+
+    /// 冰：踏入后顺着同一方向再滑一格——这一步不改能量，改的是**位置**。
+    #[test]
+    fn ice_slides_one_extra_cell() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        let i = w.organism_index(id).unwrap();
+        let (c0, r0) = (w.organisms[i].col, w.organisms[i].row);
+        let (tc, tr) = w.organisms[i].step_target();
+        let ti = w.grid.index(tc, tr).unwrap();
+        w.set_cell_at(ti, ct::ICE, -1);
+
+        assert!(w.attempt_move(i));
+        let (c1, r1) = (w.organisms[i].col, w.organisms[i].row);
+        assert_ne!((c1, r1), (c0, r0), "应该至少走了一格");
+        assert_ne!((c1, r1), (tc, tr), "踩到冰应该再滑一格，不该停在冰上");
+        // 滑行的方向必须是原方向
+        assert_eq!(
+            (c1 - c0, r1 - r0),
+            ((tc - c0) * 2, (tr - r0) * 2),
+            "滑行要顺着原方向"
+        );
+    }
+
+    /// `ice_slide = false` 时冰只是个白格子：走一格就停。
+    #[test]
+    fn ice_without_slide_stops_immediately() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        w.config.terrain.ice_slide = false;
+        let i = w.organism_index(id).unwrap();
+        let (tc, tr) = w.organisms[i].step_target();
+        let ti = w.grid.index(tc, tr).unwrap();
+        w.set_cell_at(ti, ct::ICE, -1);
+
+        assert!(w.attempt_move(i));
+        assert_eq!(
+            (w.organisms[i].col, w.organisms[i].row),
+            (tc, tr),
+            "关掉滑行之后应该正好停在冰上"
+        );
+    }
+
+    /// 重挖洞穴**不能**把有生物占用的格子碾成墙——那会让身体和格子对不上。
+    #[test]
+    fn recarve_caves_skips_occupied_cells() {
+        let mut cfg = Config::default();
+        cfg.world.cols = 48;
+        cfg.world.rows = 48;
+        cfg.world.cave_count = 2;
+        let mut w = World::new(cfg, Rng::new(1));
+        crate::worldgen::generate_demo_world(&mut w, 1.0, 1.0);
+
+        let mut rng = Rng::new(7);
+        let mut org = Organism::new(&w.config, &mut rng, &w.grid, 24, 24);
+        org.anatomy.add_cell(ct::PRODUCER, 1, 0, 0);
+        org.anatomy.recompute();
+        let id = w.add_organism(org);
+        let i = w.organism_index(id).unwrap();
+        let cells: Vec<usize> = w.organisms[i]
+            .anatomy
+            .cells
+            .iter()
+            .filter_map(|c| w.grid.index(w.organisms[i].col + c.dx, w.organisms[i].row + c.dy))
+            .collect();
+        assert!(!cells.is_empty());
+
+        let changed = crate::worldgen::recarve_caves(&mut w, 6);
+        for idx in cells {
+            assert_eq!(
+                w.grid.owners[idx], id as i32,
+                "重挖把一只活着的生物的身体格覆盖掉了"
+            );
+        }
+        // 世界很空的时候应该真的挖出东西来（不然这个测试等于没测）
+        assert!(changed > 0, "重挖一格都没改动，说明它其实什么都没做");
     }
 
     // ── 批次 38：移动者一阶量 ──

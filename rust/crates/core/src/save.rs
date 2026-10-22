@@ -98,12 +98,14 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v28：`LifeCfg` 加了 `kin_by_species` / `species_distance`（批次 32 口径校准）。
 /// v29：`LifeCfg` 加了 `brain_ablation`（批次 33 大脑消融）。
 /// v30：`LifeCfg` 加了 `predator_starve_mult`（批次 34 捕食者抗饿）。
+/// v34：`CellDef` 加了 `WATER`（id 17）/ `ICE`（id 18），`TerrainCfg` 加了
+/// `water_move_cost` / `ice_slide`（批次 43 水与冰）。
 /// v31：`LifeCfg` 加了 `soil_deplete` / `soil_recover` / `soil_floor`，
 /// `World` 加了 `soil`，`SaveFile` 加了 `soil`（批次 35 地力耗竭）。
 /// v32：`BrainCfg` 加了 `recurrent` / `recurrent_scale`，`Brain` 加了
 /// `w_rec` / `hidden_prev`（批次 37 循环连接）。
 /// v33：`LifeCfg` 加了 `rotate_without_mover`（批次 40 无 mover 也能转身）。
-pub const VERSION: u32 = 33;
+pub const VERSION: u32 = 34;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

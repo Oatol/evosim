@@ -29,6 +29,12 @@ pub mod ct {
     /// 卵（批次 27）：母体产下的、**占一格**的中间态。孵化成 1 格芽，
     /// 在此之前可以被嘴吃掉、也可以挡路。
     pub const EGG: u8 = 16;
+
+    /// 水（批次 43）：可穿过，但**每一步都更贵**。地形版的"阻力"。
+    pub const WATER: u8 = 17;
+    /// 冰（批次 43）：可穿过，进入后**顺着原方向再滑一格**。
+    /// 唯一一种影响"位置"而不是"收支"的地形。
+    pub const ICE: u8 = 18;
 }
 
 /// 能力标志位（Anatomy 用它做派生缓存）
@@ -57,6 +63,10 @@ pub enum Behavior {
 pub enum EnterFx {
     Burn,
     Bog,
+    /// 水：踏入多耗一份能量（`TerrainCfg::water_move_cost`）。
+    Slow,
+    /// 冰：踏入后顺着原方向再滑一格。本身不花能量，改的是**位置**。
+    Slide,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,7 +149,7 @@ const fn base(id: u8, key: &'static str, name: &'static str, label: &'static str
 }
 
 /// 全部细胞类型（按 id 顺序）
-pub static CELL_DEFS: [CellDef; 17] = [
+pub static CELL_DEFS: [CellDef; 19] = [
     // 索引必须等于 id：def(id) 直接按下标取，顺序错了会拿到别人的定义
     CellDef {
         desc: "真空，生物可以自由穿过。",
@@ -383,6 +393,33 @@ pub static CELL_DEFS: [CellDef; 17] = [
         colors: [0xf9a8d4, 0xffd6ec, 0xe9a8c9],
         ..base(ct::EGG, "EGG", "egg", "卵")
     },
+    // ── 水（批次 43）──
+    //
+    // 和沼泽的分工：沼泽是"陷进去"（每步很贵），水是"阻力"（每步小贵）。
+    // 两者的生态作用完全不同——沼泽是**禁区**，水是**走廊**：
+    // 一条河不会挡住谁，只是让"绕路"和"蹚过去"第一次有了取舍。
+    CellDef {
+        desc: "可穿过，但每一步都多耗一份能量。地形的\"阻力\"，不是禁区。",
+        terrain: true,
+        passable: true,
+        enter: Some(EnterFx::Slow),
+        params: &[ParamRef::terrain(TerrainField::WaterCost)],
+        colors: [0x2f4f7a, 0x4a7fb5, 0x3a6491],
+        ..base(ct::WATER, "WATER", "water", "水")
+    },
+    // ── 冰（批次 43）──
+    //
+    // 唯一一种影响**位置**而不是收支的地形：踏入后顺着原方向再滑一格。
+    // 于是"这一步的目标"不再等于"最终落点"——**预判两步第一次有价值**，
+    // 这也是从批次 15 起一直没解决的「眼睛为什么稀有」的另一个答案。
+    CellDef {
+        desc: "可穿过。踏入后顺着原方向再滑一格——地形第一次影响「落点」而不只是收支。",
+        terrain: true,
+        passable: true,
+        enter: Some(EnterFx::Slide),
+        colors: [0xa8d8e8, 0xe8f6fb, 0xc8e8f2],
+        ..base(ct::ICE, "ICE", "ice", "冰")
+    },
 ];
 
 pub const CELL_TYPE_COUNT: usize = CELL_DEFS.len();
@@ -474,11 +511,13 @@ pub static VISIBLE_CELL_TYPES: [u8; 8] = [
 /// 画笔面板里的地形类型。**不含「空」**——擦除走专门的橡皮擦
 /// （擦地形 / 擦生物两个），否则"画空"既能擦地形又能擦生物，
 /// 两种意图混在一个笔刷里，谁都不好使。
-pub static TERRAIN_BRUSH_TYPES: [u8; 6] = [
+pub static TERRAIN_BRUSH_TYPES: [u8; 8] = [
     ct::FOOD,
     ct::WALL,
     ct::LAVA,
     ct::SWAMP,
+    ct::WATER,
+    ct::ICE,
     ct::RAD,
     ct::HUMUS,
 ];
@@ -487,7 +526,7 @@ pub static TERRAIN_BRUSH_TYPES: [u8; 6] = [
 ///
 /// 只有这 4 种在 `TerrainCfg` 里有对应字段。空 / 食物 / 墙的数值写死在模拟里，
 /// 列进参数面板等于摆一个拖了没反应的旋钮。
-pub static PARAM_TERRAIN_TYPES: [u8; 4] = [ct::LAVA, ct::SWAMP, ct::RAD, ct::HUMUS];
+pub static PARAM_TERRAIN_TYPES: [u8; 5] = [ct::LAVA, ct::SWAMP, ct::WATER, ct::RAD, ct::HUMUS];
 
 /// 有"世界级每 tick 行为"的地形
 pub static TICKING_TERRAIN_TYPES: [u8; 1] = [ct::HUMUS];

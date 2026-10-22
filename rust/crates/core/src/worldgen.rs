@@ -176,7 +176,30 @@ pub fn generate_demo_world(world: &mut World, wall_density: f64, food_density: f
 ///
 /// 每条隧道起点挖一条竖井通到地表：不然生物进不去，洞穴就只是装饰。
 /// 竖井会变成"光柱"——洞口那一小段是亮的，越往里越暗，正好是个梯度。
+/// **在已经跑起来的世界里重挖洞穴**（批次 43）。
+///
+/// 和 `carve_caves` 的唯一区别：**跳过有生物占用的格子**。
+/// 直接 `set_cell_at(WALL)` 会把站在那儿的身体格碾成墙——身体还在、格子已经不是它的了，
+/// 那只生物会带着一个"虚空的器官"继续活着（`anatomy` 与 `grid` 不一致）。
+/// 所以重挖只在空地上动土：挖出来的洞会比新建世界时少几个口子，但世界不会被挖坏。
+///
+/// 返回实际改动的格子数（0 = 世界太挤，一格都挖不动）。
+pub fn recarve_caves(world: &mut World, count: i32) -> usize {
+    let before = world.grid.types.clone();
+    carve_caves_inner(world, count, true);
+    world.refresh_light_now();
+    before
+        .iter()
+        .zip(world.grid.types.iter())
+        .filter(|(a, b)| a != b)
+        .count()
+}
+
 fn carve_caves(world: &mut World, count: i32) {
+    carve_caves_inner(world, count, false);
+}
+
+fn carve_caves_inner(world: &mut World, count: i32, skip_occupied: bool) {
     let cols = world.grid.cols as i32;
     let rows = world.grid.rows as i32;
     if cols < 16 || rows < 16 {
@@ -196,18 +219,26 @@ fn carve_caves(world: &mut World, count: i32) {
             // 隧道本体挖空
             for dy in 0..h {
                 if let Some(i) = world.grid.index(x, cy + dy) {
+                    if skip_occupied && world.grid.owners[i] >= 0 {
+                        continue;
+                    }
                     world.set_cell_at(i, ct::EMPTY, -1);
                 }
             }
             // 洞顶两层墙（挡光）——没有它，洞穴就只是一条沟
             for dy in 1..=2 {
                 if let Some(i) = world.grid.index(x, cy - dy) {
+                    if skip_occupied && world.grid.owners[i] >= 0 {
+                        continue;
+                    }
                     world.set_cell_at(i, ct::WALL, -1);
                 }
             }
             // 洞底腐殖质（每 tick 产食）
             if let Some(i) = world.grid.index(x, cy + h) {
-                world.set_cell_at(i, ct::HUMUS, -1);
+                if !(skip_occupied && world.grid.owners[i] >= 0) {
+                    world.set_cell_at(i, ct::HUMUS, -1);
+                }
             }
         }
 
@@ -215,6 +246,9 @@ fn carve_caves(world: &mut World, count: i32) {
         let sx = cx0;
         for y in 0..cy {
             if let Some(i) = world.grid.index(sx, y) {
+                if skip_occupied && world.grid.owners[i] >= 0 {
+                    continue;
+                }
                 world.set_cell_at(i, ct::EMPTY, -1);
             }
         }

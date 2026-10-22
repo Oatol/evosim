@@ -135,6 +135,11 @@ pub struct UiActions {
     pub clear_selection: bool,
     pub toggle_workshop: bool,
     pub toggle_world: bool,
+    /// 请求在**当前世界**上重挖洞穴（批次 43）。
+    ///
+    /// 为什么不直接在这里调：这一段代码手里拿着 `&mut world.config`，
+    /// 再借整个 `world` 就冲突了。所以只记一个意图，等窗口闭包结束再执行。
+    pub recarve_caves: bool,
 }
 
 pub const BG: Color32 = Color32::from_rgb(13, 17, 23);
@@ -746,6 +751,19 @@ pub fn draw(
                 );
                 if (cave - before_cave as f64).abs() > 0.5 {
                     cfg.world.cave_count = cave.round().max(0.0) as i32;
+                }
+                // 光调滑块是看不出变化的（只在生成世界时生效），这里给一个立刻生效的按钮。
+                // 重挖**只挖空地**：站在那儿的身体格一律跳过，不然会把身体碾成墙。
+                if ui
+                    .button("重挖洞穴")
+                    .on_hover_text(
+                        "在当前世界上重挖一遍洞穴（不用新建世界）。\n\
+                         只挖空地——有生物占用的格子一律跳过，所以世界不会被挖坏。\n\
+                         挖出来的洞会比新建世界时少几个口子。",
+                    )
+                    .clicked()
+                {
+                    act.recarve_caves = true;
                 }
                 let before_photo = cfg.life.photosynthesis_rate;
                 let mut photo = before_photo;
@@ -1765,6 +1783,16 @@ pub fn draw(
     act.wants_pointer = ctx.wants_pointer_input();
     act.center_on = panel_act.center_on;
     act.clear_selection = panel_act.clear_selection;
+    // ── 洞穴重挖（批次 43）──
+    //
+    // 放在这里执行：上面那段闭包已经把 `&mut world.config` 还回来了。
+    if act.recarve_caves {
+        let n = world.config.world.cave_count;
+        if n > 0 {
+            evosim_core::worldgen::recarve_caves(world, n);
+        }
+    }
+
     act
 }
 
@@ -1964,6 +1992,8 @@ mod tests {
         ids.push(crate::paint::CREATURE_ERASER);
         assert!(ids.contains(&evosim_core::cell_type::ct::WALL));
         assert!(ids.contains(&evosim_core::cell_type::ct::LAVA));
+        assert!(ids.contains(&evosim_core::cell_type::ct::WATER));
+        assert!(ids.contains(&evosim_core::cell_type::ct::ICE));
         assert!(ids.contains(&crate::paint::ERASER));
         assert!(ids.contains(&crate::paint::CREATURE_ERASER));
         // 「空」不再是笔刷：擦除拆成擦地形 / 擦生物两个明确的意图。
@@ -1971,7 +2001,12 @@ mod tests {
             !ids.contains(&evosim_core::cell_type::ct::EMPTY),
             "「空」不该出现在笔刷里"
         );
-        assert_eq!(ids.len(), 8, "6 个地形笔刷 + 两个橡皮擦");
+        // 不再写死数字：加一种地形（批次 43 的水 / 冰）不该顺手改测试。
+        assert_eq!(
+            ids.len(),
+            evosim_core::cell_type::TERRAIN_BRUSH_TYPES.len() + 2,
+            "地形笔刷 + 两个橡皮擦"
+        );
     }
 
     /// 回归：世界高亮必须画在**窗口下面**。

@@ -772,6 +772,16 @@ pub struct TerrainCfg {
     pub lava_enter_damage: f64,
     pub lava_stand_damage: f64,
     pub swamp_move_cost: f64,
+    /// **水**：踏入额外耗能（批次 43）。比沼泽轻——水是"阻力"，沼泽是"陷进去"。
+    pub water_move_cost: f64,
+    /// **冰**：踏入后顺着原方向再滑一格（批次 43，默认 `true`）。
+    ///
+    /// 冰是唯一一种"地形影响运动"而不是"影响收支"的像素：它不改能量，
+    /// 改的是**位置**。世界里有冰之后，`step_target()` 算出来的目标不再是终点，
+    /// 而是"这一步的中间点"——于是"预判两步"第一次有价值，眼睛第一次有用途。
+    ///
+    /// 关掉 = 冰只是个白色格子（存档兼容 / 做对照用）。
+    pub ice_slide: bool,
     pub rad_damage: f64,
     pub rad_mutation_boost: f64,
     pub humus_food_prob: f64,
@@ -783,6 +793,8 @@ impl Default for TerrainCfg {
             lava_enter_damage: 2.0,
             lava_stand_damage: 1.0,
             swamp_move_cost: 0.5,
+            water_move_cost: 0.15,
+            ice_slide: true,
             rad_damage: 0.25,
             rad_mutation_boost: 3.0,
             humus_food_prob: 0.5,
@@ -798,6 +810,7 @@ impl TerrainCfg {
             TerrainField::LavaEnter => self.lava_enter_damage,
             TerrainField::LavaStand => self.lava_stand_damage,
             TerrainField::SwampCost => self.swamp_move_cost,
+            TerrainField::WaterCost => self.water_move_cost,
             TerrainField::RadDamage => self.rad_damage,
             TerrainField::RadMutation => self.rad_mutation_boost,
             TerrainField::HumusFood => self.humus_food_prob,
@@ -810,6 +823,7 @@ impl TerrainCfg {
             TerrainField::LavaEnter => self.lava_enter_damage = v,
             TerrainField::LavaStand => self.lava_stand_damage = v,
             TerrainField::SwampCost => self.swamp_move_cost = v,
+            TerrainField::WaterCost => self.water_move_cost = v,
             TerrainField::RadDamage => self.rad_damage = v,
             TerrainField::RadMutation => self.rad_mutation_boost = v,
             TerrainField::HumusFood => self.humus_food_prob = v,
@@ -830,6 +844,7 @@ pub enum TerrainField {
     LavaEnter,
     LavaStand,
     SwampCost,
+    WaterCost,
     RadDamage,
     RadMutation,
     HumusFood,
@@ -837,10 +852,11 @@ pub enum TerrainField {
 
 impl TerrainField {
     /// 全部变体。测试拿它做"有没有漏声明"的守门。
-    pub const ALL: [TerrainField; 6] = [
+    pub const ALL: [TerrainField; 7] = [
         TerrainField::LavaEnter,
         TerrainField::LavaStand,
         TerrainField::SwampCost,
+        TerrainField::WaterCost,
         TerrainField::RadDamage,
         TerrainField::RadMutation,
         TerrainField::HumusFood,
@@ -851,6 +867,7 @@ impl TerrainField {
             TerrainField::LavaEnter => "踏入伤害",
             TerrainField::LavaStand => "停留伤害",
             TerrainField::SwampCost => "移动能耗",
+            TerrainField::WaterCost => "涉水能耗",
             TerrainField::RadDamage => "每 tick 伤害",
             TerrainField::RadMutation => "变异倍率",
             TerrainField::HumusFood => "冒食概率",
@@ -866,6 +883,7 @@ impl TerrainField {
             TerrainField::LavaEnter => (0.0, 10.0, 0.5, 1),
             TerrainField::LavaStand => (0.0, 10.0, 0.5, 1),
             TerrainField::SwampCost => (0.0, 5.0, 0.1, 1),
+            TerrainField::WaterCost => (0.0, 5.0, 0.05, 2),
             TerrainField::RadDamage => (0.0, 5.0, 0.05, 2),
             // 1 是下限：0 倍变异率等于关掉辐射带的另一半功能，没意义
             TerrainField::RadMutation => (1.0, 20.0, 0.5, 1),
@@ -879,6 +897,11 @@ impl TerrainField {
             TerrainField::LavaStand => "待在岩浆里每 tick 的持续伤害（默认 1）。",
             TerrainField::SwampCost => {
                 "在沼泽里走一步额外消耗的能量（默认 0.5）。能量不够会落到 0 并进入饥饿计时。"
+            }
+            TerrainField::WaterCost => {
+                "在水里走一步额外消耗的能量（默认 0.15）。\n\
+                 比沼泽轻一个量级：沼泽是「陷进去」，水是「阻力」。\n\
+                 水的作用不是挡路，是让「绕路」和「蹚过去」第一次有取舍。"
             }
             TerrainField::RadDamage => "待在辐射带里每 tick 扣的血（默认 0.25）。",
             TerrainField::RadMutation => "站在辐射里的个体，**后代**的变异率乘这个倍数（默认 3）。",
@@ -1056,12 +1079,12 @@ pub struct Config {
     pub brain: BrainCfg,
     pub sim: SimCfg,
     /// 按类型 id 索引的细胞属性（JS 版是 `cells[KEY][attr]`，这里直接用 id 查，更快）
-    pub cells: [CellAttrs; 17],
+    pub cells: [CellAttrs; 19],
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let mut cells = [CellAttrs::default(); 17];
+        let mut cells = [CellAttrs::default(); 19];
         for d in cell_type::CELL_DEFS.iter() {
             // 前 5 项从 CELL_DEFS 取（出厂值唯一真源），后面的倍率一律走默认 1.0
             // —— 以后再加字段也不用回来改这里。
