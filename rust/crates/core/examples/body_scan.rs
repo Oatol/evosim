@@ -70,6 +70,16 @@ struct Row {
     pred_pure: f64,
     /// 捕食为主（咬 > 50%）里，**带生产者**的占比（% of 全体）
     pred_mix: f64,
+    /// **成体**里的结构异养（有嘴、无生产者），% of 成体。
+    ///
+    /// 和 `hetero` 的区别只有一条：**芽不算**。芽的 `anatomy` 只有 1 格、
+    /// 蓝图在 `growth_plan` 里，如果那一格恰好是嘴，就会被旧判据算成
+    /// "结构异养"——把「还没长完的芽」误读成「纯捕食者」。
+    hetero_adult: f64,
+    /// 芽（`growth_plan` 还在）占全体的比例（%）
+    buds: f64,
+    /// **成体**平均体型（格）。`body_avg` 被 1 格的芽稀释，这个才是"长成的身体多大"
+    body_adult: f64,
     /// 体型分布：1 格 / 2 格 / … 的个体占比（只统计前 10 档，够看形状）
     hist: [f64; 10],
 }
@@ -247,6 +257,33 @@ fn run(
         *v = *v * 100.0 / n as f64;
     }
     let pred_share = pred * 100.0 / n as f64;
+    let adult_n = w
+        .organisms
+        .iter()
+        .filter(|o| o.growth_plan.is_none())
+        .count();
+    let hetero_adult = if adult_n == 0 {
+        0.0
+    } else {
+        w.organisms
+            .iter()
+            .filter(|o| o.growth_plan.is_none())
+            .filter(|o| o.anatomy.has(Flags::MOUTH) && !o.anatomy.has(Flags::PRODUCER))
+            .count() as f64
+            * 100.0
+            / adult_n as f64
+    };
+    let buds = (w.organisms.len() - adult_n) as f64 * 100.0 / n as f64;
+    let body_adult = if adult_n == 0 {
+        0.0
+    } else {
+        w.organisms
+            .iter()
+            .filter(|o| o.growth_plan.is_none())
+            .map(|o| o.cell_count() as f64)
+            .sum::<f64>()
+            / adult_n as f64
+    };
     let pred_pure = pure * 100.0 / n as f64;
     let pred_mix = mix * 100.0 / n as f64;
     Row {
@@ -269,6 +306,9 @@ fn run(
         pred_share,
         pred_pure,
         pred_mix,
+        hetero_adult,
+        buds,
+        body_adult,
         occ: {
             let lit = w.light.level.iter().filter(|&&v| v > 0).count().max(1);
             let occ = w.grid.owners.iter().filter(|&&o| o >= 0).count();
@@ -377,6 +417,9 @@ fn run_seeds(
         killer: 0.0,
         income: [0.0; 5],
         pred_share: 0.0,
+        hetero_adult: 0.0,
+        buds: 0.0,
+        body_adult: 0.0,
         pred_pure: 0.0,
         pred_mix: 0.0,
         occ: 0.0,
@@ -407,6 +450,9 @@ fn run_seeds(
             acc.income[k] += r.income[k];
         }
         acc.pred_share += r.pred_share;
+        acc.hetero_adult += r.hetero_adult;
+        acc.buds += r.buds;
+        acc.body_adult += r.body_adult;
         acc.pred_pure += r.pred_pure;
         acc.pred_mix += r.pred_mix;
         acc.occ += r.occ;
@@ -439,6 +485,9 @@ fn run_seeds(
         acc.income[k] /= n;
     }
     acc.pred_share /= n;
+    acc.hetero_adult /= n;
+    acc.buds /= n;
+    acc.body_adult /= n;
     acc.pred_pure /= n;
     acc.pred_mix /= n;
     acc.occ /= n;
@@ -667,8 +716,9 @@ fn main() {
     // ── 第一轮：只动指数 p，不限体型 ──
     println!("【1】繁殖成本指数 p（max_body_cells = 0，不限）");
     println!(
-        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>8}  {:>7}  {:>6}  {:>7}",
-        "p", "个体", "平均体型", "最大体型", "存活种", "有光占用", "异养%", "嘴%", "杀手%"
+        "{:>5}  {:>7}  {:>9}  {:>9}  {:>7}  {:>8}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}",
+        "p", "个体", "平均体型", "最大体型", "存活种", "有光占用", "异养%", "嘴%", "杀手%",
+        "成体体型", "芽%"
     );
     // 往 1 以下扫是重点：p < 1 让大体型便宜，才有向上的选择压力。
     // 只留 4 个点是为了控功耗——这台机器长时间满载会过热（clock_watchdog_timeout），
@@ -693,8 +743,9 @@ fn main() {
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, cave, cooldown, egg, hatch, spec,
         );
         println!(
-            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}",
-            p, r.pop, r.body_avg, r.body_max, r.species, r.occ, r.hetero, r.mouth, r.killer
+            "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%",
+            p, r.pop, r.body_avg, r.body_max, r.species, r.occ, r.hetero, r.mouth, r.killer,
+            r.body_adult, r.buds
         );
         rows.push((p, r));
     }
@@ -778,13 +829,13 @@ fn main() {
     // 收入来源：这是"到底有没有捕食者"的**行为**读数
     println!("\n【1e】按累计能量收入判定（占个体百分比）");
     println!(
-        "{:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>9}",
+        "{:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>9}  {:>11}  {:>7}",
         "p", "光合", "吃食物", "咬活体", "供养", "没收入", "咬>50%", "异养(结构)",
-        "其中纯异养", "其中混养"
+        "其中纯异养", "其中混养", "异养(结构·成体)", "芽%"
     );
     for (p, r) in &rows {
         println!(
-            "{:>5.2}  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>8.1}%  {:>10.1}%  {:>8.1}%  {:>8.1}%",
+            "{:>5.2}  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>8.1}%  {:>10.1}%  {:>8.1}%  {:>8.1}%  {:>10.1}%  {:>6.1}%",
             p,
             r.income[0],
             r.income[1],
@@ -794,7 +845,9 @@ fn main() {
             r.pred_share,
             r.hetero,
             r.pred_pure,
-            r.pred_mix
+            r.pred_mix,
+            r.hetero_adult,
+            r.buds
         );
     }
 
