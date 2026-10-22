@@ -987,6 +987,17 @@ pub struct BrainCfg {
     pub in_size: usize,
     pub hidden_size: usize,
     pub out_size: usize,
+    /// **循环连接**（批次 37，默认 `false`）：隐藏层带上一 tick 的状态。
+    ///
+    /// 批次 36 的结论：感知通道补上之后，大脑仍打不过「恒直走」——
+    /// 因为直线走把"别回头"编码在运动里，而**没有记忆的网络分不清
+    /// "我在新地方"和"我在原地打转"**。循环就是补这一块。
+    ///
+    /// 关掉时 `w_rec` 是空 `Vec`，前向走旧路径、随机流也完全不碰
+    /// （`tests/golden.rs` 的逐位比对不受影响）。
+    pub recurrent: bool,
+    /// 循环权重初始化量级（默认 0.3）。太大 tanh 直接饱和，记忆变成常数。
+    pub recurrent_scale: f64,
 }
 
 impl Default for BrainCfg {
@@ -995,6 +1006,8 @@ impl Default for BrainCfg {
             in_size: 40,
             hidden_size: 12,
             out_size: 5,
+            recurrent: false,
+            recurrent_scale: 0.3,
         }
     }
 }

@@ -154,12 +154,14 @@ fn change_random_cell(anatomy: &mut Anatomy, rng: &mut Rng) -> bool {
 pub fn mutate_brain(brain: &mut Brain, rng: &mut Rng, m: &MutationCfg) {
     let rate = m.weight_mut_rate * 100.0;
     let reset_rate = m.weight_reset_rate * 100.0;
-    for arr_idx in 0..4 {
+    // 5 组：w1 / b1 / w2 / b2 / w_rec（循环关掉时 w_rec 是空的，循环体不跑）。
+    for arr_idx in 0..5 {
         let len = match arr_idx {
             0 => brain.w1.len(),
             1 => brain.b1.len(),
             2 => brain.w2.len(),
-            _ => brain.b2.len(),
+            3 => brain.b2.len(),
+            _ => brain.w_rec.len(),
         };
         for i in 0..len {
             if rng.chance(rate) {
@@ -168,7 +170,8 @@ pub fn mutate_brain(brain: &mut Brain, rng: &mut Rng, m: &MutationCfg) {
                     0 => &mut brain.w1[i],
                     1 => &mut brain.b1[i],
                     2 => &mut brain.w2[i],
-                    _ => &mut brain.b2[i],
+                    3 => &mut brain.b2[i],
+                    _ => &mut brain.w_rec[i],
                 };
                 if reset {
                     *w = rng.range(-1.0, 1.0) as f32;

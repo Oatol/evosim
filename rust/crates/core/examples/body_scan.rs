@@ -131,6 +131,7 @@ fn run(
     soil: u8,
     soilr: u8,
     soilf: f64,
+    rec: bool,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -201,6 +202,8 @@ fn run(
     cfg.life.soil_deplete = soil;
     cfg.life.soil_recover = soilr;
     cfg.life.soil_floor = soilf;
+    // `rec`：循环连接
+    cfg.brain.recurrent = rec;
     // `cave=N`：世界生成时挖几条带顶隧道（0 = 关闭）
     cfg.world.cave_count = cave;
     // `cd=N`：繁殖失败后的冷却 tick（0 = 关闭）
@@ -480,6 +483,7 @@ fn run_seeds(
     soil: u8,
     soilr: u8,
     soilf: f64,
+    rec: bool,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -519,7 +523,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -724,6 +728,8 @@ fn main() {
         .unwrap_or(Config::default().life.predator_starve_mult);
     // `produce`：有运动细胞也能光合（默认不能）
     let produce = args.iter().any(|a| a == "produce");
+    // `rec`：循环连接（大脑带记忆）
+    let rec = args.iter().any(|a| a == "rec");
     // `soil=D` / `soilr=R` / `soilf=F`：地力耗竭（D=0 关闭）
     let soil: u8 = args
         .iter()
@@ -860,7 +866,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
@@ -999,7 +1005,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",
