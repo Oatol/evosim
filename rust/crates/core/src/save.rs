@@ -105,7 +105,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v32：`BrainCfg` 加了 `recurrent` / `recurrent_scale`，`Brain` 加了
 /// `w_rec` / `hidden_prev`（批次 37 循环连接）。
 /// v33：`LifeCfg` 加了 `rotate_without_mover`（批次 40 无 mover 也能转身）。
-pub const VERSION: u32 = 34;
+/// v35：`WorldCfg` 加了 `rich_terrain`（批次 44 世界生成默认带地形）。
+pub const VERSION: u32 = 35;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
