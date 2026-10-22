@@ -181,6 +181,14 @@ pub struct World {
     /// 有了它，[`World::energy_audit`] 才能给出「存量 − 注入」这个恒为 0 的残差。
     pub energy_injected: f64,
 
+    /// **移动者死亡登记**（批次 38）：`(年龄和, 个数)`。用来算移动者的平均寿命。
+    ///
+    /// 为什么要单独记：**寿命是一阶量，种群是二阶量**。批次 37 证明 3 种子的种群
+    /// 能差 ±30%，而 n 个个体的平均寿命噪声小得多——用它才量得出「策略好坏」。
+    pub mover_deaths: (u64, u64),
+    /// 非移动者的死亡登记（同上）。
+    pub still_deaths: (u64, u64),
+
     /// **地力**（批次 35）：每格 0~255。光合细胞吃它，空格按 `soil_recover` 回。
     ///
     /// 只在 `soil_deplete > 0` 时有意义；关掉时这张表一直是 255，
@@ -217,6 +225,8 @@ impl World {
             species: SpeciesRegistry::default(),
             fields: Fields::new(len),
             soil: vec![255; len],
+            mover_deaths: (0, 0),
+            still_deaths: (0, 0),
             light: Light::new(config.world.cols, config.world.rows),
             energy_wasted: 0.0,
             heat_pool: 0.0,
@@ -1989,6 +1999,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         };
         self.heat_pool += self.organisms[i].energy.max(0.0);
         self.organisms[i].alive = false;
+        self.note_death(i);
         self.organisms[i].energy = 0.0;
         let coords: Vec<(i32, i32)> = self.organisms[i]
             .anatomy
@@ -2009,11 +2020,30 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         true
     }
 
+    /// 寿命登记（批次 38）：按「有没有运动细胞」分组累加。
+    ///
+    /// 死亡有两个入口（`kill_organism` 和画笔的 `erase_creature_at`），
+    /// 抽成一个函数，避免以后再加第三个入口时漏掉。
+    fn note_death(&mut self, i: usize) {
+        let (dead_age, had_mover) = {
+            let o = &self.organisms[i];
+            (o.age as u64, o.anatomy.has(Flags::MOVER))
+        };
+        if had_mover {
+            self.mover_deaths.0 += dead_age;
+            self.mover_deaths.1 += 1;
+        } else {
+            self.still_deaths.0 += dead_age;
+            self.still_deaths.1 += 1;
+        }
+    }
+
     pub fn kill_organism(&mut self, i: usize) {
         if i >= self.organisms.len() || !self.organisms[i].alive {
             return;
         }
         self.organisms[i].alive = false;
+        self.note_death(i);
 
         // ── 残骸携带死者**体内攒下的能量** ──
         //
@@ -2542,6 +2572,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         self.id_index.clear();
         self.grid = Grid::new(cols, rows, self.config.world.wrap_edges);
         self.soil = vec![255; self.grid.len];
+        self.mover_deaths = (0, 0);
+        self.still_deaths = (0, 0);
         self.fields.resize(self.grid.len);
         self.fields.clear();
         self.light.resize(cols, rows);
@@ -2746,6 +2778,43 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             mutability += org.mutability;
             income[org.income_source().slot()] += 1;
         }
+        // ── 批次 38：移动者 vs 非移动者的一阶量 ──
+        //
+        // 收入用 `gain_total / age`（单位时间），而不是累计值：累计值随年龄增长，
+        // 比"谁活得久"而不是"谁挣得多"。`age == 0` 的刚出生个体跳过。
+        let (mut m_n, mut m_age, mut m_inc, mut m_energy, mut m_soil) = (0usize, 0f64, 0f64, 0f64, 0f64);
+        let (mut s_n, mut s_age, mut s_inc) = (0usize, 0f64, 0f64);
+        for org in &self.organisms {
+            // 死掉的还没被 `compact_organisms` 清走，必须自己跳过——
+            // 否则"活着的移动者"会把刚死的也数进去。
+            if !org.alive {
+                continue;
+            }
+            let age = org.age as f64;
+            if age < 1.0 {
+                continue;
+            }
+            let inc = org.income_total() / age;
+            if org.anatomy.has(Flags::MOVER) {
+                m_n += 1;
+                m_age += age;
+                m_inc += inc;
+                m_energy += org.energy;
+                if self.config.life.soil_deplete > 0 {
+                    if let Some(k) = self.grid.index(org.col, org.row) {
+                        m_soil += self.soil[k] as f64 * 100.0 / 255.0;
+                    }
+                }
+            } else {
+                s_n += 1;
+                s_age += age;
+                s_inc += inc;
+            }
+        }
+        let mf = m_n.max(1) as f64;
+        let sf = s_n.max(1) as f64;
+        let life = |(sum, cnt): (u64, u64)| if cnt == 0 { 0.0 } else { sum as f64 / cnt as f64 };
+
         let nf = n as f64;
         let adult_n = self
             .organisms
@@ -2775,6 +2844,19 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             avg_age: age / nf,
             avg_mutability: mutability / nf,
             income: income.map(|k| k as f64 * 100.0 / nf),
+            mover_n: m_n,
+            mover_age: m_age / mf,
+            mover_income: m_inc / mf,
+            mover_energy: m_energy / mf,
+            mover_life: life(self.mover_deaths),
+            mover_soil: if self.config.life.soil_deplete > 0 {
+                m_soil / mf
+            } else {
+                100.0
+            },
+            still_age: s_age / sf,
+            still_income: s_inc / sf,
+            still_life: life(self.still_deaths),
         }
     }
 
@@ -2848,6 +2930,30 @@ pub struct OrgStats {
     /// 按**实际收入来源**归类的个体占比（%），顺序见 `Income::slot`：
     /// 光合 / 吃食物 / 咬活体 / 供养 / 没收入。五项加起来是 100。
     pub income: [f64; 5],
+
+    // ── 批次 38：移动者 vs 非移动者的**一阶量** ──
+    //
+    // 种群是二阶量（繁殖 × 死亡 × 空间竞争），3 种子的噪声能到 ±30%（批次 37 实测）。
+    // 这一组是「每个个体自己的账」：年龄、单位时间收入、能量、寿命。用它才量得出
+    // 「这个策略好不好」，而不是「这次跑出来多少人」。
+    /// 移动者（有运动细胞）数量
+    pub mover_n: usize,
+    /// 移动者平均年龄（tick，只算活着的）
+    pub mover_age: f64,
+    /// 移动者平均**单位时间总收入**（`gain_total / age`，只算活着的）
+    pub mover_income: f64,
+    /// 移动者平均当前能量
+    pub mover_energy: f64,
+    /// 移动者平均**寿命**（tick，只算已经死掉的）
+    pub mover_life: f64,
+    /// 移动者脚下平均地力（0~100%，地力关闭时恒 100）
+    pub mover_soil: f64,
+    /// 非移动者平均年龄
+    pub still_age: f64,
+    /// 非移动者平均单位时间总收入
+    pub still_income: f64,
+    /// 非移动者平均寿命
+    pub still_life: f64,
 }
 
 #[cfg(test)]
@@ -3818,6 +3924,36 @@ mod tests {
             "混养体不该拿到专精奖励，实测剩 {}",
             w2.organisms[vi2].energy
         );
+    }
+
+    // ── 批次 38：移动者一阶量 ──
+
+    /// 一阶量按「有没有运动细胞」分组：收入是 `累计收入 / 年龄`，寿命来自死亡登记。
+    #[test]
+    fn mover_metrics_split_by_has_mover() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].age = 10;
+        w.organisms[i].gain_photo = 2.0;
+
+        let st = w.organism_stats();
+        assert_eq!(st.mover_n, 1, "这一只是移动者");
+        assert!(
+            (st.mover_income - 0.2).abs() < 1e-9,
+            "单位时间收入应该是 2.0/10，实测 {}",
+            st.mover_income
+        );
+        assert_eq!(st.mover_life, 0.0, "还没死，寿命应该是 0（没有样本）");
+
+        // 死掉之后进寿命登记
+        w.kill_organism(i);
+        let st2 = w.organism_stats();
+        assert!(
+            (st2.mover_life - 10.0).abs() < 1e-9,
+            "寿命应该是 10 tick，实测 {}",
+            st2.mover_life
+        );
+        assert_eq!(st2.mover_n, 0, "死了就不算在活着的那一栏里");
     }
 
     // ── 批次 35：地力耗竭 ──

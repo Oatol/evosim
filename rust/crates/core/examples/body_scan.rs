@@ -84,6 +84,22 @@ struct Row {
     movers: f64,
     /// 全图平均地力（0~100%）。关掉地力时恒为 100。
     soil: f64,
+
+    // ── 批次 38：移动者 vs 非移动者的**一阶量** ──
+    //
+    // 种群是二阶量，3 种子噪声 ±30%（批次 37 实测）。这一组是「每个个体自己的账」，
+    // 400 个个体 × 6000 tick 会把个体级噪声平均掉——用它才量得出策略好坏。
+    mover_n: f64,
+    mover_age: f64,
+    mover_income: f64,
+    mover_life: f64,
+    mover_soil: f64,
+    still_age: f64,
+    still_income: f64,
+    still_life: f64,
+    /// 每个种子的个体数 / 移动者收入（看噪声用；只有 `run_seeds` 填）
+    per_seed_pop: Vec<f64>,
+    per_seed_minc: Vec<f64>,
     /// **聚类物种数**（构成距离 ≤ `kin_distance`，个体数 ≥ 2）。
     /// `species` 那一列是精确指纹——变异一格就换一个，数的是结构变体累计。
     species_clustered: f64,
@@ -376,6 +392,16 @@ fn run(
         buds,
         body_adult,
         species_clustered: st.species_clustered as f64,
+        mover_n: st.mover_n as f64,
+        mover_age: st.mover_age,
+        mover_income: st.mover_income,
+        mover_life: st.mover_life,
+        mover_soil: st.mover_soil,
+        still_age: st.still_age,
+        still_income: st.still_income,
+        still_life: st.still_life,
+        per_seed_pop: Vec::new(),
+        per_seed_minc: Vec::new(),
         movers: st.movers as f64 * 100.0 / n as f64,
         soil: if w.soil.is_empty() {
             0.0
@@ -506,6 +532,16 @@ fn run_seeds(
         species_clustered: 0.0,
         movers: 0.0,
         soil: 0.0,
+        mover_n: 0.0,
+        mover_age: 0.0,
+        mover_income: 0.0,
+        mover_life: 0.0,
+        mover_soil: 0.0,
+        still_age: 0.0,
+        still_income: 0.0,
+        still_life: 0.0,
+        per_seed_pop: Vec::new(),
+        per_seed_minc: Vec::new(),
         pred_pure: 0.0,
         pred_mix: 0.0,
         occ: 0.0,
@@ -542,6 +578,16 @@ fn run_seeds(
         acc.species_clustered += r.species_clustered;
         acc.movers += r.movers;
         acc.soil += r.soil;
+        acc.mover_n += r.mover_n;
+        acc.mover_age += r.mover_age;
+        acc.mover_income += r.mover_income;
+        acc.mover_life += r.mover_life;
+        acc.mover_soil += r.mover_soil;
+        acc.still_age += r.still_age;
+        acc.still_income += r.still_income;
+        acc.still_life += r.still_life;
+        acc.per_seed_pop.push(r.pop);
+        acc.per_seed_minc.push(r.mover_income);
         acc.pred_pure += r.pred_pure;
         acc.pred_mix += r.pred_mix;
         acc.occ += r.occ;
@@ -580,6 +626,14 @@ fn run_seeds(
     acc.species_clustered /= n;
     acc.movers /= n;
     acc.soil /= n;
+    acc.mover_n /= n;
+    acc.mover_age /= n;
+    acc.mover_income /= n;
+    acc.mover_life /= n;
+    acc.mover_soil /= n;
+    acc.still_age /= n;
+    acc.still_income /= n;
+    acc.still_life /= n;
     acc.pred_pure /= n;
     acc.pred_mix /= n;
     acc.occ /= n;
@@ -975,6 +1029,59 @@ fn main() {
             r.hetero_adult,
             r.buds
         );
+    }
+
+    // ── 批次 38：移动者 vs 非移动者的一阶量 ──
+    //
+    // 为什么单列这一节：种群是二阶量，3 种子的噪声能到 ±30%（批次 37 实测）。
+    // 这一节是「每个个体自己的账」——收入用 `累计收入 / 年龄`，寿命用死者年龄的平均。
+    // 几百个个体平均下来，噪声比种群小一个量级，才量得出「策略好坏」。
+    println!("\n【1f】移动者 vs 非移动者（一阶量 · 收入 = 累计收入 ÷ 年龄）");
+    println!(
+        "{:>5}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>8}  {:>9}  {:>11}  {:>9}",
+        "p", "移动数", "移动%", "移动·年龄", "移动·收入/tick", "移动·寿命", "移动·地力%",
+        "静止·年龄", "静止·收入/tick", "静止·寿命"
+    );
+    for (p, r) in &rows {
+        println!(
+            "{:>5.2}  {:>7.0}  {:>6.1}%  {:>9.0}  {:>11.4}  {:>9.0}  {:>8.1}  {:>9.0}  {:>11.4}  {:>9.0}",
+            p,
+            r.mover_n,
+            if r.pop > 0.0 { r.mover_n * 100.0 / r.pop } else { 0.0 },
+            r.mover_age,
+            r.mover_income,
+            r.mover_life,
+            r.mover_soil,
+            r.still_age,
+            r.still_income,
+            r.still_life
+        );
+    }
+
+    // 噪声：把每个种子的个体数摊开看。判断「差异」时先看这个再下结论。
+    println!("\n【噪声】每个种子的个体数（这一行比上面任何一行都重要）");
+    for (p, r) in &rows {
+        if r.per_seed_pop.is_empty() {
+            continue;
+        }
+        let mut v = r.per_seed_pop.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let lo = *v.first().unwrap();
+        let hi = *v.last().unwrap();
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        let spread = if mean > 0.0 { (hi - lo) * 100.0 / mean } else { 0.0 };
+        print!("  p={:.2}  ", p);
+        for x in &v {
+            print!("{:.0}  ", x);
+        }
+        println!("→ {:.0}~{:.0}（极差 {:.0}%）", lo, hi, spread);
+        let mut m = r.per_seed_minc.clone();
+        m.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        print!("           移动者收入/tick：");
+        for x in &m {
+            print!("{:.4}  ", x);
+        }
+        println!();
     }
 
     // 体型分布：看 p 是不是真的把分布推走
