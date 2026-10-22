@@ -102,7 +102,8 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// `World` 加了 `soil`，`SaveFile` 加了 `soil`（批次 35 地力耗竭）。
 /// v32：`BrainCfg` 加了 `recurrent` / `recurrent_scale`，`Brain` 加了
 /// `w_rec` / `hidden_prev`（批次 37 循环连接）。
-pub const VERSION: u32 = 32;
+/// v33：`LifeCfg` 加了 `rotate_without_mover`（批次 40 无 mover 也能转身）。
+pub const VERSION: u32 = 33;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

@@ -148,6 +148,7 @@ fn run(
     soilr: u8,
     soilf: f64,
     rec: bool,
+    rot: bool,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -220,6 +221,8 @@ fn run(
     cfg.life.soil_floor = soilf;
     // `rec`：循环连接
     cfg.brain.recurrent = rec;
+    // `rot`：没有运动细胞也能转身（免费换地）
+    cfg.life.rotate_without_mover = rot;
     // `cave=N`：世界生成时挖几条带顶隧道（0 = 关闭）
     cfg.world.cave_count = cave;
     // `cd=N`：繁殖失败后的冷却 tick（0 = 关闭）
@@ -510,6 +513,7 @@ fn run_seeds(
     soilr: u8,
     soilf: f64,
     rec: bool,
+    rot: bool,
     cave: i32,
     cooldown: u32,
     egg: bool,
@@ -559,7 +563,7 @@ fn run_seeds(
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, cave, cooldown, egg, hatch, spec,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -784,6 +788,8 @@ fn main() {
     let produce = args.iter().any(|a| a == "produce");
     // `rec`：循环连接（大脑带记忆）
     let rec = args.iter().any(|a| a == "rec");
+    // `rot`：没有运动细胞也能转身
+    let rot = args.iter().any(|a| a == "rot");
     // `soil=D` / `soilr=R` / `soilf=F`：地力耗竭（D=0 关闭）
     let soil: u8 = args
         .iter()
@@ -920,7 +926,7 @@ fn main() {
         let r = run_seeds(
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, cave, cooldown, egg, hatch, spec,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
@@ -1038,13 +1044,13 @@ fn main() {
     // 几百个个体平均下来，噪声比种群小一个量级，才量得出「策略好坏」。
     println!("\n【1f】移动者 vs 非移动者（一阶量 · 收入 = 累计收入 ÷ 年龄）");
     println!(
-        "{:>5}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>8}  {:>9}  {:>11}  {:>9}",
+        "{:>5}  {:>7}  {:>7}  {:>9}  {:>11}  {:>9}  {:>8}  {:>9}  {:>11}  {:>9}  {:>9}",
         "p", "移动数", "移动%", "移动·年龄", "移动·收入/tick", "移动·寿命", "移动·地力%",
-        "静止·年龄", "静止·收入/tick", "静止·寿命"
+        "静止·年龄", "静止·收入/tick", "静止·寿命", "移动/静止"
     );
     for (p, r) in &rows {
         println!(
-            "{:>5.2}  {:>7.0}  {:>6.1}%  {:>9.0}  {:>11.4}  {:>9.0}  {:>8.1}  {:>9.0}  {:>11.4}  {:>9.0}",
+            "{:>5.2}  {:>7.0}  {:>6.1}%  {:>9.0}  {:>11.4}  {:>9.0}  {:>8.1}  {:>9.0}  {:>11.4}  {:>9.0}  {:>8.2}x",
             p,
             r.mover_n,
             if r.pop > 0.0 { r.mover_n * 100.0 / r.pop } else { 0.0 },
@@ -1054,7 +1060,14 @@ fn main() {
             r.mover_soil,
             r.still_age,
             r.still_income,
-            r.still_life
+            r.still_life,
+            // **这一列才是判据**：移动到底划不划算。
+            // 1.0 = 打平；> 1.5 才算"移动真的值"（批次 38 实测 1.12）。
+            if r.still_income > 1e-9 {
+                r.mover_income / r.still_income
+            } else {
+                0.0
+            }
         );
     }
 
@@ -1112,7 +1125,7 @@ fn main() {
         let r = run_seeds(
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
-            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, cave, cooldown, egg, hatch, spec,
+            oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, cave, cooldown, egg, hatch, spec,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

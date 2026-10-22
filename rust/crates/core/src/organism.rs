@@ -445,7 +445,10 @@ impl Organism {
         self.sensors.copy_from_slice(&inputs);
         self.brain.forward(&inputs);
 
-        if !has_mover {
+        // 没有运动细胞的个体：默认连决策都不做（转身也没用，因为 `act_move`
+        // 被 MOVER 挡住）。`rotate_without_mover` 打开后它们也要算——
+        // 转身不改身体格数、只改占用哪些世界格，等于**免费换一块地**。
+        if !has_mover && !cfg.life.rotate_without_mover {
             return;
         }
 

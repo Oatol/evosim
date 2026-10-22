@@ -813,6 +813,23 @@ pub fn draw(
                         cfg.life.soil_floor = sf;
                     }
                 }
+                // ── 无 mover 也能转身（批次 40）──
+                //
+                // 转身不改身体格数、只改占用哪些世界格 → 等于**免费换地**。
+                // 实测一开，移动者的优势被抹平（收入比 1.12x → 1.00x），
+                // 人口 +30%、体型 -30%：站桩 + 偶尔转身支配了「长一个 mover」。
+                let mut rot = cfg.life.rotate_without_mover;
+                if ui
+                    .checkbox(&mut rot, "无 mover 也能转身")
+                    .on_hover_text(
+                        "勾上：没有运动细胞的个体也能用「转身」输出换地（免费换地）。
+                         默认关。打开后移动者的优势会被抹平（收入比 → 1.00x），
+                         人口 +30~50%、成体体型 -30%——站桩 + 偶尔转身支配了长 mover。",
+                    )
+                    .changed()
+                {
+                    cfg.life.rotate_without_mover = rot;
+                }
                 let mut mcp = cfg.life.movers_can_produce;
                 if ui
                     .checkbox(&mut mcp, "运动可光合")

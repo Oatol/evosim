@@ -947,6 +947,8 @@ impl World {
 
         if self.organisms[i].anatomy.has(Flags::MOVER) {
             self.act_move(i);
+        } else if self.config.life.rotate_without_mover {
+            self.act_rotate_only(i);
         }
         if !self.organisms[i].alive {
             return;
@@ -1065,6 +1067,19 @@ impl World {
         } else {
             let d = self.organisms[i].plan_direction;
             self.organisms[i].direction = d & 3;
+        }
+    }
+
+    /// 只转身、不移动（批次 40）：给没有运动细胞的个体用。
+    ///
+    /// `turn_cooldown` 的递减本来在 `act_move` 里做，这条路径要自己做，
+    /// 否则冷却永远不归零、一辈子只能转一次。
+    fn act_rotate_only(&mut self, i: usize) {
+        if self.organisms[i].turn_cooldown > 0 {
+            self.organisms[i].turn_cooldown -= 1;
+        }
+        if self.organisms[i].plan_turn && self.attempt_rotate(i) {
+            self.organisms[i].turn_cooldown = self.config.life.turn_cooldown;
         }
     }
 
@@ -3923,6 +3938,37 @@ mod tests {
             (w2.organisms[vi2].energy - 4.9).abs() < 1e-9,
             "混养体不该拿到专精奖励，实测剩 {}",
             w2.organisms[vi2].energy
+        );
+    }
+
+    // ── 批次 40：无 mover 也能转身 ──
+
+    /// 默认关：没有运动细胞的个体连决策都不做（`plan_turn` 恒 false）。
+    #[test]
+    fn non_mover_does_not_think_by_default() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        assert!(!w.config.life.rotate_without_mover, "默认应该是关的");
+        let i = w.organism_index(id).unwrap();
+        w.think_organism(i);
+        assert!(!w.organisms[i].plan_turn, "没有 mover 时不该产生转身计划");
+    }
+
+    /// 打开后：大脑的转身输出（`out[4]`）对没有运动细胞的个体也生效。
+    #[test]
+    fn rotate_without_mover_lets_non_movers_turn() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.rotate_without_mover = true;
+        let i = w.organism_index(id).unwrap();
+        // 把大脑做成「只有转身输出最强」
+        let out_n = w.organisms[i].brain.out_size;
+        for k in 0..out_n {
+            w.organisms[i].brain.b2[k] = if k == out_n - 1 { 5.0 } else { -5.0 };
+        }
+        w.organisms[i].turn_cooldown = 0;
+        w.think_organism(i);
+        assert!(
+            w.organisms[i].plan_turn,
+            "转身输出最强时应该产生转身计划"
         );
     }
 

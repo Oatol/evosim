@@ -393,6 +393,20 @@ pub struct LifeCfg {
     /// 储食细胞因此同时是收益和风险：装得多 = 熬得过饥荒 / 黑夜，
     /// 但被杀死时对方从尸体上吃到的也更多。
     pub storage_capacity: f64,
+    /// **没有运动细胞也能转身**（批次 40，默认 `false`）。
+    ///
+    /// 批次 39 撞到一道算术题：mover **占一个身体格**，所以移动的盈亏平衡收入比
+    /// 大约是 `N/(N-1)`（成体 17.7 格 → 1.06）。实测天花板 1.23，离 1.5 差一截，
+    /// 而且再推地力就把世界打死。
+    ///
+    /// 但「转身」不改身体格数，只改**占用哪些世界格**——`attempt_rotate` 会
+    /// `clear_grid` + `write_grid`，生产者因此落到新的格子上。也就是说：
+    /// **允许无 mover 转身 = 免费地换地吃**，不需要付出那一格产能。
+    ///
+    /// 顺带把一件一直空转的东西接上：`out[4]`（转身）这个输出从批次 1 就有，
+    /// 但 `think()` 对没有 mover 的个体直接 `return`，所以 73% 的个体的大脑
+    /// 从来没有真正参与过决策。
+    pub rotate_without_mover: bool,
     /// **地力耗竭**（批次 35，`0` = 关，默认 0）：光合细胞每 tick 从**脚下那一格**
     /// 抽走这么多地力（0~255 的 u8）。
     ///
@@ -717,6 +731,7 @@ impl Default for LifeCfg {
             kin_bite_penalty: 0.5,
             energy_per_cell: 2.0,
             storage_capacity: 6.0,
+            rotate_without_mover: false,
             soil_deplete: 0,
             soil_recover: 1,
             soil_floor: 0.25,
