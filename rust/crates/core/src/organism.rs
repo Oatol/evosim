@@ -448,6 +448,32 @@ impl Organism {
             return;
         }
 
+        // ── 大脑消融（批次 33）──
+        //
+        // 必须放在 `think` 里，不能放在 `World::think_organism`：`step()` 走的是
+        // `think_all`（rayon 并行，直接调 `o.think`），那个包装函数根本不会被调用。
+        //
+        // 两种消融都**不消耗世界 RNG**（模式 2 用 id+age 的哈希），
+        // 这样对照组和实验组的随机流一致，差异只来自"决策"本身。
+        match cfg.life.brain_ablation {
+            1 => {
+                // 恒定方向：一直朝当前朝向走（等价于输出全 0 时 argmax 恒选 0 号）
+                self.plan_turn = false;
+                self.plan_direction = self.rotation;
+                return;
+            }
+            2 => {
+                // 每 tick 伪随机方向：大脑完全不参与决策
+                let h = (self.id as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add((self.age as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                self.plan_turn = false;
+                self.plan_direction = ((h >> 33) & 3) as u8;
+                return;
+            }
+            _ => {}
+        }
+
         let out_n = self.brain.out_size;
         let mut out = [0f32; 16];
         out[..out_n].copy_from_slice(&self.brain.output[..out_n]);

@@ -935,6 +935,46 @@ pub fn draw(
                 if (spec - before_spec).abs() > 1e-9 {
                     cfg.life.predator_specialization = spec;
                 }
+                // ── 捕食者抗饿（批次 34）──
+                //
+                // 批次 31 把纯异养推到 6.9% 后饱和：瓶颈是"找不到猎物的 tick 会饿死"，
+                // 不是"咬得不狠"。这一项给的是**生理差异**（捕食者本来就抗饿）。
+                let before_starve = cfg.life.predator_starve_mult;
+                let mut starve = before_starve;
+                ui.add(
+                    egui::Slider::new(&mut starve, 1.0..=6.0)
+                        .text("捕食者抗饿")
+                        .step_by(0.5)
+                        .fixed_decimals(1),
+                )
+                .on_hover_text(
+                    "身体里**没有生产者细胞**时，饥饿致死的宽限期乘这个数（1.0 = 关闭）。
+                     默认 60 tick，×3 就是 180 tick。
+                     这是生理差异：捕食是「饱一顿饿一顿」，光合是「每天都有底薪」。",
+                );
+                if (starve - before_starve).abs() > 1e-9 {
+                    cfg.life.predator_starve_mult = starve;
+                }
+                // ── 大脑消融（批次 33）──
+                //
+                // 40→12→5 的网络从没做过对照。0.1% 的个体有运动细胞，
+                // 所以这一项的差别本来就很微弱——那正是结论本身。
+                ui.horizontal(|ui| {
+                    ui.label("大脑");
+                    for (v, name, tip) in [
+                        (0u8, "正常", "演化出的大脑决定方向"),
+                        (1u8, "恒直走", "输出清零：一直朝当前朝向走"),
+                        (2u8, "随机走", "方向由 id+age 的哈希决定，大脑不参与"),
+                    ] {
+                        if ui
+                            .selectable_label(cfg.life.brain_ablation == v, name)
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            cfg.life.brain_ablation = v;
+                        }
+                    }
+                });
                 // ── 食物算不算路障 ──
                 //
                 // 拆成两个开关是因为它们是两件事：穿过一片尸体堆去追猎物（移动），

@@ -887,7 +887,7 @@ impl World {
         // 身上只剩 0.01 的个体付不出 0.05，多记的 0.04 是凭空的。
         let upkeep = self.organisms[i].upkeep_cost(&self.config);
         if upkeep > 0.0 {
-            let limit = self.config.life.starvation_ticks;
+            let limit = self.starve_limit(i);
             let mut starved = false;
             let paid: f64;
             {
@@ -972,6 +972,24 @@ impl World {
             && self.organisms[i].repro_cooldown == 0
         {
             self.reproduce_organism(i);
+        }
+    }
+
+    /// 饥饿致死的宽限期（tick）。批次 34：没有生产者的个体扛饿更久。
+    ///
+    /// 这是**生理差异**，不是凭空发钱：捕食是"饱一顿饿一顿"，光合是"每天都有底薪"。
+    /// 批次 31 把纯异养推到 6.9% 后饱和，说明瓶颈是"找不到猎物的那些 tick 会饿死"，
+    /// 而不是"咬得不狠"——所以要动的就是这个宽限期。
+    pub fn starve_limit(&self, i: usize) -> i32 {
+        let base = self.config.life.starvation_ticks;
+        if self.organisms[i].anatomy.has(Flags::PRODUCER) {
+            return base;
+        }
+        let m = self.config.life.predator_starve_mult;
+        if m > 1.0 {
+            ((base as f64) * m).round() as i32
+        } else {
+            base
         }
     }
 
@@ -3748,6 +3766,51 @@ mod tests {
             "混养体不该拿到专精奖励，实测剩 {}",
             w2.organisms[vi2].energy
         );
+    }
+
+    // ── 批次 33 / 34：大脑消融 + 捕食者抗饿 ──
+
+    /// 消融模式 1：恒定方向——一直朝当前朝向走，大脑完全不参与。
+    #[test]
+    fn brain_ablation_constant_mode_goes_straight() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        w.config.life.brain_ablation = 1;
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].rotation = 2;
+        w.think_organism(i);
+        assert!(!w.organisms[i].plan_turn, "恒定方向模式不该转身");
+        assert_eq!(w.organisms[i].plan_direction, 2, "应该朝当前朝向（2）走");
+    }
+
+    /// 消融模式 2：每 tick 伪随机方向——合法范围、且和朝向无关。
+    #[test]
+    fn brain_ablation_random_mode_is_in_range() {
+        let (mut w, id) = tiny_world(&[(ct::MOVER, 0, 0)]);
+        w.config.life.brain_ablation = 2;
+        let i = w.organism_index(id).unwrap();
+        w.organisms[i].rotation = 2;
+        w.think_organism(i);
+        assert!(!w.organisms[i].plan_turn);
+        assert!(w.organisms[i].plan_direction < 4);
+    }
+
+    /// 抗饿倍率只对**没有生产者**的个体生效。
+    #[test]
+    fn starve_limit_scales_only_for_pure_predators() {
+        let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.starvation_ticks = 60;
+        w.config.life.predator_starve_mult = 3.0;
+        // 生产者：宽限期不变
+        assert_eq!(w.starve_limit(0), 60);
+
+        let (mut w2, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
+        w2.config.life.starvation_ticks = 60;
+        w2.config.life.predator_starve_mult = 3.0;
+        assert_eq!(w2.starve_limit(0), 180, "纯捕食者应该能扛 3 倍时间");
+
+        // 关掉（1.0）时逐位等于旧行为
+        w2.config.life.predator_starve_mult = 1.0;
+        assert_eq!(w2.starve_limit(0), 60);
     }
 
     // ── 批次 32：物种聚类与构成判据 ──

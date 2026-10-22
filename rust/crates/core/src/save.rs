@@ -95,8 +95,10 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v26：`CellDef` 加了 `EGG`（id 16），`SaveFile` 加了 `eggs`，`LifeCfg` 加了
 /// `egging` / `egg_hatch_ticks`（批次 27 卵生）。
 /// v27：`LifeCfg` 加了 `predator_specialization`（批次 31 捕食专精奖励）。
-/// v28：`LifeCfg` 加了 `kin_distance`（批次 32 同种判据改构成距离）。
-pub const VERSION: u32 = 28;
+/// v28：`LifeCfg` 加了 `kin_by_species` / `species_distance`（批次 32 口径校准）。
+/// v29：`LifeCfg` 加了 `brain_ablation`（批次 33 大脑消融）。
+/// v30：`LifeCfg` 加了 `predator_starve_mult`（批次 34 捕食者抗饿）。
+pub const VERSION: u32 = 30;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";
