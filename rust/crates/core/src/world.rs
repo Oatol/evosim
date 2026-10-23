@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::anatomy::{Anatomy, BodyCell, Flags};
+use crate::anatomy::{BodyCell, Flags};
 use crate::cell_type::{
     self, ct, Behavior, EnterFx, StandFx, DIR_VECTORS, TERRAIN_MASK, TICKS_TERRAIN,
     TICKING_TERRAIN_TYPES,
@@ -26,7 +26,7 @@ use crate::light::Light;
 /// 8 行 ≈ 两个 4 格身体的高度。再深就够不着了——真正厚的墙早就把内部饿死了，
 /// 数更远只是白花时间。
 const SHADE_DEPTH: i32 = 8;
-use crate::mutation::mutate_organism;
+use crate::mutation::{mutate_brain, mutate_genome};
 use crate::organism::Organism;
 use crate::rng::Rng;
 use crate::species::SpeciesRegistry;
@@ -1375,6 +1375,19 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         }
     }
 
+    /// 一格连续被挡多少 tick 才判定"长不出来"（凋亡）。
+    ///
+    /// 3 tick 是个折中：短到不会让芽卡死（卡死 = 永远不能繁殖 = 大基因组被选择淘汰），
+    /// 长到能等到"母体挪开 / 邻居死掉"这种常见情况。
+    const GROW_BLOCK_TICKS: u8 = 3;
+
+    /// 停滞兜底的硬上限（tick）。
+    ///
+    /// `growth_stall_mature` 默认是 0（关闭），而凋亡虽然能保证"有进展"，
+    /// 却挡不住"能量长期不够"这种停滞。留一个硬上限，避免出现
+    /// **永远长不大、也永远不能繁殖的僵尸芽**。
+    const GROW_STALL_BACKSTOP: u32 = 300;
+
     /// 芽长一格。
     ///
     /// 从 `growth_plan` 里挑一个「还没长、且与现有身体四邻相邻、目标格可放」
@@ -1386,7 +1399,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     ///
     /// 长满之后把 `growth_plan` 置空，个体才算「成年」、才能繁殖。
     fn grow_organism(&mut self, i: usize) {
-        let Some(plan) = self.organisms[i].growth_plan.clone() else {
+        let Some(mut plan) = self.organisms[i].growth_plan.clone() else {
             return;
         };
         // 年龄只在"还是芽"的时候涨。它是「最短成长期」的计时器：
@@ -1403,76 +1416,62 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         // 能量不够就长不动 —— 但**不能直接 return**：要走下面的停滞计数，
         // 否则"饿着的芽"永远不会被判定为"该提前成熟"。
         let can_pay = self.organisms[i].energy >= cost;
+
         let mut grew = false;
+        let mut blocked: Option<usize> = None;
         if can_pay {
-            for cell in plan.cells.iter() {
-            // 已经长出来了？
-            if self.organisms[i].anatomy.cell_at(cell.dx, cell.dy).is_some() {
-                continue;
-            }
-            // 必须和现有身体相邻
-            let adjacent = self.organisms[i]
-                .anatomy
-                .cells
-                .iter()
-                .any(|c| (c.dx - cell.dx).abs() + (c.dy - cell.dy).abs() == 1);
-            if !adjacent {
-                continue;
-            }
-            let (c, r) = (
-                self.organisms[i].real_col(cell),
-                self.organisms[i].real_row(cell),
-            );
-            let Some(idx) = self.grid.index(c, r) else {
-                continue;
-            };
-            if !self.cell_is_free_for_birth(idx) {
-                continue;
-            }
-            self.organisms[i]
-                .anatomy
-                .add_cell(cell.type_id, cell.dx, cell.dy, cell.dir);
-            self.write_grid(i);
-            grew = true;
-            break;
-        }
-        if !grew {
-            // ── 兜底：目标格全被邻居占了 ──
+            // **按发育顺序（BFS）**逐格尝试：离胚近的先长，身体由内向外展开。
             //
-            // 这是实测踩出来的：`growth_plan` 是**母体的形状**，而芽生在母体旁边，
-            // 那片区域的格子很可能已经被别的个体占住。严格按 plan 长的话，
-            // 芽会永远卡在 1 格、永远不能繁殖 —— 实测 1002/1003 两个种子直接灭绝。
-            //
-            // 兜底策略：长到**任意相邻空位**，细胞类型从 plan 里随机取。
-            // 形状会因此偏离母体，但体型（= 目标细胞数）仍然受限，
-            // 而且"能长大"比"长得像"重要得多。
-            let ty = plan.cells[self.rng.int(plan.cells.len())].type_id;
-            let cells = self.organisms[i].anatomy.cells.clone();
-            'outer: for c in cells {
-                for n in NEIGHBORS_4 {
-                    let (ndx, ndy) = (c.dx + n.0, c.dy + n.1);
-                    if self.organisms[i].anatomy.cell_at(ndx, ndy).is_some() {
-                        continue;
-                    }
-                    let probe = BodyCell::new(ty, ndx, ndy, 0);
-                    let (cc, rr) = (
-                        self.organisms[i].real_col(&probe),
-                        self.organisms[i].real_row(&probe),
-                    );
-                    let Some(idx) = self.grid.index(cc, rr) else {
-                        continue;
-                    };
-                    if !self.cell_is_free_for_birth(idx) {
-                        continue;
-                    }
-                    self.organisms[i].anatomy.add_cell(ty, ndx, ndy, 0);
-                    self.write_grid(i);
-                    grew = true;
-                    break 'outer;
+            // 旧版是"遍历蓝图，谁相邻就长谁"——顺序由 `Vec` 的存储顺序决定，
+            // 于是芽可能先长出边缘的一根手指，而核心（生产者）迟迟不长，
+            // 结果是幼体期没有收入、活活饿死。BFS 顺序把这个隐患从根上去掉了。
+            for k in 0..plan.cells.len() {
+                if plan.dropped[k] {
+                    continue;
                 }
+                let cell = plan.cells[k];
+                // 已经长出来了？
+                if self.organisms[i].anatomy.cell_at(cell.dx, cell.dy).is_some() {
+                    continue;
+                }
+                // 必须和现有身体**相邻**（否则身体会裂成互不相连的两块）。
+                // 用 8 邻域而不是 4 邻域：身体本来就是按 8 邻域拼出来的
+                // （`add_random_cell` 从 8 个方向挑），对角相接也算连着。
+                let adjacent = self.organisms[i]
+                    .anatomy
+                    .cells
+                    .iter()
+                    .any(|c| (c.dx - cell.dx).abs() <= 1 && (c.dy - cell.dy).abs() <= 1);
+                if !adjacent {
+                    continue;
+                }
+                let (c, r) = (
+                    self.organisms[i].real_col(&cell),
+                    self.organisms[i].real_row(&cell),
+                );
+                let Some(idx) = self.grid.index(c, r) else {
+                    continue;
+                };
+                if !self.cell_is_free_for_birth(idx) {
+                    // **不要立刻凋亡**：先给这一格记一笔"又卡了一 tick"，
+                    // 然后继续找别的能长的地方。拥挤的芽常常是"这一格被母体占着，
+                    // 下一 tick 母体挪开就好了"——一刀切会把整支身体砍掉
+                    // （实测：一受阻就砍，成体体型从 14 格掉到 2 格）。
+                    plan.blocked[k] = plan.blocked[k].saturating_add(1);
+                    if blocked.is_none() {
+                        blocked = Some(k);
+                    }
+                    continue;
+                }
+                self.organisms[i]
+                    .anatomy
+                    .add_cell(cell.type_id, cell.dx, cell.dy, cell.dir);
+                self.write_grid(i);
+                grew = true;
+                break;
             }
         }
-        }
+
         if grew && cost > 0.0 {
             let paid: f64;
             {
@@ -1486,34 +1485,57 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
             // 生长耗能也是"离开生物圈"，进热池——否则账上会多出一块。
             self.heat_pool += paid;
         }
-        // ── 停滞计数与「提前成熟」──
-        //
-        // 长不动 = 能量不够（食物稀缺）**或**目标格被占（拥挤）。
-        // 两者在生态上是同一件事：**这个环境撑不起这么大的身体**。
-        //
-        // 连续卡够久就放弃长满，以当前体型成年 —— 这就是表型可塑性：
-        // 同一个基因型，食物充足时长成大体型（K），稀缺时提前成熟成小体型（r）。
+
+        // 蓝图每 tick 都要写回去：这一 tick 可能给若干格记了"受阻账"。
         if grew {
             self.organisms[i].grow_stall = 0;
-        } else {
-            let limit = self.config.life.growth_stall_mature;
-            if limit > 0 {
-                self.organisms[i].grow_stall = self.organisms[i].grow_stall.saturating_add(1);
-                // **提前成熟也要过年龄门槛**：否则「最短成长期」会被
-                // 「长不动就提前成熟」这条路径绕过去——那正好是最需要它的场景
-                // （贫斑块里芽长不动，本来会立刻变小体型）。
-                if self.organisms[i].grow_stall >= limit && old_enough {
-                    self.organisms[i].growth_plan = None;
-                    self.organisms[i].grow_stall = 0;
-                    // 成年即脱离母体：之后不再取能量，也不再占母体的芽位。
-                    self.organisms[i].parent_id = None;
-                    return;
+        } else if blocked.is_some() {
+            // ── 受阻即凋亡（批次 45）──
+            //
+            // 旧版在这里"长到任意相邻空位、类型从蓝图里随机取"——那是当年为了
+            // 不灭绝打的补丁（实测 1002/1003 两个种子会直接灭绝）。它的代价是
+            // 双重的：形态被彻底打乱（发育这件事等于不存在），而且**体型变成
+            // "芽周围有多少空地"的函数**——不可遗传。见 DESIGN.md §17.12。
+            //
+            // 凋亡是同一件事的有序版本：卡够 `GROW_BLOCK_TICKS` 的那一支
+            // （连同它下游）被放弃，剩下的部分仍然是一个合法的、可辨识的身体。
+            let mut to_prune: Vec<usize> = Vec::new();
+            for k in 0..plan.cells.len() {
+                if !plan.dropped[k] && plan.blocked[k] >= Self::GROW_BLOCK_TICKS {
+                    to_prune.push(k);
                 }
             }
+            for k in to_prune {
+                plan.prune_subtree(k);
+            }
+            self.organisms[i].grow_stall = 0;
+        } else {
+            // 长不动（能量不够 / 还没轮到）→ 停滞计数
+            self.organisms[i].grow_stall = self.organisms[i].grow_stall.saturating_add(1);
+            let limit = self.config.life.growth_stall_mature;
+            let reached = (limit > 0 && self.organisms[i].grow_stall >= limit)
+                || self.organisms[i].grow_stall >= Self::GROW_STALL_BACKSTOP;
+            // **提前成熟也要过年龄门槛**：否则「最短成长期」会被这条路径绕过去——
+            // 那正好是最需要它的场景（贫斑块里芽长不动，本来会立刻变小体型）。
+            if reached && old_enough {
+                self.organisms[i].growth_plan = None;
+                self.organisms[i].grow_stall = 0;
+                // 成年即脱离母体：之后不再取能量，也不再占母体的芽位。
+                self.organisms[i].parent_id = None;
+                return;
+            }
         }
+        self.organisms[i].growth_plan = Some(plan);
 
-        // 长满了**而且**够年龄 → 成年
-        if self.organisms[i].anatomy.cells.len() >= plan.cells.len() && old_enough {
+        // 长满了**而且**够年龄 → 成年。
+        // "长满"的口径是 `pending == 0`：既包含"真的长完了"，也包含"剩下的都凋亡了"。
+        let done = self
+            .organisms[i]
+            .growth_plan
+            .as_ref()
+            .map(|p| p.pending(&self.organisms[i].anatomy) == 0)
+            .unwrap_or(true);
+        if done && old_enough {
             self.organisms[i].growth_plan = None;
             self.organisms[i].grow_stall = 0;
             self.organisms[i].parent_id = None;
@@ -1907,9 +1929,9 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         // 聚类口径比指纹粗得多，切过去会让"同种相残打折"从少数情况变成多数情况，
         // 那是行为改动，得单独扫过再决定。
         if self.config.life.kin_by_species {
-            let d = self.organisms[pred_i]
-                .genome()
-                .composition_distance(self.organisms[vi].genome());
+            let a = self.organisms[pred_i].expressed_composition();
+            let b = self.organisms[vi].expressed_composition();
+            let d = crate::genome::composition_distance(&a, &b);
             let k = self.config.life.species_distance as f32;
             return if d <= k { 1.0 - p } else { 1.0 };
         }
@@ -1938,7 +1960,7 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         let mut reps: Vec<[u16; 17]> = Vec::new();
         let mut counts: Vec<usize> = Vec::new();
         for org in &self.organisms {
-            let comp = org.genome().composition();
+            let comp = org.expressed_composition();
             let mut hit = None;
             for (i, rep) in reps.iter().enumerate() {
                 let (mut inter, mut union) = (0u32, 0u32);
@@ -2346,22 +2368,37 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         child.rotation = rotation;
         child.direction = self.rng.int(4) as u8;
         child.parent_id = Some(id);
-        child.growth_plan = Some(self.organisms[i].anatomy.clone());
 
-        // 变异作用在**目标蓝图**上（同成长模式，否则体型永远变不了）
-        child.anatomy = child.growth_plan.take().unwrap();
+        // 变异作用在**基因组**上，再展开成蓝图（批次 45）。
+        // 这样"变异"和"发育"彻底分开：基因组决定**长成什么样**，
+        // 蓝图决定**按什么顺序长**。旧版把变异作用在身体上、再反推蓝图，
+        // 顺序信息在这一步就丢了。
         {
-            let parent = &self.organisms[i];
-            let cfg = &self.config;
-            mutate_organism(&mut child, parent, &mut self.rng, cfg);
+            let World {
+                organisms,
+                rng,
+                config,
+                ..
+            } = self;
+            let parent = &organisms[i];
+            let mut genome = parent.effective_genome();
+            let changed = mutate_genome(&mut genome, parent, rng, config);
+            mutate_brain(&mut child.brain, rng, &config.mutation);
+            child.mutability = if changed {
+                (parent.mutability + rng.gaussian(0.0, config.mutation.mutability_sigma))
+                    .clamp(1.0, 100.0)
+            } else {
+                parent.mutability
+            };
+            child.parent_fingerprint = parent.species_fingerprint.clone();
+            child.species_fingerprint = Some(std::sync::Arc::from(genome.hash().as_str()));
+            child.genome = genome;
         }
-        let plan = child.anatomy.clone();
-        if plan.cells.is_empty() {
+        let plan = child.genome.expand(self.config.life.max_body_cells);
+        let Some(seed) = plan.seed() else {
             return false;
-        }
-        child.anatomy = Anatomy::default();
-        let seed = plan.cell_at(0, 0).copied().unwrap_or(plan.cells[0]);
-        child.anatomy.add_cell(seed.type_id, 0, 0, seed.dir);
+        };
+        child.anatomy = crate::genome::seed_anatomy(seed);
         child.growth_plan = Some(plan);
         self.repro_ok += 1;
         self.add_organism(child);
@@ -2510,38 +2547,44 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
         child.direction = self.rng.int(4) as u8;
 
         let growth = self.config.life.growth_enabled;
-        if growth {
-            // 芽：只有 1 格，外加一份「要长成什么样」的蓝图。
-            child.growth_plan = Some(self.organisms[i].anatomy.clone());
-        } else {
-            child.anatomy.copy_from(&self.organisms[i].anatomy);
-        }
 
+        // 变异作用在**基因组**上（批次 45），和出芽同一条路径。
         {
-            let parent = &self.organisms[i];
-            let cfg = &self.config;
-            if growth {
-                // **变异必须作用在目标蓝图上**，不能只变异芽那 1 格——
-                // 否则体型永远变不了，演化直接停摆。
-                // 做法：临时把蓝图塞进 `anatomy` 让 `mutate_organism` 去改，
-                // 改完再把蓝图拆出来、重新取 1 格当种子。
-                child.anatomy = child.growth_plan.take().unwrap();
-                mutate_organism(&mut child, parent, &mut self.rng, cfg);
-                let plan = child.anatomy.clone();
-                if plan.cells.is_empty() {
-                    // 变异把身体删空了：这个后代生不下来
-                    if strict {
-                        self.charge_repro(i, 0.0);
-                    }
-                    return false;
-                }
-                child.anatomy = Anatomy::default();
-                let seed = plan.cell_at(0, 0).copied().unwrap_or(plan.cells[0]);
-                child.anatomy.add_cell(seed.type_id, 0, 0, seed.dir);
-                child.growth_plan = Some(plan);
+            let World {
+                organisms,
+                rng,
+                config,
+                ..
+            } = self;
+            let parent = &organisms[i];
+            let mut genome = parent.effective_genome();
+            let changed = mutate_genome(&mut genome, parent, rng, config);
+            mutate_brain(&mut child.brain, rng, &config.mutation);
+            child.mutability = if changed {
+                (parent.mutability + rng.gaussian(0.0, config.mutation.mutability_sigma))
+                    .clamp(1.0, 100.0)
             } else {
-                mutate_organism(&mut child, parent, &mut self.rng, cfg);
+                parent.mutability
+            };
+            child.parent_fingerprint = parent.species_fingerprint.clone();
+            child.species_fingerprint = Some(std::sync::Arc::from(genome.hash().as_str()));
+            child.genome = genome;
+        }
+        let plan = child.genome.expand(self.config.life.max_body_cells);
+        let Some(seed) = plan.seed() else {
+            // 变异把基因组删空了：这个后代生不下来
+            if strict {
+                self.charge_repro(i, 0.0);
             }
+            return false;
+        };
+        if growth {
+            // 芽：只有 1 格（胚），外加一份带**发育顺序**的蓝图。
+            child.anatomy = crate::genome::seed_anatomy(seed);
+            child.growth_plan = Some(plan);
+        } else {
+            // 不启用生长：直接展开成成体（基因组仍然生效，只是没有渐进发育）
+            child.anatomy = plan.to_anatomy();
         }
 
         if !child.can_place_at(
@@ -4333,7 +4376,7 @@ mod tests {
         let mut bud = Organism::new(&w.config, &mut rng, &w.grid, 4, 3);
         bud.anatomy.add_cell(ct::MOUTH, 0, 0, 0);
         bud.anatomy.recompute();
-        bud.growth_plan = Some(plan);
+        bud.growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         bud.energy = 1.0;
         let bid = w.add_organism(bud);
         let bi = w.organism_index(bid).unwrap();
@@ -5160,7 +5203,7 @@ mod tests {
         w.config.life.growth_cost = 1.0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 5.0;
 
         w.grow_organism(0);
@@ -5189,7 +5232,7 @@ mod tests {
         // 目标 2 格，但生长成本高到这一 tick 长不动
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.config.life.growth_cost = 100.0;
         w.organisms[0].energy = 10.0;
 
@@ -5212,7 +5255,7 @@ mod tests {
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
         plan.add_cell(ct::PRODUCER, 0, 1, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         let hp = w.organisms[0].max_health(&w.config);
         assert!(
             (hp - 3.0).abs() < 1e-9,
@@ -5221,21 +5264,24 @@ mod tests {
         );
     }
 
-    /// 目标格全被占时，芽要能**退化成长到相邻空位**，而不是永远卡在 1 格。
+    /// 目标格被占时**不再瞎猜**：砍掉那一支（凋亡），以当前体型成年。
     ///
-    /// 这条是实测救回来的：严格按蓝图长的话，芽生在母体旁边那片拥挤区域，
-    /// 目标格大概率被邻居占着，于是永远长不大、永远不能繁殖——1002/1003 直接灭绝。
+    /// 旧行为是"随机挑个相邻空位、类型从蓝图里随机取"——那是当年为了不灭绝
+    /// 打的补丁（严格按蓝图长会让 1002/1003 两个种子直接灭绝），代价是形态被
+    /// 彻底打乱，等于发育这件事不存在。
+    ///
+    /// 新行为保留了"不灭绝"，但换成了有序版本：长不出来的部分被放弃，
+    /// 剩下的仍然是一个合法的、可辨识的身体。这条测试钉的就是
+    /// **不许再往随机空位塞格子**。
     #[test]
-    fn growth_falls_back_to_any_free_neighbour() {
+    fn blocked_growth_prunes_the_branch_instead_of_guessing() {
         let (mut w, _) = tiny_world(&[(ct::MOUTH, 0, 0)]);
         w.config.life.growth_enabled = true;
-        // 这几条量的是细胞层面的机制（长一格 / 血量 / 兜底），不是年龄门槛，
-        // 所以显式把最短成长期关掉，否则"出生即成年"的前提不成立。
         w.config.life.growth_min_ticks = 0;
         w.config.life.growth_cost = 1.0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 5.0;
         // 把蓝图指定的那一格 (1,0) 用墙堵死
         let org = &w.organisms[0];
@@ -5243,12 +5289,76 @@ mod tests {
         let idx = w.grid.index(c, r).unwrap();
         w.set_cell_at(idx, ct::WALL, -1);
 
-        w.grow_organism(0);
+        // 受阻要**连续卡够 3 tick**才判定凋亡（给"母体挪开"留机会），所以跑几轮
+        for _ in 0..4 {
+            w.grow_organism(0);
+        }
         assert_eq!(
             w.organisms[0].cell_count(),
-            2,
-            "目标格被堵死时应该退化长到别的相邻空位"
+            1,
+            "长不出来的那一支应该被放弃，而不是长到随机空位"
         );
+        assert!(
+            w.organisms[0].growth_plan.is_none(),
+            "蓝图删空 = 成年（发育失败但活着，不是死亡）"
+        );
+        assert!(w.organisms[0].alive, "凋亡不该杀死个体");
+    }
+
+    /// `mutate_genome` 必须真的能往基因组里加格子。
+    ///
+    /// 这条是"体型塌到 2 格"那次事故的守门：基因组加不了格子，
+    /// 蓝图就永远停在出生时那么大，整个演化被冻住（实测成体从 14 格掉到 2.5 格）。
+    #[test]
+    fn mutate_genome_can_add_cells() {
+        let (mut w, id) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        let i = w.organism_index(id).unwrap();
+        w.config.mutation.add_prob = 100.0;
+        w.config.mutation.change_prob = 0.0;
+        w.config.mutation.remove_prob = 0.0;
+        w.organisms[i].mutability = 100.0;
+
+        let mut genome = w.organisms[i].effective_genome();
+        assert_eq!(genome.expand(0).len(), 1, "起始应该只有 1 格");
+        let mut rng = Rng::new(3);
+        let mut changed_any = false;
+        for _ in 0..40 {
+            if mutate_genome(&mut genome, &w.organisms[i], &mut rng, &w.config) {
+                changed_any = true;
+            }
+        }
+        assert!(changed_any, "mutate_genome 一次都没生效");
+        assert!(
+            genome.expand(0).len() > 1,
+            "加了 40 次细胞之后基因组还是 1 格——加细胞这条路径断了"
+        );
+    }
+
+    /// 没被挡住时，身体必须**按 BFS 顺序**由内向外长：先长靠近胚的格子。
+    #[test]
+    fn growth_follows_the_developmental_order() {
+        let (mut w, _) = tiny_world(&[(ct::PRODUCER, 0, 0)]);
+        w.config.life.growth_enabled = true;
+        w.config.life.growth_min_ticks = 0;
+        w.config.life.growth_cost = 0.0;
+        // 蓝图：0-(1,0)-(2,0)-(3,0) 一条线，外加 (0,1)
+        let mut plan = w.organisms[0].anatomy.clone();
+        plan.add_cell(ct::PRODUCER, 1, 0, 0);
+        plan.add_cell(ct::PRODUCER, 2, 0, 0);
+        plan.add_cell(ct::PRODUCER, 3, 0, 0);
+        plan.add_cell(ct::PRODUCER, 0, 1, 0);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
+        w.organisms[0].energy = 10.0;
+
+        w.grow_organism(0);
+        assert_eq!(w.organisms[0].cell_count(), 2, "一 tick 只长一格");
+        // 第二格必须是**紧邻**的格子（切比雪夫距离 1），不能是距离 3 的尾巴
+        let has_near = w.organisms[0]
+            .anatomy
+            .cells
+            .iter()
+            .any(|c| c.dx.abs() <= 1 && c.dy.abs() <= 1 && (c.dx != 0 || c.dy != 0));
+        assert!(has_near, "先长出来的必须是离胚最近的格子");
     }
 
     /// **环境可塑**：芽长不动够久就提前成熟，而且体型比目标小。
@@ -5268,7 +5378,7 @@ mod tests {
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
         plan.add_cell(ct::PRODUCER, 0, 1, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 0.0;
 
         for _ in 0..3 {
@@ -5296,7 +5406,7 @@ mod tests {
         w.config.life.growth_stall_mature = 0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 0.0;
         for _ in 0..100 {
             w.grow_organism(0);
@@ -5322,7 +5432,9 @@ mod tests {
         w.config.life.growth_min_ticks = 5;
         w.config.life.growth_cost = 0.0;
         // 1 格目标：出生就已经"长满"
-        w.organisms[0].growth_plan = Some(w.organisms[0].anatomy.clone());
+        w.organisms[0].growth_plan = Some(
+            crate::genome::Genome::from_anatomy(&w.organisms[0].anatomy).expand(0),
+        );
 
         for tick in 1..5 {
             w.grow_organism(0);
@@ -5346,7 +5458,9 @@ mod tests {
         w.config.life.growth_enabled = true;
         w.config.life.growth_min_ticks = 0;
         w.config.life.growth_cost = 0.0;
-        w.organisms[0].growth_plan = Some(w.organisms[0].anatomy.clone());
+        w.organisms[0].growth_plan = Some(
+            crate::genome::Genome::from_anatomy(&w.organisms[0].anatomy).expand(0),
+        );
         w.grow_organism(0);
         assert!(w.organisms[0].growth_plan.is_none(), "0 应该立刻成年");
     }
@@ -5362,7 +5476,7 @@ mod tests {
         w.config.life.growth_cost = 1.0;
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 5.0;
 
         w.grow_organism(0);
@@ -5387,7 +5501,7 @@ mod tests {
         let mut plan = w.organisms[0].anatomy.clone();
         plan.add_cell(ct::PRODUCER, 1, 0, 0);
         plan.add_cell(ct::PRODUCER, 0, 1, 0);
-        w.organisms[0].growth_plan = Some(plan);
+        w.organisms[0].growth_plan = Some(crate::genome::Genome::from_anatomy(&plan).expand(0));
         w.organisms[0].energy = 0.0; // 长不动
 
         for tick in 1..10 {

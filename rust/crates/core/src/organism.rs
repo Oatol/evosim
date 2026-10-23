@@ -67,7 +67,13 @@ pub struct Organism {
     /// 的细胞长出来，直到长满。**长成之前不能繁殖**——这是「未成年」的全部含义，
     /// 也是把体型变成"过程中的量"的关键。
     #[serde(default)]
-    pub growth_plan: Option<Anatomy>,
+    /// 基因组（批次 45）。为空时按当前身体反推一个退化单段基因组。
+    ///
+    /// 为什么允许为空：工厂投放、工坊蓝图、旧存档这些路径都是"先有身体"，
+    /// 让它们各自记得同步基因组是重复劳动。`effective_genome()` 会兜底。
+    pub genome: crate::genome::Genome,
+    /// 发育蓝图（批次 45）。原来是 `Option<Anatomy>`，现在带**发育顺序**和父子关系。
+    pub growth_plan: Option<crate::genome::BodyPlan>,
 
     /// 芽连续**没能长大**的 tick 数。到 `growth_stall_mature` 就提前成熟。
     ///
@@ -230,6 +236,7 @@ impl Organism {
             turn_cooldown: 0,
             last_move_ok: false,
             energy_gained_last: 0.0,
+            genome: crate::genome::Genome::default(),
             growth_plan: None,
             grow_stall: 0,
             grow_age: 0,
@@ -255,8 +262,20 @@ impl Organism {
     /// 为什么必须有这一层：芽的 `anatomy` 只有 1 格（蓝图在 `growth_plan` 里），
     /// 拿它算"构成"会把每个芽都当成 1 格的陌生生物——物种数会炸、亲缘识别会漏掉
     /// 最该保护的那一层（母子）。
-    pub fn genome(&self) -> &Anatomy {
-        self.growth_plan.as_ref().unwrap_or(&self.anatomy)
+    pub fn expressed_composition(&self) -> [u16; 17] {
+        match &self.growth_plan {
+            Some(p) => p.composition(),
+            None => self.anatomy.composition(),
+        }
+    }
+
+    /// 有效基因组：没设过就按当前身体反推一个退化单段。
+    pub fn effective_genome(&self) -> crate::genome::Genome {
+        if self.genome.is_empty() {
+            crate::genome::Genome::from_anatomy(&self.anatomy)
+        } else {
+            self.genome.clone()
+        }
     }
 
     /// 繁殖实际扣掉的**基础成本**

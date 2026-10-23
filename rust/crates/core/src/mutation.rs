@@ -3,8 +3,6 @@
 //! 顺序固定：元变异 → 结构变异 → 权重变异。
 //! **调用顺序决定 RNG 消耗顺序**，任何一处提前/延后都会让黄金快照错位。
 
-use std::sync::Arc;
-
 use crate::anatomy::Anatomy;
 use crate::brain::Brain;
 use crate::cell_type::{is_directional, LIVING_CELL_TYPES};
@@ -13,6 +11,7 @@ use crate::organism::Organism;
 use crate::rng::Rng;
 
 const MAX_ADD_ATTEMPTS: usize = 6;
+
 
 /// 八邻域（与 JS 的顺序完全一致，顺序影响 RNG 取值 → 影响结果）
 const NEIGHBORS_8: [(i32, i32); 8] = [
@@ -26,25 +25,32 @@ const NEIGHBORS_8: [(i32, i32); 8] = [
     (1, -1),
 ];
 
-/// 对子代应用全部变异。就地修改 child。
-pub fn mutate_organism(
-    child: &mut Organism,
+/// 对**基因组**应用全部变异（批次 45）。
+///
+/// 和旧版 `mutate_organism` 的区别：变异作用的对象从"身体"变成"基因组"。
+/// 这一步是整个发育层的入口——没有它，"变异"永远只能改当下这一具身体，
+/// 改不了"这具身体要长成什么样"。
+///
+/// 阶段 0 的基因组是**退化单段**（一个段、repeat=1、mirror=false），
+/// 所以这里直接借道 `mutate_anatomy` 的成熟算子：把段里的格子临时装成
+/// 一份 `Anatomy`，跑完三个算子再装回去。等阶段 1 有了 repeat/mirror，
+/// 再换成真正按段操作的算子。
+///
+/// 返回 `true` = 结构真的变了（调用方据此决定要不要扰动 `mutability`）。
+pub fn mutate_genome(
+    genome: &mut crate::genome::Genome,
     parent: &Organism,
     rng: &mut Rng,
     cfg: &Config,
 ) -> bool {
     let m = &cfg.mutation;
 
-    // ── 1. 元变异：变异率从母体继承 ──
-    child.mutability = parent.mutability;
-
-    // ── 2. 结构变异 ──
+    // 元变异：变异率从母体继承（这一条本来就在，位置不变）
     let base = if m.use_global_mutability {
         m.global_mutability
     } else {
-        child.mutability
+        parent.mutability
     };
-
     // 辐射带加成：站在辐射里的个体，**后代**更容易突变（临时乘，不写回 mutability）
     let rad_boost = if parent.in_radiation {
         cfg.terrain.rad_mutation_boost.max(1.0)
@@ -52,27 +58,25 @@ pub fn mutate_organism(
         1.0
     };
     let rate = base * rad_boost;
-
-    let mut changed = false;
-    if rate > 0.0 && rng.chance(rate.min(100.0)) {
-        changed = mutate_anatomy(&mut child.anatomy, rng, m, cfg.life.max_body_cells);
-        if changed {
-            child.mutability =
-                (parent.mutability + rng.gaussian(0.0, m.mutability_sigma)).clamp(1.0, 100.0);
-        }
+    if rate <= 0.0 || !rng.chance(rate.min(100.0)) {
+        return false;
     }
 
-    // ── 3. 权重变异 ──
-    mutate_brain(&mut child.brain, rng, m);
-
-    // ── 指纹 ──
-    child.parent_fingerprint = parent.species_fingerprint.clone();
-    child.species_fingerprint = if changed {
-        Some(Arc::from(child.anatomy.fingerprint().as_str()))
-    } else {
-        parent.species_fingerprint.clone()
+    let Some(seg) = genome.segments.first_mut() else {
+        return false;
     };
-
+    let mut a = Anatomy::default();
+    for c in &seg.cells {
+        a.add_cell(c.type_id, c.dx, c.dy, c.dir);
+    }
+    let changed = mutate_anatomy(&mut a, rng, m, cfg.life.max_body_cells);
+    if changed {
+        seg.cells = a
+            .cells
+            .iter()
+            .map(|c| crate::genome::GeneCell::new(c.type_id, c.dx, c.dy, c.dir))
+            .collect();
+    }
     changed
 }
 
@@ -107,9 +111,36 @@ pub fn mutate_anatomy(
     changed
 }
 
+/// 从"**表面**"的细胞里随机挑一个（有至少一个空邻居的）。
+///
+/// 为什么不能纯随机挑：身体是**紧贴**着长的，内部细胞的 8 个邻居全被自己占着，
+/// 抽到它就必然失败。所以"加细胞"这条路径在旧代码里**成功率极低**，而
+/// "删细胞"永远成功——净效果是基因组只会缩、不会长。
+///
+/// 实测（批次 45）：纯随机挑的时候，加 40% / 删 10% 的偏置都推不动体型，
+/// 基因组永远停在 3 格；改成只从表面挑之后，体型才真正开始长。
+fn peripheral_cell_index(anatomy: &Anatomy, rng: &mut Rng) -> Option<usize> {
+    let mut cand: Vec<usize> = Vec::new();
+    for (i, c) in anatomy.cells.iter().enumerate() {
+        for n in NEIGHBORS_8 {
+            if anatomy.cell_at(c.dx + n.0, c.dy + n.1).is_none() {
+                cand.push(i);
+                break;
+            }
+        }
+    }
+    if cand.is_empty() {
+        return None;
+    }
+    Some(cand[rng.int(cand.len())])
+}
+
 fn add_random_cell(anatomy: &mut Anatomy, rng: &mut Rng) -> bool {
     for _ in 0..MAX_ADD_ATTEMPTS {
-        let base_idx = match anatomy.random_cell_index(rng) {
+        // 优先从表面长（生长发生在表面），退化成纯随机只在"全身都堵死"时发生。
+        let base_idx = match peripheral_cell_index(anatomy, rng)
+            .or_else(|| anatomy.random_cell_index(rng))
+        {
             Some(i) => i,
             None => return false,
         };
