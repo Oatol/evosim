@@ -29,6 +29,13 @@ use serde::{Deserialize, Serialize};
 use crate::anatomy::{Anatomy, BodyCell};
 use crate::cell_type::ct;
 
+/// 一份蓝图最多几格（硬上限，批次 46）。
+///
+/// 段级操作会让体型**成倍**增长（repeat × mirror × 插段），没有上限的话
+/// 一次"repeat +1"就能让 40 格的身体变 80 格，而那样的身体在任何世界里都
+/// 长不出来——纯粹浪费算力和随机数。64 是"够大但不失控"的经验值。
+pub const MAX_PLAN_CELLS: usize = 64;
+
 /// 八邻域（和 `mutation.rs` 的 `NEIGHBORS_8` 同序）。
 ///
 /// **身体是按 8 邻域拼出来的**（`add_random_cell` 从 8 个方向挑），
@@ -316,11 +323,13 @@ impl Genome {
             }
         }
         // 与胚不连通的孤岛直接丢弃（相当于凋亡），而不是强行补桥。
-        let keep = if max_cells > 0 {
-            order.len().min(max_cells)
+        // 上限取"调用方给的"和"硬上限"里更小的那个（0 = 只用硬上限）。
+        let cap = if max_cells > 0 {
+            max_cells.min(MAX_PLAN_CELLS)
         } else {
-            order.len()
+            MAX_PLAN_CELLS
         };
+        let keep = order.len().min(cap);
         // ── 5. 归一化：把胚平移到 (0, 0) ──
         //
         // 出生时放下的那一格在 (0,0)，所以蓝图里的胚也必须在 (0,0)，

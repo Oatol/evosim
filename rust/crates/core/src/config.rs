@@ -934,11 +934,29 @@ pub struct MutationCfg {
     pub add_prob: f64,
     pub change_prob: f64,
     pub remove_prob: f64,
+    /// **段级操作的概率**（%，批次 46，默认 45）。
+    ///
+    /// 变异分两层：
+    /// - **细胞级**（加 / 改 / 删一格）：只能微调，永远长不出"新器官"；
+    /// - **段级**（重复 / 镜像 / 插段 / 删段 / 平移）：**一次跨 N 格**。
+    ///
+    /// 这是"演化太随机"的第一味解药：段级操作让变异产生**协调的**表型变化
+    /// （repeat +1 = 体型翻倍、mirror = 长出对称的另一半），而不是逐格乱撞。
+    pub segment_op_prob: f64,
     pub weight_mut_rate: f64,
     pub weight_mut_sigma: f64,
     pub weight_reset_rate: f64,
     pub use_global_mutability: bool,
     pub global_mutability: f64,
+    /// **新生个体的初始结构变异率**（%，批次 46：5 → 25）。
+    ///
+    /// 为什么改：这个数原本是"逐格微调"时代的标定——一次变异只动一格，
+    /// 5% 已经够用。但批次 45 之后，**结构变异是体型唯一的原材料**：
+    /// 5% 意味着每 20 个后代才有 1 次改动机会，6000 tick 里只有约 30 次
+    /// "加一格"，演化基本没有材料。
+    ///
+    /// 实测（grow_probe、1600 tick）：5% 时蓝图最大 6 格；25% 时 18 格；
+    /// 35% 时中位 6 / 最大 26。再往上（50%）会进入失控区（待长 900+、凋亡 200+）。
     pub initial_mutability: f64,
     pub mutability_sigma: f64,
 }
@@ -949,12 +967,13 @@ impl Default for MutationCfg {
             add_prob: 25.0,
             change_prob: 25.0,
             remove_prob: 25.0,
+            segment_op_prob: 45.0,
             weight_mut_rate: 0.02,
             weight_mut_sigma: 0.20,
             weight_reset_rate: 0.01,
             use_global_mutability: false,
             global_mutability: 5.0,
-            initial_mutability: 5.0,
+            initial_mutability: 25.0,
             mutability_sigma: 0.6,
         }
     }

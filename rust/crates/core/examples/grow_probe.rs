@@ -25,6 +25,10 @@ fn main() {
     if let Ok(v) = std::env::var("REMOVE") {
         if let Ok(r) = v.parse::<f64>() { cfg.mutation.remove_prob = r; }
     }
+    // `GCOST=N`：每长一格的能量成本（默认 1.0）
+    if let Ok(v) = std::env::var("GCOST") {
+        if let Ok(r) = v.parse::<f64>() { cfg.life.growth_cost = r; }
+    }
     if let Ok(v) = std::env::var("MUT") {
         if let Ok(r) = v.parse::<f64>() {
             cfg.mutation.use_global_mutability = true;
