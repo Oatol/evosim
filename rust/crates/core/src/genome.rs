@@ -36,6 +36,13 @@ use crate::cell_type::ct;
 /// 长不出来——纯粹浪费算力和随机数。64 是"够大但不失控"的经验值。
 pub const MAX_PLAN_CELLS: usize = 64;
 
+/// **段嵌套的最大深度**（阶段 2）。0 = 顶层段，1 = 子段（附肢），2 = 孙段。
+///
+/// 为什么是 2 而不是无限：每多一层，"这一个变异会重画多少东西"就翻一倍，
+/// 适应度地形会迅速变得崎岖——那正是设计稿里否掉 C2a（真 L-system）的理由。
+/// 两层已经够表达"躯干 + 附肢 + 附肢上的小节"，而且突变效应仍然局部。
+pub const MAX_DEPTH: u8 = 2;
+
 /// 八邻域（和 `mutation.rs` 的 `NEIGHBORS_8` 同序）。
 ///
 /// **身体是按 8 邻域拼出来的**（`add_random_cell` 从 8 个方向挑），
@@ -83,7 +90,7 @@ impl GeneCell {
 /// - `mirror`：镜像出一份 → 成对器官。
 /// - `rot`：整段旋转 90° 的倍数。
 /// - `children`：从这一段末尾长出去的子段 → 附肢（阶段 2）。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     pub cells: Vec<GeneCell>,
     /// 相对父段末端的锚点（顶层段相对世界原点）。
@@ -238,6 +245,19 @@ impl Genome {
         self.segments.iter().all(|s| s.cells.is_empty())
     }
 
+    /// 展开后的**名义**格数（不算去重、不算深度截断）。
+    ///
+    /// 变异算子用它当"细胞预算"的闸门：必须**高估**而不是低估，
+    /// 否则一个 `repeat +1` 能悄悄把 40 格变 80 格。
+    pub fn plan_cells(&self) -> usize {
+        fn seg_cells(s: &Segment) -> usize {
+            let copies = s.repeat.max(1) as usize * if s.mirror { 2 } else { 1 };
+            s.cells.len() * copies
+                + s.children.iter().map(seg_cells).sum::<usize>()
+        }
+        self.segments.iter().map(seg_cells).sum()
+    }
+
     /// 退化形态：把一份身体原样包成"单段基因组"。
     ///
     /// 这是阶段 0 的主力构造函数：所有旧路径（工厂投放、工坊蓝图、测试）
@@ -368,7 +388,7 @@ impl Genome {
             h ^= v;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         };
-        for seg in &self.segments {
+        fn eat_seg(seg: &Segment, eat: &mut impl FnMut(u64)) {
             eat(seg.cells.len() as u64);
             eat(seg.repeat as u64);
             eat(seg.mirror as u64);
@@ -379,7 +399,16 @@ impl Genome {
                 eat(((c.dx as u32 as u64) << 32) | (c.dy as u32 as u64));
                 eat(c.dir as u64);
             }
+            // **必须递归**：阶段 1 只吃了 `children.len()`，于是"子段内容变了
+            // 但个数没变"的变异不会改指纹——同一份基因组的两个不同身体
+            // 会被算成同一个物种，谱系树会直接塌掉。
             eat(seg.children.len() as u64);
+            for ch in &seg.children {
+                eat_seg(ch, eat);
+            }
+        }
+        for seg in &self.segments {
+            eat_seg(seg, &mut eat);
         }
         format!("g{h:016x}")
     }
@@ -422,9 +451,13 @@ fn emit(
                 depth.push(level);
                 last = (x, y);
             }
-            // 子段：从这一份的最后一格长出去
-            for child in &seg.children {
-                emit(child, level.saturating_add(1), last, out, depth);
+            // 子段：从这一份的最后一格长出去。
+            // **超过 `MAX_DEPTH` 就到此为止**：多出来的层不展开，而不是报错。
+            // 这样"变异偶尔把深度改大"不会让基因组失效，只是那一截不表达。
+            if level < MAX_DEPTH {
+                for child in &seg.children {
+                    emit(child, level + 1, last, out, depth);
+                }
             }
         }
     }
@@ -635,5 +668,126 @@ mod tests {
         let b = anatomy_of(&[(ct::PRODUCER, 0, 0), (ct::MOUTH, 1, 0)]);
         assert_eq!(Genome::from_anatomy(&a).hash(), Genome::from_anatomy(&a).hash());
         assert_ne!(Genome::from_anatomy(&a).hash(), Genome::from_anatomy(&b).hash());
+    }
+
+    // ────────────── 阶段 2：段嵌套 ──────────────
+
+    fn trunk() -> Segment {
+        // 三格躯干：(0,0) (0,1) (0,2)
+        Segment::plain(vec![
+            GeneCell::new(ct::PRODUCER, 0, 0, 0),
+            GeneCell::new(ct::PRODUCER, 0, 1, 0),
+            GeneCell::new(ct::PRODUCER, 0, 2, 0),
+        ])
+    }
+
+    fn limb() -> Segment {
+        Segment::plain(vec![
+            GeneCell::new(ct::MOUTH, 0, 0, 0),
+            GeneCell::new(ct::MOUTH, 0, 1, 0),
+        ])
+    }
+
+    /// 子段真的会被展开，而且 `depth` 记到了 1。
+    #[test]
+    fn child_segment_grows_out_of_the_parent_tail() {
+        let mut t = trunk();
+        let mut l = limb();
+        l.anchor = (1, 0); // 从宿主最后一格往侧边长出去
+        t.children.push(l);
+        let plan = Genome { segments: vec![t] }.expand(0);
+        assert_eq!(plan.len(), 5, "3 格躯干 + 2 格附肢");
+        assert_eq!(
+            plan.depth.iter().filter(|&&d| d == 1).count(),
+            2,
+            "两格附肢的 depth 都应该是 1"
+        );
+        assert_eq!(
+            plan.depth.iter().filter(|&&d| d == 0).count(),
+            3,
+            "躯干三格 depth 是 0"
+        );
+        // 附肢必须真的接在躯干末端侧面（dx 到 1，dy 从 2 开始）
+        let max_dx = plan.cells.iter().map(|c| c.dx).max().unwrap();
+        assert_eq!(max_dx, 1, "附肢应该从躯干末端 (0,2) 往侧边长出去");
+    }
+
+    /// 孙段能长出来，但**曾孙段不展开**（`MAX_DEPTH = 2`）。
+    #[test]
+    fn depth_is_capped_at_max_depth() {
+        let mut grand = Segment::plain(vec![GeneCell::new(ct::MOVER, 0, 0, 0)]);
+        grand.anchor = (0, 1);
+        let mut l = limb();
+        l.anchor = (1, 0);
+        l.children.push(grand);
+        let mut t = trunk();
+        t.children.push(l);
+
+        let t2_src = t.clone();
+        let plan = Genome { segments: vec![t] }.expand(0);
+        assert_eq!(plan.len(), 6, "3 + 2 + 1");
+        assert_eq!(plan.depth.iter().max().copied(), Some(2), "深度到 2");
+
+        // 再加一层曾孙：不该展开
+        let mut t2 = t2_src;
+        t2.children[0].children[0]
+            .children
+            .push(Segment::plain(vec![GeneCell::new(ct::MOVER, 0, 0, 0)]));
+        let plan2 = Genome { segments: vec![t2] }.expand(0);
+        assert_eq!(
+            plan2.len(),
+            plan.len(),
+            "第 4 层不展开——深度上限是 2"
+        );
+        assert!(plan2.depth.iter().all(|&d| d <= 2));
+    }
+
+    /// **子段内容变了，指纹必须变。**
+    ///
+    /// 阶段 1 的 `hash()` 只吃了 `children.len()`，于是"附肢换了一种细胞但格数没变"
+    /// 的变异不会改指纹 → 两个不同的身体被算成同一个物种，谱系树会塌。
+    #[test]
+    fn hash_sees_inside_children() {
+        let mut a = trunk();
+        let mut la = limb();
+        la.anchor = (1, 0);
+        a.children.push(la);
+
+        let mut b = trunk();
+        let mut lb = limb();
+        lb.anchor = (1, 0);
+        // 只改子段里一格细胞类型
+        lb.cells[0].type_id = ct::MOVER;
+        b.children.push(lb);
+
+        let ga = Genome { segments: vec![a] };
+        let gb = Genome { segments: vec![b] };
+        assert_eq!(ga.segments[0].children.len(), gb.segments[0].children.len());
+        assert_ne!(ga.hash(), gb.hash(), "子段内容不同，指纹必须不同");
+    }
+
+    /// `plan_cells` 必须把子段算进去（变异算子拿它当预算闸门，漏算就会超限）。
+    #[test]
+    fn plan_cells_counts_children() {
+        let mut t = trunk();
+        let mut l = limb();
+        l.anchor = (1, 0);
+        t.children.push(l);
+        let g = Genome { segments: vec![t] };
+        assert_eq!(g.plan_cells(), 5);
+        assert_eq!(g.expand(0).len(), 5, "没有重叠时两者应该一致");
+    }
+
+    /// 子段也要跟着 `repeat` 一起复制：体节 = 每节一条附肢。
+    #[test]
+    fn repeated_segment_carries_its_children() {
+        let mut t = trunk();
+        let mut l = limb();
+        l.anchor = (1, 0);
+        t.children.push(l);
+        t.repeat = 2;
+        let plan = Genome { segments: vec![t] }.expand(0);
+        assert_eq!(plan.len(), 10, "两节躯干各带一条两格附肢");
+        assert_eq!(plan.depth.iter().filter(|&&d| d == 1).count(), 4);
     }
 }

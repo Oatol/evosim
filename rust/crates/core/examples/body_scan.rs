@@ -114,6 +114,11 @@ struct Row {
     prod_mult: f64,
     /// 成体里「紧凑度」分布：`svr ≥ 2`（明显比单格厚实）的占比（%）
     compact: f64,
+    /// **有附肢的成体占比（%）**：展开后蓝图里存在 depth ≥ 1 的格。
+    /// 阶段 2（段嵌套）的验收指标——「躯干 + 附肢」到底有没有长出来。
+    limbs: f64,
+    /// 成体蓝图里出现过的最大嵌套深度
+    depth_max: u8,
 }
 
 fn run(
@@ -407,6 +412,22 @@ fn run(
     let prod_mult = if adult_n == 0 { 0.0 } else { mult_sum / adult_n as f64 };
     let compact = if adult_n == 0 { 0.0 } else { compact_n as f64 * 100.0 / adult_n as f64 };
 
+    // ── 阶段 2：附肢（嵌套深度 ≥ 1）──
+    //
+    // 成体没有 `growth_plan`，所以要重新展开一次基因组才看得到深度。
+    // 只在诊断里做——模拟主循环里不需要这个量。
+    let mut limb_n = 0usize;
+    let mut depth_max = 0u8;
+    for o in w.organisms.iter().filter(|o| o.growth_plan.is_none()) {
+        let plan = o.effective_genome().expand(w.config.life.max_body_cells);
+        let d = plan.depth.iter().copied().max().unwrap_or(0);
+        depth_max = depth_max.max(d);
+        if d >= 1 {
+            limb_n += 1;
+        }
+    }
+    let limbs = if adult_n == 0 { 0.0 } else { limb_n as f64 * 100.0 / adult_n as f64 };
+
     Row {
         pop: w.organisms.len() as f64,
         body_avg: st.avg_cells,
@@ -507,6 +528,8 @@ fn run(
         svr,
         prod_mult,
         compact,
+        limbs,
+        depth_max,
     }
 }
 
@@ -603,6 +626,8 @@ fn run_seeds(
         svr: 0.0,
         prod_mult: 0.0,
         compact: 0.0,
+        limbs: 0.0,
+        depth_max: 0,
     };
     for &s in seeds {
         let r = run(
@@ -661,6 +686,8 @@ fn run_seeds(
         acc.svr += r.svr;
         acc.prod_mult += r.prod_mult;
         acc.compact += r.compact;
+        acc.limbs += r.limbs;
+        acc.depth_max = acc.depth_max.max(r.depth_max);
     }
     let n = seeds.len() as f64;
     acc.pop /= n;
@@ -702,6 +729,7 @@ fn run_seeds(
     acc.svr /= n;
     acc.prod_mult /= n;
     acc.compact /= n;
+    acc.limbs /= n;
     acc
 }
 
@@ -995,9 +1023,9 @@ fn main() {
         };
         println!("【0】体型收益：光合产出 × svr^k（svr = 8×格数 ÷ 暴露面数，1 格恒为 1.00）");
         println!(
-            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>9}  {:>7}  {:>7}  {:>7}",
+            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>9}  {:>7}  {:>5}  {:>7}  {:>7}  {:>7}",
             "k产出", "k维持", "个体", "平均体型", "成体体型", "最大体型", "svr", "产出倍率",
-            "紧凑%(svr>=2)", "存活种", "物种聚", "异养%"
+            "紧凑%(svr>=2)", "附肢%", "深度", "存活种", "物种聚", "异养%"
         );
         for &u in &ups {
             for &k in &ks {
@@ -1009,9 +1037,9 @@ fn main() {
                     cave, cooldown, egg, hatch, spec, k, u,
                 );
                 println!(
-                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>9.1}%  {:>7.1}  {:>7.1}  {:>7.1}",
+                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>9.1}%  {:>6.1}%  {:>5}  {:>7.1}  {:>7.1}  {:>7.1}",
                     k, u, r.pop, r.body_avg, r.body_adult, r.body_max, r.svr, r.prod_mult,
-                    r.compact, r.species, r.species_clustered, r.hetero
+                    r.compact, r.limbs, r.depth_max, r.species, r.species_clustered, r.hetero
                 );
             }
         }

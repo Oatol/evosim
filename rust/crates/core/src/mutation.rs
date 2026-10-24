@@ -93,15 +93,9 @@ pub fn mutate_genome(
     changed
 }
 
-/// 基因组展开后的总格数（"细胞预算"用）。
+/// 基因组展开后的总格数（"细胞预算"用）。**含子段**——见 `Genome::plan_cells`。
 fn plan_size(g: &crate::genome::Genome) -> usize {
-    g.segments
-        .iter()
-        .map(|s| {
-            let copies = s.repeat.max(1) as usize * if s.mirror { 2 } else { 1 };
-            s.cells.len() * copies
-        })
-        .sum()
+    g.plan_cells()
 }
 
 /// 整个基因组在 y 方向的最低点（插段时用来"叠在下方"）。
@@ -118,7 +112,7 @@ fn bbox_max_dy(g: &crate::genome::Genome) -> i32 {
 
 /// 段级操作：一次改动影响整块身体。
 ///
-/// 五个算子等概率挑一个：
+/// 七个算子等概率挑一个（阶段 2 加了后两个）：
 ///
 /// | 算子 | 效果 | 生态意义 |
 /// |---|---|---|
@@ -127,33 +121,46 @@ fn bbox_max_dy(g: &crate::genome::Genome) -> i32 {
 /// | 插段 | 复制一段叠在下方 | 新器官（**重尾增长**的主要来源） |
 /// | 删段 | 丢掉一段 | 简化 |
 /// | 平移 | 整段挪一格 | 只在多段时有效；单段会被"胚归一化"抹掉 → 中性变异 |
+/// | **长子段** | 从某段末尾挂一条附肢 | 「躯干 + 附肢」（阶段 2） |
+/// | **删子段** | 砍掉一条附肢 | 简化 / 逆转上一行 |
+///
+/// **前五个算子的目标从"顶层段"改成了"任意段（含子段）"**（阶段 2）。
+/// 这不是顺手改的：子段一旦存在，如果只有 `repeat` 能作用于顶层，
+/// 那么一条附肢永远只能靠"长子段"那一下随机生成的形状，
+/// 之后再也变不了——附肢就成了死结构。让所有算子都能打到子段，
+/// 附肢才和躯干一样可演化。
 ///
 /// 每一步都检查 `MAX_PLAN_CELLS`：超了就回滚。没有这道闸，一次 repeat+1
 /// 就能把 40 格变 80 格，而那种身体在任何世界里都长不出来。
 fn segment_op(g: &mut crate::genome::Genome, rng: &mut Rng) -> bool {
-    use crate::genome::MAX_PLAN_CELLS;
+    use crate::genome::{MAX_DEPTH, MAX_PLAN_CELLS};
     if g.segments.is_empty() {
         return false;
     }
-    match rng.int(5) {
+    let paths = seg_paths(g);
+    if paths.is_empty() {
+        return false;
+    }
+    match rng.int(7) {
         // ① 重复次数 ±1（偏向上调：基因/体节重复是真实演化的主要创新来源）
         0 => {
-            let i = rng.int(g.segments.len());
+            let p = paths[rng.int(paths.len())].clone();
+            let seg = seg_at_mut(g, &p).unwrap();
             let up = rng.chance(65.0);
             if up {
-                let old = g.segments[i].repeat;
+                let old = seg.repeat;
                 if old >= 8 {
                     return false;
                 }
-                g.segments[i].repeat = old + 1;
+                seg.repeat = old + 1;
                 if plan_size(g) <= MAX_PLAN_CELLS {
                     true
                 } else {
-                    g.segments[i].repeat = old;
+                    seg_at_mut(g, &p).unwrap().repeat = old;
                     false
                 }
-            } else if g.segments[i].repeat > 1 {
-                g.segments[i].repeat -= 1;
+            } else if seg.repeat > 1 {
+                seg.repeat -= 1;
                 true
             } else {
                 false
@@ -161,10 +168,11 @@ fn segment_op(g: &mut crate::genome::Genome, rng: &mut Rng) -> bool {
         }
         // ② 镜像开关
         1 => {
-            let i = rng.int(g.segments.len());
-            g.segments[i].mirror = !g.segments[i].mirror;
+            let p = paths[rng.int(paths.len())].clone();
+            let before = seg_at_mut(g, &p).unwrap().mirror;
+            seg_at_mut(g, &p).unwrap().mirror = !before;
             if plan_size(g) > MAX_PLAN_CELLS {
-                g.segments[i].mirror = !g.segments[i].mirror;
+                seg_at_mut(g, &p).unwrap().mirror = before;
                 return false;
             }
             true
@@ -183,7 +191,7 @@ fn segment_op(g: &mut crate::genome::Genome, rng: &mut Rng) -> bool {
             }
             true
         }
-        // ④ 删一段
+        // ④ 删一段（顶层；子段由 ⑥ 负责）
         3 => {
             if g.segments.len() <= 1 {
                 return false;
@@ -193,14 +201,108 @@ fn segment_op(g: &mut crate::genome::Genome, rng: &mut Rng) -> bool {
             true
         }
         // ⑤ 整段平移一格
-        _ => {
-            let i = rng.int(g.segments.len());
+        4 => {
+            let p = paths[rng.int(paths.len())].clone();
             let d = [(1, 0), (-1, 0), (0, 1), (0, -1)][rng.int(4)];
-            g.segments[i].anchor.0 += d.0;
-            g.segments[i].anchor.1 += d.1;
+            let seg = seg_at_mut(g, &p).unwrap();
+            seg.anchor.0 += d.0;
+            seg.anchor.1 += d.1;
+            true
+        }
+        // ⑥ 长子段：从某段末尾挂一条附肢（阶段 2）
+        5 => {
+            // 只能挂在还没到 `MAX_DEPTH` 的段上
+            let ok: Vec<Vec<usize>> = paths
+                .iter()
+                .filter(|p| (p.len() as u8) <= MAX_DEPTH)
+                .cloned()
+                .collect();
+            if ok.is_empty() {
+                return false;
+            }
+            let host = ok[rng.int(ok.len())].clone();
+            // 附肢本身取一段现成的身体（"把已经有的部件再挂一份"），
+            // 比凭空造一条随机段更可能长成有用的东西——也更容易被后续算子改。
+            let src = g.segments[rng.int(g.segments.len())].cells.clone();
+            if src.is_empty() {
+                return false;
+            }
+            let mut child = crate::genome::Segment::plain(src);
+            // 锚点相对"宿主段的最后一格"。(0,0) 会和那一格重合被去重掉，
+            // 所以错开一格——**往侧边**错，不是往下。
+            //
+            // 往下错是错的： 时下一节躯干正好从"上一节末端 + 1"
+            // 开始，向下的附肢会和下一节**完全重叠**被去重掉（实测两节躯干
+            // 各带一条两格附肢，应该 10 格，实际只有 8 格）。
+            // 侧向长既是真实形态（附肢从体侧伸出），也天然避开体节堆叠方向。
+            child.anchor = (1, 0);
+            seg_at_mut(g, &host).unwrap().children.push(child);
+            if plan_size(g) > MAX_PLAN_CELLS {
+                seg_at_mut(g, &host).unwrap().children.pop();
+                return false;
+            }
+            true
+        }
+        // ⑦ 删子段
+        _ => {
+            let with_children: Vec<Vec<usize>> = paths
+                .iter()
+                .filter(|p| !seg_at(g, p).map(|s| s.children.is_empty()).unwrap_or(true))
+                .cloned()
+                .collect();
+            if with_children.is_empty() {
+                return false;
+            }
+            let host = with_children[rng.int(with_children.len())].clone();
+            let seg = seg_at_mut(g, &host).unwrap();
+            let k = rng.int(seg.children.len());
+            seg.children.remove(k);
             true
         }
     }
+}
+
+/// 所有段的路径（前序：顶层段 → 它的子段 → 孙段…）。
+///
+/// 段是树，而变异算子要能打到树上**任意**一个节点。Rust 的借用规则不允许
+/// 同时持有多个 `&mut Segment`，所以这里先收集"从根到节点"的下标路径，
+/// 再按路径重新导航——路径很短（≤ 3），开销可以忽略。
+fn seg_paths(g: &crate::genome::Genome) -> Vec<Vec<usize>> {
+    fn walk(s: &crate::genome::Segment, path: Vec<usize>, depth: u8, out: &mut Vec<Vec<usize>>) {
+        out.push(path.clone());
+        if depth >= crate::genome::MAX_DEPTH {
+            return;
+        }
+        for (j, c) in s.children.iter().enumerate() {
+            let mut p = path.clone();
+            p.push(j);
+            walk(c, p, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for (i, s) in g.segments.iter().enumerate() {
+        walk(s, vec![i], 0, &mut out);
+    }
+    out
+}
+
+fn seg_at<'a>(g: &'a crate::genome::Genome, path: &[usize]) -> Option<&'a crate::genome::Segment> {
+    let mut s = g.segments.get(*path.first()?)?;
+    for &k in &path[1..] {
+        s = s.children.get(k)?;
+    }
+    Some(s)
+}
+
+fn seg_at_mut<'a>(
+    g: &'a mut crate::genome::Genome,
+    path: &[usize],
+) -> Option<&'a mut crate::genome::Segment> {
+    let mut s = g.segments.get_mut(*path.first()?)?;
+    for &k in &path[1..] {
+        s = s.children.get_mut(k)?;
+    }
+    Some(s)
 }
 
 /// 结构变异：三个算子各自独立判定
@@ -472,6 +574,69 @@ mod tests {
         assert!(
             max_seen >= 8,
             "600 次段级操作都没让身体长到 8 格（最大 {max_seen}）——算子没在起作用"
+        );
+    }
+
+    /// 段级操作必须能**长出子段**，而且永远不超过 `MAX_DEPTH`。
+    #[test]
+    fn segment_ops_can_grow_children_within_the_depth_cap() {
+        let mut g = one_segment();
+        let mut rng = Rng::new(23);
+        let mut max_depth = 0u8;
+        let mut max_children = 0usize;
+        for _ in 0..2000 {
+            segment_op(&mut g, &mut rng);
+            let plan = g.expand(0);
+            max_depth = max_depth.max(plan.depth.iter().copied().max().unwrap_or(0));
+            let mut total = 0;
+            fn count(s: &crate::genome::Segment) -> usize {
+                s.children.len() + s.children.iter().map(count).sum::<usize>()
+            }
+            for s in &g.segments {
+                total += count(s);
+            }
+            max_children = max_children.max(total);
+            // 硬上限：展开结果不能超预算
+            assert!(
+                g.plan_cells() <= crate::genome::MAX_PLAN_CELLS * 2,
+                "预算闸门失效：plan_cells = {}",
+                g.plan_cells()
+            );
+        }
+        assert!(max_children > 0, "2000 次段级操作一次都没长出子段——算子没生效");
+        assert!(max_depth >= 1, "子段存在但 depth 从没到 1");
+        assert!(
+            max_depth <= crate::genome::MAX_DEPTH,
+            "深度超过上限：{max_depth}"
+        );
+    }
+
+    /// 子段必须能被后续算子改到（否则附肢是死结构，只能靠生成那一下随机）。
+    #[test]
+    fn child_segments_are_reachable_by_operators() {
+        // 造一个"躯干 + 附肢"的基因组，然后狂打 repeat/mirror/平移。
+        let mut g = one_segment();
+        let mut child = crate::genome::Segment::plain(vec![
+            crate::genome::GeneCell::new(ct::MOUTH, 0, 0, 0),
+            crate::genome::GeneCell::new(ct::MOUTH, 0, 1, 0),
+        ]);
+        child.anchor = (0, 1);
+        g.segments[0].children.push(child);
+        let before = g.segments[0].children[0].clone();
+        let mut rng = Rng::new(5);
+        let mut touched = false;
+        for _ in 0..400 {
+            let snap = g.segments[0].children[0].clone();
+            segment_op(&mut g, &mut rng);
+            if g.segments[0].children.first().map(|c| c != &snap) == Some(true) {
+                touched = true;
+                break;
+            }
+        }
+        assert!(
+            touched,
+            "400 次段级操作都没改到附肢（初始 {:?}）——子段不可达",
+            before.cells.len()
         );
     }
 
