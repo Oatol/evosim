@@ -365,6 +365,42 @@ impl Organism {
             .sum()
     }
 
+    /// **体表/体积比**：`8n / 暴露面数`。1 格身体恒为 1.0（基准）。
+    ///
+    /// 这是批次 47「体型收益」的唯一几何量。它只数**当前已长出来的身体**，
+    /// 不数蓝图——所以芽从 1.0 起步、随着长大一路爬到成体的值。
+    /// 这是有意的：收益必须来自"真的长成了"，不能来自"基因里写着大"。
+    ///
+    /// 量级参考：3×3 方块 = 3.0，9 格直线 = 1.8，2 格并排 = 1.14。
+    pub fn surface_volume_ratio(&self) -> f64 {
+        let n = self.anatomy.cells.len();
+        if n == 0 {
+            return 1.0;
+        }
+        let perim = self.anatomy.perimeter.max(1) as f64;
+        (8.0 * n as f64 / perim).max(1.0)
+    }
+
+    /// 光合产出的体型倍率（`exposure_prod_exp = 0` 时恒为 1.0）。
+    pub fn size_prod_mult(&self, cfg: &Config) -> f64 {
+        let k = cfg.life.exposure_prod_exp;
+        if !(k > 0.0) {
+            return 1.0;
+        }
+        self.surface_volume_ratio().powf(k).clamp(1.0, 4.0)
+    }
+
+    /// 维持成本的体型折扣（`exposure_upkeep_exp = 0` 时恒为 1.0）。
+    pub fn size_upkeep_mult(&self, cfg: &Config) -> f64 {
+        let k = cfg.life.exposure_upkeep_exp;
+        if !(k > 0.0) {
+            return 1.0;
+        }
+        self.surface_volume_ratio()
+            .powf(-k)
+            .clamp(0.25, 1.0)
+    }
+
     pub fn upkeep_cost(&self, cfg: &Config) -> f64 {
         let scale = cfg.life.metabolism_scale;
         if !(scale > 0.0) {
@@ -382,12 +418,15 @@ impl Organism {
         // 也就是**单位体重的代谢率随体型下降**（大动物吃得少、活得久）。
         // 1 格个体 `n^(p-1) = 1`，所以它一分钱折扣都拿不到。
         let p = cfg.life.upkeep_exponent;
-        if (p - 1.0).abs() < 1e-12 {
+        let shaped = if (p - 1.0).abs() < 1e-12 {
             cost * scale
         } else {
             let n = self.anatomy.cells.len().max(1) as f64;
             cost * n.powf(p - 1.0) * scale
-        }
+        };
+        // 几何折扣（批次 47）：按**形状**而不是按格数。直线身体拿不到，
+        // 紧凑身体拿得到——见 `LifeCfg::exposure_upkeep_exp`。
+        shaped * self.size_upkeep_mult(cfg)
     }
 
     pub fn food_value_total(&self, cfg: &Config) -> f64 {

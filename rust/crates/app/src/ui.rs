@@ -1296,6 +1296,45 @@ pub fn draw(
                     cfg.life.upkeep_exponent = up;
                 }
 
+                // ── 体型收益（批次 47）──
+                let before_ep = cfg.life.exposure_prod_exp;
+                let mut ep = before_ep;
+                ui.add(
+                    egui::Slider::new(&mut ep, 0.0..=1.0)
+                        .text("体型产出指数")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "光合产出 × (8×格数 ÷ 暴露面数)^指数。0 = 关闭（默认）。
+                     1 格身体恒为 1.00，永远拿不到好处；3×3 方块是 2.25。
+                     这是唯一**结构性**的体型收益：它奖励「大而紧凑」，
+                     同样 9 格，3×3 方块（2.25）比 1×9 直线（1.80）多挣 25%。
+                     注意它同时会抬高全世界的总收入，而多出来的能量通常被
+                     小体型抢走——实测 6000 tick 平均体型 4.81 → 4.58，但物种 301 → 425。",
+                );
+                if (ep - before_ep).abs() > 1e-9 {
+                    cfg.life.exposure_prod_exp = ep;
+                }
+
+                let before_eu = cfg.life.exposure_upkeep_exp;
+                let mut eu = before_eu;
+                ui.add(
+                    egui::Slider::new(&mut eu, 0.0..=1.0)
+                        .text("体型维持折扣")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "维持成本 × (8×格数 ÷ 暴露面数)^-指数。0 = 关闭（默认）。
+                     和上面的「维持成本指数」不同：那个按**格数**打折，
+                     这个按**形状**打折——细长身体几乎拿不到，紧凑身体拿得到。
+                     注意成本只占满照收入的 8%，它单独几乎推不动任何东西。",
+                );
+                if (eu - before_eu).abs() > 1e-9 {
+                    cfg.life.exposure_upkeep_exp = eu;
+                }
+
                 // ── 成长过程（批次 12）──
                     });
                     ui.add_space(12.0);

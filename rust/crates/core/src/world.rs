@@ -1750,6 +1750,9 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 let mut gain = lit
                     * self.config.life.photosynthesis_rate
                     * self.config.attr(cell.type_id, AttrField::ProdMult);
+                // 体型收益（批次 47）：体表/体积比。1 格身体恒为 1.0，
+                // 所以这个乘数**只可能奖励"真的长成了大而紧凑的身体"**。
+                gain *= self.organisms[i].size_prod_mult(&self.config);
                 if gain <= 0.0 {
                     return;
                 }
@@ -5796,5 +5799,151 @@ mod tests {
         // 1 格猎物、1 点伤害 → 当 tick 就死
         assert!(!w.organisms[vi].alive, "关掉之后仍然是 1 tick 咬死");
         assert!(w.organisms[vi].damage >= 1.0);
+    }
+}
+
+// ────────────────── 批次 47：体型收益（体表/体积比）──────────────────
+#[cfg(test)]
+mod size_benefit_tests {
+    use super::*;
+    use crate::cell_type::ct;
+
+    /// 建一个全是生产者的小世界。**关掉遮挡与代谢**：
+    /// 这两个都会随形状变化（方块的下层会被自己的上层挡住），
+    /// 留着它们，量到的就不是"几何收益"而是"遮挡惩罚"。
+    fn prod_world(cells: &[(i32, i32)]) -> World {
+        let mut cfg = Config::default();
+        cfg.world.cols = 16;
+        cfg.world.rows = 16;
+        cfg.life.metabolism_scale = 0.0;
+        cfg.life.shade_strength = 0.0;
+        // **必须关掉出芽**：芽位一满足就会走 `reproduce_bud`，固定扣 1.0 启动成本。
+        // 第一版没关，9 格本该产 4.5，实测 3.5 —— 差的正是那一笔。
+        cfg.life.budding_enabled = false;
+        cfg.life.growth_enabled = false;
+        cfg.life.photosynthesis_rate = 0.5;
+        cfg.world.sun_intensity = 1.0;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+        let mut org = Organism::new(&w.config, &mut rng, &w.grid, 6, 6);
+        for (dx, dy) in cells {
+            org.anatomy.add_cell(ct::PRODUCER, *dx, *dy, 0);
+        }
+        org.anatomy.recompute();
+        w.add_organism(org);
+        w.light.sky_level.fill(255);
+        w.light.level.fill(255);
+        w.organisms[0].energy = 0.0;
+        w
+    }
+
+    fn line(n: i32) -> Vec<(i32, i32)> {
+        (0..n).map(|k| (k, 0)).collect()
+    }
+
+    fn block(s: i32) -> Vec<(i32, i32)> {
+        let mut v = Vec::new();
+        for dy in 0..s {
+            for dx in 0..s {
+                v.push((dx, dy));
+            }
+        }
+        v
+    }
+
+    /// `exposure_prod_exp = 0` 必须逐位等于旧行为：9 格各产 0.5，共 4.5。
+    #[test]
+    fn zero_exposure_exp_is_a_no_op() {
+        let mut w = prod_world(&block(3));
+        assert_eq!(w.config.life.exposure_prod_exp, 0.0, "默认必须是关的");
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 4.5).abs() < 1e-9,
+            "9 格满照 × 0.5 = 4.5，实测 {}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// **单格身体一分钱好处都拿不到**——这是「结构性收益」的定义性测试。
+    /// 只要这条不成立，机制就退化成"又一个线性加成"。
+    #[test]
+    fn single_cell_body_gains_nothing() {
+        let mut w = prod_world(&[(0, 0)]);
+        w.config.life.exposure_prod_exp = 0.3;
+        assert!(
+            (w.organisms[0].size_prod_mult(&w.config) - 1.0).abs() < 1e-12,
+            "1 格身体的倍率必须是 1.0"
+        );
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-9,
+            "1 格产出仍应是 0.5，实测 {}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 同样 9 格：紧凑方块比细长直线挣得多。**形状第一次有适应度含义。**
+    #[test]
+    fn compact_body_outproduces_sprawling_body() {
+        let run = |cells: &[(i32, i32)]| -> f64 {
+            let mut w = prod_world(cells);
+            w.config.life.exposure_prod_exp = 0.3;
+            w.act_organism(0);
+            w.organisms[0].energy
+        };
+        let sq = run(&block(3));
+        let ln = run(&line(9));
+        assert!(
+            sq > ln * 1.1,
+            "3×3 方块应该明显高于 1×9 直线：{sq:.3} vs {ln:.3}"
+        );
+        // 而且直线自己也拿到了「大」的好处（1 格 0.5 → 直线 5 格以上）
+        assert!(ln > 9.0 * 0.5, "直线也该比完全关闭时高：{ln:.3}");
+    }
+
+    /// 维持成本的几何折扣：同样 9 格，方块的单位成本低于直线；单格没有折扣。
+    #[test]
+    fn compact_body_pays_less_upkeep_per_cell() {
+        let mk = |cells: &[(i32, i32)]| -> f64 {
+            let mut cfg = Config::default();
+            cfg.life.exposure_upkeep_exp = 0.5;
+            cfg.life.metabolism_scale = 1.0;
+            let mut rng = Rng::new(1);
+            let grid = Grid::new(16, 16, false);
+            let mut o = Organism::new(&cfg, &mut rng, &grid, 6, 6);
+            for (dx, dy) in cells {
+                o.anatomy.add_cell(ct::PRODUCER, *dx, *dy, 0);
+            }
+            o.anatomy.recompute();
+            o.upkeep_cost(&cfg)
+        };
+        let one = mk(&[(0, 0)]);
+        let sq = mk(&block(3));
+        let ln = mk(&line(9));
+        let per = |total: f64, n: usize| total / n as f64;
+        assert!(
+            (per(one, 1) - Config::default().cells[ct::PRODUCER as usize].cost).abs() < 1e-9,
+            "单格必须付全价"
+        );
+        assert!(
+            per(sq, 9) < per(ln, 9),
+            "方块的单位成本应低于直线：{:.5} vs {:.5}",
+            per(sq, 9),
+            per(ln, 9)
+        );
+        assert!(per(sq, 9) < per(one, 1), "大而紧凑的身体必须更省");
+    }
+
+    /// 倍率有上限，不能让 64 格身体把世界点爆。
+    #[test]
+    fn size_prod_mult_is_clamped() {
+        let mut w = prod_world(&block(3));
+        w.config.life.exposure_prod_exp = 5.0;
+        let m = w.organisms[0].size_prod_mult(&w.config);
+        assert!(m <= 4.0 + 1e-9, "倍率必须封顶 4.0，实测 {m}");
+        w.config.life.exposure_upkeep_exp = 5.0;
+        let u = w.organisms[0].size_upkeep_mult(&w.config);
+        assert!(u >= 0.25 - 1e-9, "折扣必须封底 0.25，实测 {u}");
     }
 }

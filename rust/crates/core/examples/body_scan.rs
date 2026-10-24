@@ -105,6 +105,15 @@ struct Row {
     species_clustered: f64,
     /// 体型分布：1 格 / 2 格 / … 的个体占比（只统计前 10 档，够看形状）
     hist: [f64; 10],
+
+    // ── 批次 47：体型收益 ──
+    /// **成体**的平均「体表/体积比」`8n / 暴露面数`（1 格 = 1.00）。
+    /// 这是新机制唯一的自变量：它涨了，收益才可能涨。
+    svr: f64,
+    /// 成体的平均产出倍率（= `svr^exposure_prod_exp`）。关掉时恒为 1.00。
+    prod_mult: f64,
+    /// 成体里「紧凑度」分布：`svr ≥ 2`（明显比单格厚实）的占比（%）
+    compact: f64,
 }
 
 fn run(
@@ -155,6 +164,8 @@ fn run(
     egg: bool,
     hatch: u32,
     spec: f64,
+    expprod: f64,
+    expup: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -233,6 +244,9 @@ fn run(
     cfg.life.egg_hatch_ticks = hatch;
     // `spec=K`：捕食专精奖励（1.0 = 关闭）
     cfg.life.predator_specialization = spec;
+    // `expprod=K` / `expup=K`：体型收益（批次 47），0 = 关闭
+    cfg.life.exposure_prod_exp = expprod;
+    cfg.life.exposure_upkeep_exp = expup;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -374,6 +388,25 @@ fn run(
     };
     let pred_pure = pure * 100.0 / n as f64;
     let pred_mix = mix * 100.0 / n as f64;
+
+    // ── 批次 47：成体的体表/体积比 ──
+    // **只统计成体**：芽的 anatomy 只有已经长出来的那几格，`svr` 会偏低，
+    // 混进来会把"体型收益到底有没有被吃到"这个问题糊掉。
+    let mut svr_sum = 0.0;
+    let mut mult_sum = 0.0;
+    let mut compact_n = 0usize;
+    for o in w.organisms.iter().filter(|o| o.growth_plan.is_none()) {
+        let r = o.surface_volume_ratio();
+        svr_sum += r;
+        mult_sum += o.size_prod_mult(&w.config);
+        if r >= 2.0 {
+            compact_n += 1;
+        }
+    }
+    let svr = if adult_n == 0 { 0.0 } else { svr_sum / adult_n as f64 };
+    let prod_mult = if adult_n == 0 { 0.0 } else { mult_sum / adult_n as f64 };
+    let compact = if adult_n == 0 { 0.0 } else { compact_n as f64 * 100.0 / adult_n as f64 };
+
     Row {
         pop: w.organisms.len() as f64,
         body_avg: st.avg_cells,
@@ -471,6 +504,9 @@ fn run(
         blk_cap: w.repro_blocked_cap,
         blk_small: w.repro_blocked_too_small,
         hist,
+        svr,
+        prod_mult,
+        compact,
     }
 }
 
@@ -523,6 +559,8 @@ fn run_seeds(
     egg: bool,
     hatch: u32,
     spec: f64,
+    expprod: f64,
+    expup: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -562,12 +600,16 @@ fn run_seeds(
         blk_cap: 0,
         blk_small: 0,
         hist: [0f64; 10],
+        svr: 0.0,
+        prod_mult: 0.0,
+        compact: 0.0,
     };
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
+            expprod, expup,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -616,6 +658,9 @@ fn run_seeds(
         for k in 0..10 {
             acc.hist[k] += r.hist[k];
         }
+        acc.svr += r.svr;
+        acc.prod_mult += r.prod_mult;
+        acc.compact += r.compact;
     }
     let n = seeds.len() as f64;
     acc.pop /= n;
@@ -654,6 +699,9 @@ fn run_seeds(
     for k in 0..10 {
         acc.hist[k] /= n;
     }
+    acc.svr /= n;
+    acc.prod_mult /= n;
+    acc.compact /= n;
     acc
 }
 
@@ -837,6 +885,17 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("spec=").and_then(|v| v.parse().ok()))
         .unwrap_or(Config::default().life.predator_specialization);
+    // `expprod=K` / `expup=K`：体型收益（批次 47），0 = 关闭
+    let expprod: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("expprod=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.exposure_prod_exp);
+    let expup: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("expup=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.exposure_upkeep_exp);
+    // `exponly`：只跑「体型收益」那一节（其余全跳过）。批次 47 的专用模式。
+    let exponly = args.iter().any(|a| a == "exponly");
     // `shade=K`：遮挡强度（默认跟 Config 走）
     let shade: f64 = args
         .iter()
@@ -905,6 +964,63 @@ fn main() {
     );
     println!("（同参数多跑几个种子取平均：这模拟在临界点上，单点差 4 倍很常见）\n");
 
+    // ── 批次 47：体型收益扫描 ──
+    //
+    // 这是「结构性收益」的验收：`svr`（体表/体积比）必须真的被选择压推高，
+    // 而且推高的方式应该是**变紧凑**，不只是**变多格**。
+    // 判读顺序：先看「成体体型」有没有涨 → 再看「紧凑%」有没有涨 →
+    // 最后看「个体数」有没有崩。只有前两个涨、第三个不崩，这条机制才算成立。
+    {
+        let ks: Vec<f64> = {
+            let v: Vec<f64> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("expk=").and_then(|v| v.parse().ok()))
+                .collect();
+            if v.is_empty() {
+                vec![0.0, 0.2, 0.3, 0.5]
+            } else {
+                v
+            }
+        };
+        let ups: Vec<f64> = {
+            let v: Vec<f64> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("expu=").and_then(|v| v.parse().ok()))
+                .collect();
+            if v.is_empty() {
+                vec![0.0]
+            } else {
+                v
+            }
+        };
+        println!("【0】体型收益：光合产出 × svr^k（svr = 8×格数 ÷ 暴露面数，1 格恒为 1.00）");
+        println!(
+            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>9}  {:>7}  {:>7}  {:>7}",
+            "k产出", "k维持", "个体", "平均体型", "成体体型", "最大体型", "svr", "产出倍率",
+            "紧凑%(svr>=2)", "存活种", "物种聚", "异养%"
+        );
+        for &u in &ups {
+            for &k in &ks {
+                let r = run_seeds(
+                    1.0, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat,
+                    temp_dmg, photo, ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
+                    bud, budper, budfeed, oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
+                    spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat,
+                    cave, cooldown, egg, hatch, spec, k, u,
+                );
+                println!(
+                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>9.1}%  {:>7.1}  {:>7.1}  {:>7.1}",
+                    k, u, r.pop, r.body_avg, r.body_adult, r.body_max, r.svr, r.prod_mult,
+                    r.compact, r.species, r.species_clustered, r.hetero
+                );
+            }
+        }
+        println!();
+    }
+    if exponly {
+        return;
+    }
+
     // ── 第一轮：只动指数 p，不限体型 ──
     println!("【1】繁殖成本指数 p（max_body_cells = 0，不限）");
     println!(
@@ -933,6 +1049,7 @@ fn main() {
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
+            expprod, expup,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
@@ -1132,6 +1249,7 @@ fn main() {
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
+            expprod, expup,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

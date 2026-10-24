@@ -62,11 +62,42 @@ impl Flags {
     pub const SPIKE: u16 = flag::SPIKE;
 }
 
+/// 身体坐标里的**八**邻域方向。
+///
+/// 为什么是八邻域而不是四邻域：身体本身是**八连通**的（发育用八邻域 BFS，
+/// 见 `world::grow_organism`），所以一条对角线的身体是**一个**身体。
+/// 用四邻域数暴露面的话，这种身体每个细胞的 4 个面全都"暴露"，
+/// 算出来和一堆互不相连的孤立格完全一样——机制就看不见它了。
+///
+/// 实测证据：改成八邻域之前，2000 tick 的平均 `svr` 是 1.09，
+/// 而平均体型是 3.55 格——3.5 个格子的身体不可能真的只有 9% 的"厚度"，
+/// 那是四邻域把对角连接当成了断开的。
+const DIRS: [(i32, i32); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Anatomy {
     pub cells: Vec<BodyCell>,
     pub birth_distance: i32,
     pub flags: Flags,
+    /// **暴露面数**：所有细胞 4 邻域里「不属于本体」的方向的个数。
+    ///
+    /// 这是「体表面积」的离散版本，也是批次 47「体型收益」的唯一几何依据。
+    /// 1 格身体 = 4；2 格并排 = 6；2×2 方块 = 8；3×3 方块 = 12；
+    /// 3 格的直线 = 8（同样是 3 格，直线比方块多 2 个暴露面）。
+    ///
+    /// **它是缓存值**：`add_cell` 增量维护，`recompute` 全量重算。
+    /// 直接改 `cells` 而不走这两个入口会让它变旧——`perimeter_matches_recompute`
+    /// 那条测试就是防这个的。
+    pub perimeter: u16,
 }
 
 impl Default for Anatomy {
@@ -75,6 +106,7 @@ impl Default for Anatomy {
             cells: Vec::new(),
             birth_distance: 4,
             flags: Flags::default(),
+            perimeter: 0,
         }
     }
 }
@@ -92,6 +124,7 @@ impl Anatomy {
         self.cells.clear();
         self.birth_distance = 4;
         self.flags = Flags::default();
+        self.perimeter = 0;
     }
 
     /// 添加一个细胞。位置已被占用时返回 false。
@@ -99,6 +132,12 @@ impl Anatomy {
         if self.cell_at(dx, dy).is_some() {
             return false;
         }
+        // 暴露面的增量：新格带来 8 个面，每有一个已有邻居，两边各少一个面。
+        let adjacent = DIRS
+            .iter()
+            .filter(|(ox, oy)| self.cell_at(dx + ox, dy + oy).is_some())
+            .count() as i32;
+        self.perimeter = (self.perimeter as i32 + 8 - 2 * adjacent).max(0) as u16;
         self.cells.push(BodyCell::new(type_id, dx, dy, dir));
 
         let distance = (dy.abs() * 2 + 2).max(dx.abs() * 2 + 2);
@@ -107,6 +146,33 @@ impl Anatomy {
         }
         self.apply_flag(type_id, true);
         true
+    }
+
+    /// 体表面积（暴露面数）的**全量**重算。O(n²)，只在结构变动时调。
+    pub fn recompute_perimeter(&self) -> u16 {
+        let mut p = 0u16;
+        for c in &self.cells {
+            for (ox, oy) in DIRS {
+                if self.cell_at(c.dx + ox, c.dy + oy).is_none() {
+                    p += 1;
+                }
+            }
+        }
+        p
+    }
+
+    /// 体表/体积比：`暴露面数 / (8 × 细胞数)`。
+    ///
+    /// **归一化到 1 格 = 1.0**（1 格身体 8 个面 / 8 = 1.0），越大越紧凑越小：
+    /// 3×3 方块 = 0.33，10×10 = 0.125。
+    /// 直线身体几乎吃不到好处（n 格直线 ≈ 0.56），所以「紧凑」和「大」
+    /// 是两件不同的事——这正是批次 47 想让它可被选择的东西。
+    pub fn exposure(&self) -> f64 {
+        let n = self.cells.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.perimeter.max(1) as f64 / (8.0 * n as f64)
     }
 
     pub fn cell_at(&self, dx: i32, dy: i32) -> Option<&BodyCell> {
@@ -177,6 +243,7 @@ impl Anatomy {
             }
         }
         self.birth_distance = birth;
+        self.perimeter = self.recompute_perimeter();
     }
 
     fn apply_flag(&mut self, type_id: u8, value: bool) {
@@ -410,5 +477,123 @@ mod composition_tests {
             b.fingerprint(),
             "指纹应该不同（位置变了）——两个口径本来就要分开"
         );
+    }
+}
+
+#[cfg(test)]
+mod perimeter_tests {
+    use super::*;
+    use crate::cell_type::ct;
+
+    fn body(cells: &[(i32, i32)]) -> Anatomy {
+        let mut a = Anatomy::default();
+        for (dx, dy) in cells {
+            a.add_cell(ct::PRODUCER, *dx, *dy, 0);
+        }
+        a
+    }
+
+    /// 离散体表面积：每个细胞贡献 4 个面，每个相邻对消掉 2 个。
+    #[test]
+    fn perimeter_of_known_shapes() {
+        assert_eq!(body(&[(0, 0)]).perimeter, 8, "单格 8 面");
+        assert_eq!(body(&[(0, 0), (1, 0)]).perimeter, 14, "并排两格 14 面");
+        // 对角相邻也算连通（身体是八连通的）
+        assert_eq!(
+            body(&[(0, 0), (1, 1)]).perimeter,
+            14,
+            "对角两格也是 14 面——四邻域会错算成 16"
+        );
+        assert_eq!(body(&[(0, 0), (1, 0), (2, 0)]).perimeter, 20, "三格直线 20 面");
+        // 2×2 方块：每格 3 个邻居 → 32 − 12 = 20
+        assert_eq!(
+            body(&[(0, 0), (1, 0), (0, 1), (1, 1)]).perimeter,
+            20,
+            "2×2 方块 20 面（和 3 格直线面数一样，但格数更多 → 更厚实）"
+        );
+        // 3×3 方块：20 个邻接对 → 72 − 40 = 32
+        let mut sq = Anatomy::default();
+        for dy in 0..3 {
+            for dx in 0..3 {
+                sq.add_cell(ct::PRODUCER, dx, dy, 0);
+            }
+        }
+        assert_eq!(sq.perimeter, 32, "3×3 方块 32 面");
+    }
+
+    /// 增量维护必须和全量重算逐位一致——这是缓存字段唯一的风险点。
+    #[test]
+    fn perimeter_matches_recompute_after_edits() {
+        let mut a = Anatomy::default();
+        let coords = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (-1, 0),
+            (0, -1),
+            (1, 1),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (-1, -1),
+        ];
+        for (dx, dy) in coords {
+            a.add_cell(ct::PRODUCER, dx, dy, 0);
+            assert_eq!(
+                a.perimeter,
+                a.recompute_perimeter(),
+                "加 ({dx},{dy}) 之后增量值就不对了"
+            );
+        }
+        // 删除走的是 `recompute()`，也要对
+        while a.cells.len() > 1 {
+            let (dx, dy) = {
+                let c = a.cells.iter().find(|c| c.dx != 0 || c.dy != 0).unwrap();
+                (c.dx, c.dy)
+            };
+            a.remove_cell_at(dx, dy);
+            assert_eq!(a.perimeter, a.recompute_perimeter());
+        }
+    }
+
+    /// 体表/体积比：紧凑比细长低，格数越多越低，单格恒为 4。
+    #[test]
+    fn exposure_falls_with_size_and_compactness() {
+        let one = body(&[(0, 0)]);
+        assert!((one.exposure() - 1.0).abs() < 1e-12, "单格必须归一化成 1.0");
+
+        // 3 格直线：20 / 24 = 0.833
+        let line3 = body(&[(0, 0), (1, 0), (2, 0)]);
+        assert!((line3.exposure() - 20.0 / 24.0).abs() < 1e-12);
+
+        // 9 格：3×3 方块 12/9 = 1.33，直线 20/9 = 2.22
+        let mut sq = Anatomy::default();
+        for dy in 0..3 {
+            for dx in 0..3 {
+                sq.add_cell(ct::PRODUCER, dx, dy, 0);
+            }
+        }
+        let mut line9 = Anatomy::default();
+        for dx in 0..9 {
+            line9.add_cell(ct::PRODUCER, dx, 0, 0);
+        }
+        assert!(
+            sq.exposure() < line9.exposure(),
+            "同样 9 格，方块必须比直线更\"厚实\"：{} vs {}",
+            sq.exposure(),
+            line9.exposure()
+        );
+        assert!(
+            sq.exposure() < one.exposure(),
+            "大而紧凑的身体体表/体积比必须更低"
+        );
+    }
+
+    /// 空身体的暴露面是 0（不能除以零）
+    #[test]
+    fn empty_body_has_zero_exposure() {
+        let a = Anatomy::default();
+        assert_eq!(a.perimeter, 0);
+        assert_eq!(a.exposure(), 0.0);
     }
 }
