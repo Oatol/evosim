@@ -119,6 +119,15 @@ struct Row {
     limbs: f64,
     /// 成体蓝图里出现过的最大嵌套深度
     depth_max: u8,
+    /// **中间态细胞占比（%）**：成体身体里 `Organelles::is_intermediate()` 的格数占比。
+    /// 阶段 3 的验收指标——旧结构下这个数恒为 0。
+    mid_cells: f64,
+    /// **杂食格占比（%）**：`photo > 0 && mouth > 0` 的格子。
+    ///
+    /// 和 `mid_cells` 分开看很重要：中间态既可能是"半个生产者"（严格更差，
+    /// 成本减半产出减半），也可能是"半个生产者 + 半张嘴"（真正的新东西）。
+    /// 只有后者才说明阶段 3 做出了旧结构做不到的事。
+    mixed_cells: f64,
 }
 
 fn run(
@@ -171,6 +180,7 @@ fn run(
     spec: f64,
     expprod: f64,
     expup: f64,
+    orgmut: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -252,6 +262,8 @@ fn run(
     // `expprod=K` / `expup=K`：体型收益（批次 47），0 = 关闭
     cfg.life.exposure_prod_exp = expprod;
     cfg.life.exposure_upkeep_exp = expup;
+    // `orgmut=K`：细胞器变异率（阶段 3），0 = 关闭
+    cfg.mutation.organelle_mut_prob = orgmut;
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -428,6 +440,31 @@ fn run(
     }
     let limbs = if adult_n == 0 { 0.0 } else { limb_n as f64 * 100.0 / adult_n as f64 };
 
+    // ── 阶段 3：中间态细胞占比 ──
+    let mut mid_n = 0usize;
+    let mut mixed_n = 0usize;
+    let mut cell_n = 0usize;
+    for o in w.organisms.iter() {
+        for c in &o.anatomy.cells {
+            cell_n += 1;
+            if c.org.is_intermediate() {
+                mid_n += 1;
+            }
+            if c.org.photo > 0 && c.org.mouth > 0 {
+                mixed_n += 1;
+            }
+        }
+    }
+    let cell_pct = |k: usize| {
+        if cell_n == 0 {
+            0.0
+        } else {
+            k as f64 * 100.0 / cell_n as f64
+        }
+    };
+    let mid_cells = cell_pct(mid_n);
+    let mixed_cells = cell_pct(mixed_n);
+
     Row {
         pop: w.organisms.len() as f64,
         body_avg: st.avg_cells,
@@ -530,6 +567,8 @@ fn run(
         compact,
         limbs,
         depth_max,
+        mid_cells,
+        mixed_cells,
     }
 }
 
@@ -584,6 +623,7 @@ fn run_seeds(
     spec: f64,
     expprod: f64,
     expup: f64,
+    orgmut: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -628,13 +668,15 @@ fn run_seeds(
         compact: 0.0,
         limbs: 0.0,
         depth_max: 0,
+        mid_cells: 0.0,
+        mixed_cells: 0.0,
     };
     for &s in seeds {
         let r = run(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup,
+            expprod, expup, orgmut,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -688,6 +730,8 @@ fn run_seeds(
         acc.compact += r.compact;
         acc.limbs += r.limbs;
         acc.depth_max = acc.depth_max.max(r.depth_max);
+        acc.mid_cells += r.mid_cells;
+        acc.mixed_cells += r.mixed_cells;
     }
     let n = seeds.len() as f64;
     acc.pop /= n;
@@ -730,6 +774,8 @@ fn run_seeds(
     acc.prod_mult /= n;
     acc.compact /= n;
     acc.limbs /= n;
+    acc.mid_cells /= n;
+    acc.mixed_cells /= n;
     acc
 }
 
@@ -922,6 +968,11 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("expup=").and_then(|v| v.parse().ok()))
         .unwrap_or(Config::default().life.exposure_upkeep_exp);
+    // `orgmut=K`：细胞器变异率（阶段 3），0 = 关闭
+    let orgmut: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("orgmut=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().mutation.organelle_mut_prob);
     // `exponly`：只跑「体型收益」那一节（其余全跳过）。批次 47 的专用模式。
     let exponly = args.iter().any(|a| a == "exponly");
     // `shade=K`：遮挡强度（默认跟 Config 走）
@@ -1023,9 +1074,9 @@ fn main() {
         };
         println!("【0】体型收益：光合产出 × svr^k（svr = 8×格数 ÷ 暴露面数，1 格恒为 1.00）");
         println!(
-            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>9}  {:>7}  {:>5}  {:>7}  {:>7}  {:>7}",
+            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>7}  {:>7}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
             "k产出", "k维持", "个体", "平均体型", "成体体型", "最大体型", "svr", "产出倍率",
-            "紧凑%(svr>=2)", "附肢%", "深度", "存活种", "物种聚", "异养%"
+            "紧凑%", "附肢%", "深度", "中间态%", "杂食格%", "存活种", "物种聚", "异养%"
         );
         for &u in &ups {
             for &k in &ks {
@@ -1034,12 +1085,13 @@ fn main() {
                     temp_dmg, photo, ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
                     bud, budper, budfeed, oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
                     spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat,
-                    cave, cooldown, egg, hatch, spec, k, u,
+                    cave, cooldown, egg, hatch, spec, k, u, orgmut,
                 );
                 println!(
-                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>9.1}%  {:>6.1}%  {:>5}  {:>7.1}  {:>7.1}  {:>7.1}",
+                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>6.1}%  {:>6.1}%  {:>5}  {:>6.1}%  {:>6.1}%  {:>7.1}  {:>7.1}  {:>7.1}",
                     k, u, r.pop, r.body_avg, r.body_adult, r.body_max, r.svr, r.prod_mult,
-                    r.compact, r.limbs, r.depth_max, r.species, r.species_clustered, r.hetero
+                    r.compact, r.limbs, r.depth_max, r.mid_cells, r.mixed_cells, r.species,
+                    r.species_clustered, r.hetero
                 );
             }
         }
@@ -1077,7 +1129,7 @@ fn main() {
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup,
+            expprod, expup, orgmut,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
@@ -1277,7 +1329,7 @@ fn main() {
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup,
+            expprod, expup, orgmut,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

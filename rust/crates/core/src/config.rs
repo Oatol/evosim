@@ -981,6 +981,16 @@ pub struct MutationCfg {
     /// 这是"演化太随机"的第一味解药：段级操作让变异产生**协调的**表型变化
     /// （repeat +1 = 体型翻倍、mirror = 长出对称的另一半），而不是逐格乱撞。
     pub segment_op_prob: f64,
+    /// **细胞器变异的概率**（%，阶段 3，**默认 0 = 关闭**）。
+    ///
+    /// 挪动某一格的 `Organelles`（`photo` / `mouth`）±32 或 ±64，
+    /// 于是「一个满速生产者」可以变成「三分之二速的生产者」。
+    ///
+    /// **为什么默认关闭**：出厂预设只取 0 / 255 两个端点，`x / 255` 只可能是
+    /// 0.0 或 1.0，旧世界的行为逐位不变。一旦把默认打开，所有存档的语义都变了
+    /// （同一份基因组会长出不同的身体），而且"中间态到底有没有用"还没量过。
+    /// 打开它 = 主动进入阶段 3 的实验组。
+    pub organelle_mut_prob: f64,
     pub weight_mut_rate: f64,
     pub weight_mut_sigma: f64,
     pub weight_reset_rate: f64,
@@ -1006,6 +1016,7 @@ impl Default for MutationCfg {
             change_prob: 25.0,
             remove_prob: 25.0,
             segment_op_prob: 45.0,
+            organelle_mut_prob: 0.0,
             weight_mut_rate: 0.02,
             weight_mut_sigma: 0.20,
             weight_reset_rate: 0.01,

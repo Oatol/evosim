@@ -406,11 +406,14 @@ impl Organism {
         if !(scale > 0.0) {
             return 0.0;
         }
+        // **成本按器官负载缩放**（阶段 3）：`photo = 128` 的格子只付一半。
+        // 出厂预设的负载正好是 1.0（生产者 255+0、嘴 0+255、其余无器官 → 1.0），
+        // 所以这一行对旧世界是恒等的。
         let cost: f64 = self
             .anatomy
             .cells
             .iter()
-            .map(|c| cfg.attr(c.type_id, AttrField::Cost))
+            .map(|c| cfg.attr(c.type_id, AttrField::Cost) * c.org.load())
             .sum();
         // Kleiber：`总开销 ∝ 体型^p`，p = 1 时逐位等于旧行为。
         //

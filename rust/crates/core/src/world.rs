@@ -1594,17 +1594,47 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
     }
 
     fn run_cell_function(&mut self, i: usize, cell: BodyCell) {
-        let behavior = match cell_type::def(cell.type_id).and_then(|d| d.behavior) {
-            Some(b) => b,
-            None => return,
+        // ── 阶段 3：行为由**细胞器向量**分派，不再由 `type_id` 决定 ──
+        //
+        // 出厂预设只有 0 / 255 两个端点，所以 `strength` 只可能是 0.0 或 1.0，
+        // 对旧世界逐位相同（`organelle_axes_are_bit_identical` 守着）。
+        //
+        // 两条轴都 > 0 的格子会**跑两遍**：先光合、再摄食。这就是阶段 3 要的
+        // 中间态——同一格既是"半个生产者"又是"半张嘴"，而不是非此即彼。
+        let photo = cell.org.photo as f64 / 255.0;
+        let mouth = cell.org.mouth as f64 / 255.0;
+        if photo > 0.0 {
+            self.run_one_behavior(i, cell, Behavior::Producer, photo);
+            if !self.organisms[i].alive {
+                return;
+            }
+        }
+        if mouth > 0.0 {
+            self.run_one_behavior(i, cell, Behavior::Mouth, mouth);
+            if !self.organisms[i].alive {
+                return;
+            }
+        }
+        // 其余器官（杀手 / 眼睛 / 再生）还没有基因化，仍按类型分派
+        let Some(kind) = cell_type::def(cell.type_id).and_then(|d| d.behavior) else {
+            return;
         };
+        if matches!(kind, Behavior::Producer | Behavior::Mouth) {
+            return; // 上面已经按基因跑过了
+        }
+        self.run_one_behavior(i, cell, kind, 1.0);
+    }
+
+    /// 跑**一种**行为。`strength` = 这条细胞器轴的强度（0..=1）。
+    fn run_one_behavior(&mut self, i: usize, cell: BodyCell, behavior: Behavior, strength: f64) {
         match behavior {
             Behavior::Mouth => {
                 let col = self.organisms[i].real_col(&cell);
                 let row = self.organisms[i].real_row(&cell);
                 // 摄取倍率只乘**这一格剩下的能量**——食物本身带存量之后，
                 // 「一份食物值多少」不再由全局常数决定，而是看它被吃时还剩多少。
-                let mult = self.config.attr(cell.type_id, AttrField::BiteMult);
+                // 细胞器强度（阶段 3）：嘴"半开"就只吃到一半
+                let mult = self.config.attr(cell.type_id, AttrField::BiteMult) * strength;
                 let my_id = self.organisms[i].id;
                 // 「一张嘴一口」：这一格嘴在这一 tick 只能对上一个活体目标。
                 //
@@ -1753,6 +1783,8 @@ const TEMP_VIEW_MAX_C: f64 = 120.0;
                 // 体型收益（批次 47）：体表/体积比。1 格身体恒为 1.0，
                 // 所以这个乘数**只可能奖励"真的长成了大而紧凑的身体"**。
                 gain *= self.organisms[i].size_prod_mult(&self.config);
+                // 细胞器强度（阶段 3）：预设 255 → ×1.0，逐位等于旧行为
+                gain *= strength;
                 if gain <= 0.0 {
                     return;
                 }
@@ -5821,6 +5853,9 @@ mod size_benefit_tests {
         // 第一版没关，9 格本该产 4.5，实测 3.5 —— 差的正是那一笔。
         cfg.life.budding_enabled = false;
         cfg.life.growth_enabled = false;
+        // **挡住繁殖**：1 格身体的繁殖门槛就是 1 能量，而一份食物正好 1 能量——
+        // 不管住的话"到账能量"会被繁殖一把清空，量到的是 0。
+        cfg.life.min_breed_cells = 99;
         cfg.life.photosynthesis_rate = 0.5;
         cfg.world.sun_intensity = 1.0;
         let mut w = World::new(cfg, Rng::new(1));
@@ -5945,5 +5980,154 @@ mod size_benefit_tests {
         w.config.life.exposure_upkeep_exp = 5.0;
         let u = w.organisms[0].size_upkeep_mult(&w.config);
         assert!(u >= 0.25 - 1e-9, "折扣必须封底 0.25，实测 {u}");
+    }
+}
+
+// ────────────────── 阶段 3：细胞器向量 ──────────────────
+#[cfg(test)]
+mod organelle_tests {
+    use super::*;
+    use crate::cell_type::{ct, Organelles};
+
+    /// 建一个只有生产者的世界，并把第一格的细胞器向量改掉。
+    ///
+    /// 和 `size_benefit_tests::prod_world` 一样：**关掉代谢、遮挡、出芽、成长**，
+    /// 否则量到的是"收入减开销"而不是"这一格产出多少"。
+    fn world_with(cells: &[(u8, i32, i32, Organelles)], food_at: Option<(i32, i32)>) -> World {
+        let mut cfg = Config::default();
+        cfg.world.cols = 16;
+        cfg.world.rows = 16;
+        cfg.life.metabolism_scale = 0.0;
+        cfg.life.shade_strength = 0.0;
+        cfg.life.budding_enabled = false;
+        cfg.life.growth_enabled = false;
+        // **挡住繁殖**：1 格身体的繁殖门槛就是 1 能量，而一份食物正好 1 能量——
+        // 不管住的话"到账能量"会被繁殖一把清空，量到的是 0。
+        cfg.life.min_breed_cells = 99;
+        cfg.life.photosynthesis_rate = 0.5;
+        cfg.world.sun_intensity = 1.0;
+        let mut w = World::new(cfg, Rng::new(1));
+        w.fill_grid(ct::EMPTY, false);
+        let mut rng = Rng::new(1);
+        let mut org = Organism::new(&w.config, &mut rng, &w.grid, 6, 6);
+        for (t, dx, dy, o) in cells {
+            org.anatomy.add_cell_with(*t, *dx, *dy, 0, *o);
+        }
+        org.anatomy.recompute();
+        w.add_organism(org);
+        if let Some((c, r)) = food_at {
+            let idx = w.grid.index(c, r).unwrap();
+            w.set_cell_at(idx, ct::FOOD, -1);
+        }
+        w.light.sky_level.fill(255);
+        w.light.level.fill(255);
+        w.organisms[0].energy = 0.0;
+        w
+    }
+
+    fn photo(p: u8) -> Organelles {
+        Organelles { photo: p, mouth: 0 }
+    }
+
+    /// **端点必须逐位不变**：photo = 255 时产出正好等于光合速率。
+    ///
+    /// 这是整个阶段 3 的地基。只要这条不成立，所有旧存档、旧实验数据都作废。
+    #[test]
+    fn full_strength_is_bit_identical() {
+        let mut w = world_with(&[(ct::PRODUCER, 0, 0, photo(255))], None);
+        w.act_organism(0);
+        assert!(
+            (w.organisms[0].energy - 0.5).abs() < 1e-12,
+            "满速生产者必须正好产出 0.5，实测 {}",
+            w.organisms[0].energy
+        );
+    }
+
+    /// 半速生产者产出正好一半——**同一格**可以是"半个生产者"。
+    #[test]
+    fn half_strength_produces_half() {
+        let mut w = world_with(&[(ct::PRODUCER, 0, 0, photo(128))], None);
+        w.act_organism(0);
+        let got = w.organisms[0].energy;
+        let want = 0.5 * 128.0 / 255.0;
+        assert!(
+            (got - want).abs() < 1e-12,
+            "半速应该产出 {want:.6}，实测 {got:.6}"
+        );
+    }
+
+    /// `photo = 0` 的格子**什么都不产**，哪怕它的 `type_id` 还是生产者。
+    ///
+    /// 这是"基因决定行为、类型只是标签"的核心断言。
+    #[test]
+    fn zero_strength_disables_the_behavior() {
+        let mut w = world_with(&[(ct::PRODUCER, 0, 0, photo(0))], None);
+        w.act_organism(0);
+        assert_eq!(w.organisms[0].energy, 0.0, "基因关了就不该产出");
+        assert!(
+            !w.organisms[0].anatomy.has(Flags::PRODUCER),
+            "标志位必须跟着基因走，否则生态判据会错"
+        );
+    }
+
+    /// **中间态的验收测试**：同一格既光合又摄食。
+    ///
+    /// 旧结构下这是不可能的——一格要么是生产者要么是嘴。
+    #[test]
+    fn mixed_cell_both_produces_and_eats() {
+        // 一个格子：photo=128、mouth=128，旁边放一份食物
+        let mixed = Organelles {
+            photo: 128,
+            mouth: 128,
+        };
+        let mut w = world_with(&[(ct::PRODUCER, 0, 0, mixed)], Some((7, 6)));
+        let food_before = w.grid.food[w.grid.index(7, 6).unwrap()];
+        w.act_organism(0);
+        let e = w.organisms[0].energy;
+        // 光合贡献 0.5 × 128/255
+        let photo_gain = 0.5 * 128.0 / 255.0;
+        assert!(
+            e > photo_gain + 1e-9,
+            "除了光合还应该吃到食物：{e:.6} vs 光合 {photo_gain:.6}"
+        );
+        assert!(
+            w.grid.food[w.grid.index(7, 6).unwrap()] < food_before,
+            "食物应该被吃掉一部分"
+        );
+        // 标志位两条都要置位
+        assert!(w.organisms[0].anatomy.has(Flags::PRODUCER));
+        assert!(w.organisms[0].anatomy.has(Flags::MOUTH));
+    }
+
+    /// 半张嘴只吃到一半。
+    #[test]
+    fn half_mouth_eats_half() {
+        let run = |m: u8| -> f64 {
+            let mut w = world_with(
+                &[(
+                    ct::MOUTH,
+                    0,
+                    0,
+                    Organelles {
+                        photo: 0,
+                        mouth: m,
+                    },
+                )],
+                Some((7, 6)),
+            );
+            // **量到账能量，不是"食物少了多少"**：嘴是一口把整格舔空，
+            // 区别在消化率（`mult`），所以"食物减少量"两种强度完全一样。
+            w.act_organism(0);
+            w.organisms[0].energy
+        };
+        let full = run(255);
+        let half = run(128);
+        assert!(full > 0.0);
+        assert!(
+            (half / full - 128.0 / 255.0).abs() < 1e-9,
+            "半张嘴应该吃到 {:.4} 倍，实测 {:.4}",
+            128.0 / 255.0,
+            half / full
+        );
     }
 }

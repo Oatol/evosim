@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell_type::{def, is_directional, flag};
+use crate::cell_type::{def, is_directional, flag, organelles_of, Organelles};
 use crate::rng::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +12,12 @@ pub struct BodyCell {
     pub dy: i32,
     /// 局部朝向 0-3，仅带朝向的细胞（眼睛）使用
     pub dir: u8,
+    /// **细胞器向量**（阶段 3）：这一格"有多像某种器官"。
+    ///
+    /// `type_id` 仍然决定**是哪一种**细胞（配色、其余行为、参数面板），
+    /// 而 `org` 决定**有多强**。出厂时由 `type_id` 推出来（只取 0 / 255），
+    /// 之后只有变异能把它挪到中间值。
+    pub org: Organelles,
 }
 
 impl BodyCell {
@@ -21,7 +27,15 @@ impl BodyCell {
             dx,
             dy,
             dir: if is_directional(type_id) { dir & 3 } else { 0 },
+            org: organelles_of(type_id),
         }
+    }
+
+    /// 带指定细胞器向量的构造（基因组展开 / 工坊编辑用）。
+    pub fn with_org(type_id: u8, dx: i32, dy: i32, dir: u8, org: Organelles) -> Self {
+        let mut c = BodyCell::new(type_id, dx, dy, dir);
+        c.org = org;
+        c
     }
 
     /// 用于物种指纹：类型 + 位置（眼睛的朝向也算结构的一部分）
@@ -129,6 +143,22 @@ impl Anatomy {
 
     /// 添加一个细胞。位置已被占用时返回 false。
     pub fn add_cell(&mut self, type_id: u8, dx: i32, dy: i32, dir: u8) -> bool {
+        self.add_cell_with(type_id, dx, dy, dir, organelles_of(type_id))
+    }
+
+    /// 带指定细胞器向量地添加一个细胞（基因组展开用）。
+    ///
+    /// 和 [`add_cell`](Self::add_cell) 的唯一区别是 `org` 由调用方给。
+    /// `PRODUCER` / `MOUTH` 两条标志位在这里**按基因**置位，而不是按 `type_id`——
+    /// 否则"基因被挪到 0 的生产者格"会继续被算成自养。
+    pub fn add_cell_with(
+        &mut self,
+        type_id: u8,
+        dx: i32,
+        dy: i32,
+        dir: u8,
+        org: Organelles,
+    ) -> bool {
         if self.cell_at(dx, dy).is_some() {
             return false;
         }
@@ -138,13 +168,26 @@ impl Anatomy {
             .filter(|(ox, oy)| self.cell_at(dx + ox, dy + oy).is_some())
             .count() as i32;
         self.perimeter = (self.perimeter as i32 + 8 - 2 * adjacent).max(0) as u16;
-        self.cells.push(BodyCell::new(type_id, dx, dy, dir));
+        self.cells.push(BodyCell::with_org(type_id, dx, dy, dir, org));
 
         let distance = (dy.abs() * 2 + 2).max(dx.abs() * 2 + 2);
         if distance > self.birth_distance {
             self.birth_distance = distance;
         }
-        self.apply_flag(type_id, true);
+        // 类型带来的标志位（**跳过**这两条基因驱动的，下面单独判）
+        if let Some(d) = def(type_id) {
+            if let Some(bit) = d.flag {
+                if bit != flag::PRODUCER && bit != flag::MOUTH {
+                    self.flags.set(bit, true);
+                }
+            }
+        }
+        if org.photo > 0 {
+            self.flags.set(Flags::PRODUCER, true);
+        }
+        if org.mouth > 0 {
+            self.flags.set(Flags::MOUTH, true);
+        }
         true
     }
 
@@ -244,14 +287,18 @@ impl Anatomy {
         }
         self.birth_distance = birth;
         self.perimeter = self.recompute_perimeter();
-    }
-
-    fn apply_flag(&mut self, type_id: u8, value: bool) {
-        if let Some(d) = def(type_id) {
-            if let Some(bit) = d.flag {
-                self.flags.set(bit, value);
-            }
-        }
+        // ── 阶段 3：这两条标志位改由**基因**决定，而不是由 `type_id` ──
+        //
+        // 必须改：变异可以把一个生产者格的 `photo` 挪到 0，那时它已经不再
+        // 造食了，但 `type_id` 还是 PRODUCER。若标志位仍跟着类型走，
+        // 生态判据（异养% / 自养%）就会和实际收入对不上。
+        //
+        // 出厂预设只有 0 / 255，所以对旧世界这两行是**恒等**的。
+        self.flags.set(
+            Flags::PRODUCER,
+            self.cells.iter().any(|c| c.org.photo > 0),
+        );
+        self.flags.set(Flags::MOUTH, self.cells.iter().any(|c| c.org.mouth > 0));
     }
 
     pub fn copy_from(&mut self, other: &Anatomy) {

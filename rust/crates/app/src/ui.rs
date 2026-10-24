@@ -1153,6 +1153,28 @@ pub fn draw(
                         .text("全局变异率")
                         .step_by(1.0),
                 );
+                // ── 细胞器变异（阶段 3）──
+                //
+                // 默认 0（关闭）。打开之后，一格细胞的"光合能力 / 摄食能力"
+                // 可以在 0..255 之间连续漂移，于是出现「半个生产者」这种中间态。
+                // 关着的时候出厂预设只有 0 / 255 两个端点，行为与旧版逐位相同。
+                let mut om = cfg.mutation.organelle_mut_prob;
+                let before_om = om;
+                ui.add(
+                    egui::Slider::new(&mut om, 0.0..=100.0)
+                        .text("细胞器变异率")
+                        .step_by(1.0),
+                )
+                .on_hover_text(
+                    "段级操作之外再掷一次骰子，把某一格的器官强度挪 ±32 / ±64。\n\
+                     0（默认）= 关闭，此时光合/摄食能力只有 0 和 255 两个端点，\
+                     与旧版逐位相同。\n\
+                     打开之后同一格可以同时是「半个生产者 + 半张嘴」——\
+                     这是阶段 3 的中间态，旧结构里不可能存在。",
+                );
+                if (om - before_om).abs() > 1e-9 {
+                    cfg.mutation.organelle_mut_prob = om;
+                }
                 ui.add(
                     egui::Slider::new(&mut cfg.life.max_organisms, -1..=5000)
                         .text("种群上限")

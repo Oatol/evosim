@@ -68,6 +68,12 @@ pub struct GeneCell {
     pub dx: i32,
     pub dy: i32,
     pub dir: u8,
+    /// **细胞器向量**（阶段 3）：这一格要长成"多强的器官"。
+    ///
+    /// 出厂时由 `type_id` 推出（0 / 255 端点），变异可以把它挪到中间值。
+    /// 它**必须进基因组**：否则"半个生产者"这种性状不可遗传，
+    /// 阶段 3 就只是给现有细胞加了个不痛不痒的倍率。
+    pub org: crate::cell_type::Organelles,
 }
 
 impl GeneCell {
@@ -77,7 +83,20 @@ impl GeneCell {
             dx,
             dy,
             dir,
+            org: crate::cell_type::organelles_of(type_id),
         }
+    }
+
+    pub fn with_org(
+        type_id: u8,
+        dx: i32,
+        dy: i32,
+        dir: u8,
+        org: crate::cell_type::Organelles,
+    ) -> Self {
+        let mut c = GeneCell::new(type_id, dx, dy, dir);
+        c.org = org;
+        c
     }
 }
 
@@ -195,7 +214,7 @@ impl BodyPlan {
             if self.dropped[i] {
                 continue;
             }
-            a.add_cell(cell.type_id, cell.dx, cell.dy, cell.dir);
+            a.add_cell_with(cell.type_id, cell.dx, cell.dy, cell.dir, cell.org);
         }
         a
     }
@@ -266,7 +285,7 @@ impl Genome {
         let cells = a
             .cells
             .iter()
-            .map(|c| GeneCell::new(c.type_id, c.dx, c.dy, c.dir))
+            .map(|c| GeneCell::with_org(c.type_id, c.dx, c.dy, c.dir, c.org))
             .collect();
         Genome {
             segments: vec![Segment::plain(cells)],
@@ -276,7 +295,8 @@ impl Genome {
     /// 展开成身体蓝图。`max_cells = 0` 表示不限。
     pub fn expand(&self, max_cells: usize) -> BodyPlan {
         // ── 1. 递归展开所有段 ──
-        let mut raw: Vec<(i32, i32, u8, u8)> = Vec::new(); // (dx, dy, type, dir) + depth 另存
+        // (dx, dy, type, dir, org) + depth 另存
+        let mut raw: Vec<(i32, i32, u8, u8, crate::cell_type::Organelles)> = Vec::new();
         let mut raw_depth: Vec<u8> = Vec::new();
         for seg in &self.segments {
             emit(seg, 0, (0, 0), &mut raw, &mut raw_depth);
@@ -287,12 +307,12 @@ impl Genome {
             std::collections::HashMap::with_capacity(raw.len());
         let mut cells: Vec<BodyCell> = Vec::with_capacity(raw.len());
         let mut depth: Vec<u8> = Vec::with_capacity(raw.len());
-        for (i, &(dx, dy, ty, dir)) in raw.iter().enumerate() {
+        for (i, &(dx, dy, ty, dir, org)) in raw.iter().enumerate() {
             if occupied.contains_key(&(dx, dy)) {
                 continue;
             }
             occupied.insert((dx, dy), cells.len());
-            cells.push(BodyCell::new(ty, dx, dy, dir));
+            cells.push(BodyCell::with_org(ty, dx, dy, dir, org));
             depth.push(raw_depth[i]);
         }
         if cells.is_empty() {
@@ -359,7 +379,7 @@ impl Genome {
             .iter()
             .map(|&i| {
                 let c = cells[i];
-                BodyCell::new(c.type_id, c.dx - sx, c.dy - sy, c.dir)
+                BodyCell::with_org(c.type_id, c.dx - sx, c.dy - sy, c.dir, c.org)
             })
             .collect();
         let out_depth: Vec<u8> = order[..keep].iter().map(|&i| depth[i]).collect();
@@ -398,6 +418,9 @@ impl Genome {
                 eat(c.type_id as u64);
                 eat(((c.dx as u32 as u64) << 32) | (c.dy as u32 as u64));
                 eat(c.dir as u64);
+                // 细胞器向量必须进指纹：否则"同一副身体、不同器官强度"
+                // 的两个基因组会被算成同一个物种。
+                eat(((c.org.photo as u64) << 8) | c.org.mouth as u64);
             }
             // **必须递归**：阶段 1 只吃了 `children.len()`，于是"子段内容变了
             // 但个数没变"的变异不会改指纹——同一份基因组的两个不同身体
@@ -419,7 +442,7 @@ fn emit(
     seg: &Segment,
     level: u8,
     base: (i32, i32),
-    out: &mut Vec<(i32, i32, u8, u8)>,
+    out: &mut Vec<(i32, i32, u8, u8, crate::cell_type::Organelles)>,
     depth: &mut Vec<u8>,
 ) {
     if seg.cells.is_empty() {
@@ -447,7 +470,7 @@ fn emit(
                 }
                 let x = base.0 + seg.anchor.0 + dx;
                 let y = base.1 + seg.anchor.1 + dy + r * span;
-                out.push((x, y, c.type_id, c.dir));
+                out.push((x, y, c.type_id, c.dir, c.org));
                 depth.push(level);
                 last = (x, y);
             }
@@ -481,7 +504,7 @@ pub fn composition_distance(a: &[u16; 17], b: &[u16; 17]) -> f32 {
 /// 一格身体（胚）。
 pub fn seed_anatomy(cell: BodyCell) -> Anatomy {
     let mut a = Anatomy::default();
-    a.add_cell(cell.type_id, 0, 0, cell.dir);
+    a.add_cell_with(cell.type_id, 0, 0, cell.dir, cell.org);
     a
 }
 
@@ -776,6 +799,72 @@ mod tests {
         let g = Genome { segments: vec![t] };
         assert_eq!(g.plan_cells(), 5);
         assert_eq!(g.expand(0).len(), 5, "没有重叠时两者应该一致");
+    }
+
+    // ────────────── 阶段 3：细胞器向量 ──────────────
+
+    /// 细胞器向量必须活着穿过 基因组 与 解剖 两个方向的转换。
+    ///
+    /// 不测这条的话，"变异一次就丢中间态"这种 bug 只会在跑了几千 tick
+    /// 之后表现为"怎么一个中间态都没有"，根本定位不到。
+    #[test]
+    fn organelles_survive_the_roundtrip() {
+        let mut a = Anatomy::default();
+        a.add_cell_with(
+            ct::PRODUCER,
+            0,
+            0,
+            0,
+            crate::cell_type::Organelles {
+                photo: 128,
+                mouth: 64,
+            },
+        );
+        a.add_cell(ct::PRODUCER, 1, 0, 0);
+        a.recompute();
+
+        let g = Genome::from_anatomy(&a);
+        let plan = g.expand(0);
+        let c0 = plan.cells.iter().find(|c| c.dx == 0 && c.dy == 0).unwrap();
+        assert_eq!(
+            (c0.org.photo, c0.org.mouth),
+            (128, 64),
+            "中间态必须原样进基因组"
+        );
+        let c1 = plan.cells.iter().find(|c| c.dx == 1).unwrap();
+        assert_eq!(
+            (c1.org.photo, c1.org.mouth),
+            (255, 0),
+            "没动过的格子保持出厂预设"
+        );
+
+        // 再转回解剖也不能丢
+        let back = plan.to_anatomy();
+        let b0 = back.cells.iter().find(|c| c.dx == 0 && c.dy == 0).unwrap();
+        assert_eq!((b0.org.photo, b0.org.mouth), (128, 64));
+    }
+
+    /// 器官强度必须进指纹。
+    #[test]
+    fn hash_sees_organelles() {
+        let mk = |photo: u8| -> Genome {
+            let mut a = Anatomy::default();
+            a.add_cell_with(
+                ct::PRODUCER,
+                0,
+                0,
+                0,
+                crate::cell_type::Organelles { photo, mouth: 0 },
+            );
+            a.recompute();
+            Genome::from_anatomy(&a)
+        };
+        assert_eq!(mk(255).hash(), mk(255).hash());
+        assert_ne!(
+            mk(255).hash(),
+            mk(128).hash(),
+            "身体一样、器官强度不同的两个基因组不能算同一个物种"
+        );
     }
 
     /// 子段也要跟着 `repeat` 一起复制：体节 = 每节一条附肢。

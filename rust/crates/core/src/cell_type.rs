@@ -3,6 +3,8 @@
 //! 加一种新细胞 = 往 `CELL_DEFS` 里加一项（需要新行为再补一个 match 分支）。
 //! 网格读写、配色、感知编码、结构变异、存档、参数面板都从这里读。
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{AttrField, ParamRef, TerrainField};
 
 /// 细胞类型 id。**写进存档，定下就不能改。**
@@ -57,6 +59,66 @@ pub enum Behavior {
     Killer,
     Eye,
     Regen,
+}
+
+/// **细胞器向量**（阶段 3）：一格身体"有多像某种器官"，0..=255 连续。
+///
+/// 为什么需要它：`type_id` 是**封闭枚举**，一格细胞要么是生产者、要么是嘴。
+/// 现实里没有这种二值性——光合能力和摄食能力是可以同时存在的连续量。
+/// 批次 30 量到 99.7% 的成体都是"生产者 + 嘴"的混养体，但那是在**身体层面**
+/// （不同的格子分工）；真正缺的是**同一格**同时是"半个生产者 + 半张嘴"。
+///
+/// 第一刀只切最要紧的一条轴（自养 / 异养），因为它是唯一一条
+/// 已经被实测证明"卡在二值性上"的轴（见 §17.14 与批次 30）。
+/// 其余器官（杀手 / 眼睛 / 再生 / 储食）仍由 `type_id` 分派，
+/// 但**管线已经建好了**：加一条轴只是多一个字段 + 多一个分支。
+///
+/// **出厂预设只取 0 和 255 两个端点**，所以 `x / 255` 只可能是 0.0 或 1.0，
+/// 对旧世界是逐位相同的（`organelle_axes_are_bit_identical` 守着这条）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Organelles {
+    /// 光合能力。255 = 满速光合（旧的生产者细胞），0 = 完全不能自养。
+    pub photo: u8,
+    /// 摄食能力：吃食物 + 咬活体。255 = 旧嘴细胞，0 = 完全没有嘴。
+    pub mouth: u8,
+}
+
+impl Organelles {
+    pub const FULL: u8 = 255;
+
+    /// 这条轴是不是"完全关闭"（0）。
+    #[inline]
+    pub fn is_dead(&self) -> bool {
+        self.photo == 0 && self.mouth == 0
+    }
+
+    /// **器官负载**：这一格用掉了多少器官能力，0..=2。
+    ///
+    /// 维持成本按它缩放——这是"中间态能不能存在"的关键。
+    ///
+    /// 不做这件事的后果是实测出来的：成本与器官强度无关时，一个
+    /// `photo = 128` 的格子**花同样的钱、只产一半**，被选择立刻淘汰，
+    /// 6000 tick 之后中间态只剩 2.8%（而且那 2.8% 还是刚变异出来的，
+    /// 站不住）。成本跟着强度走之后，"半个生产者"才是一个中性的选择。
+    ///
+    /// **没有器官的格子返回 1.0**（结构 / 装甲 / 眼睛按整格计价），
+    /// 出厂预设（255,0）/（0,255）也正好是 1.0 —— 所以旧世界逐位不变。
+    #[inline]
+    pub fn load(&self) -> f64 {
+        if self.is_dead() {
+            return 1.0;
+        }
+        (self.photo as f64 + self.mouth as f64) / Self::FULL as f64
+    }
+
+    /// 是不是**中间态**：某条轴既不是 0 也不是 255。
+    ///
+    /// 这是阶段 3 的验收判据 —— 见 `DESIGN.md` §17.9 阶段 3 那一行。
+    #[inline]
+    pub fn is_intermediate(&self) -> bool {
+        let mid = |v: u8| v > 0 && v < Self::FULL;
+        mid(self.photo) || mid(self.mouth)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -439,6 +501,34 @@ pub fn is_body_cell(id: u8) -> bool {
     def(id).map(|d| d.is_body_cell).unwrap_or(false)
 }
 
+/// 这种类型的**出厂细胞器预设**。
+///
+/// 不往 `CELL_DEFS` 里加字段，是因为那要改 19 条记录、而且会让"类型"和"基因"
+/// 两个真源并存。这里直接从已有的 `behavior` 推出来：
+///
+/// | `behavior` | photo | mouth |
+/// |---|---|---|
+/// | `Producer` | 255 | 0 |
+/// | `Mouth` | 0 | 255 |
+/// | 其余（含地形） | 0 | 0 |
+///
+/// **只取端点值**是刻意的：`x / 255` 只可能是 0.0 / 1.0，所以旧世界的
+/// 行为逐位不变。要造中间态只有一条路——让变异去挪基因，而不是靠预设。
+#[inline]
+pub fn organelles_of(id: u8) -> Organelles {
+    match def(id).and_then(|d| d.behavior) {
+        Some(Behavior::Producer) => Organelles {
+            photo: Organelles::FULL,
+            mouth: 0,
+        },
+        Some(Behavior::Mouth) => Organelles {
+            photo: 0,
+            mouth: Organelles::FULL,
+        },
+        _ => Organelles::default(),
+    }
+}
+
 #[inline]
 pub fn is_directional(id: u8) -> bool {
     def(id).map(|d| d.directional).unwrap_or(false)
@@ -633,5 +723,54 @@ mod order_tests {
         assert_eq!(def(ct::SPIKE).unwrap().flag, Some(flag::SPIKE));
         assert!(def(ct::LAVA).unwrap().terrain);
         assert!(def(ct::HUMUS).unwrap().tick.is_some());
+    }
+}
+
+#[cfg(test)]
+mod organelle_tests {
+    use super::*;
+
+    /// 出厂预设**只取端点**。这是"旧世界逐位不变"的全部依据：
+    /// `x / 255` 只可能是 0.0 或 1.0，乘上去等于没乘。
+    #[test]
+    fn presets_are_endpoints_only() {
+        let p = organelles_of(ct::PRODUCER);
+        assert_eq!((p.photo, p.mouth), (255, 0), "生产者：满速光合、没有嘴");
+
+        let m = organelles_of(ct::MOUTH);
+        assert_eq!((m.photo, m.mouth), (0, 255), "嘴：只有摄食");
+
+        for id in [
+            ct::MOVER,
+            ct::KILLER,
+            ct::ARMOR,
+            ct::EYE,
+            ct::STORAGE,
+            ct::REGEN,
+            ct::SPIKE,
+        ] {
+            let o = organelles_of(id);
+            assert!(
+                o.is_dead(),
+                "{} 不该有光合/摄食能力（它靠 type_id 分派）",
+                label(id)
+            );
+        }
+        // 地形不是身体细胞，也不该有器官
+        for id in [ct::EMPTY, ct::FOOD, ct::WALL, ct::LAVA, ct::WATER] {
+            assert!(organelles_of(id).is_dead(), "{} 不该有器官", label(id));
+        }
+    }
+
+    /// 中间态的定义：某条轴既不是 0 也不是 255。
+    #[test]
+    fn intermediate_means_strictly_between_the_endpoints() {
+        let o = |p, m| Organelles { photo: p, mouth: m };
+        assert!(!o(0, 0).is_intermediate(), "全关不是中间态");
+        assert!(!o(255, 0).is_intermediate(), "满速生产者是端点");
+        assert!(!o(0, 255).is_intermediate(), "满速嘴是端点");
+        assert!(o(128, 0).is_intermediate(), "半速生产者是中间态");
+        assert!(o(0, 64).is_intermediate(), "半张嘴是中间态");
+        assert!(o(128, 128).is_intermediate(), "两轴都半开也是中间态");
     }
 }

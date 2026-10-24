@@ -72,6 +72,14 @@ pub fn mutate_genome(
         return segment_op(genome, rng);
     }
 
+    // ── 细胞器变异（阶段 3）──
+    //
+    // 默认概率 0（关闭）。打开之后，一格细胞的器官强度可以在 0..255 之间
+    // 连续漂移——「半个生产者」这种中间态才可能出现。
+    if m.organelle_mut_prob > 0.0 && rng.chance(m.organelle_mut_prob) {
+        return nudge_organelle(genome, rng);
+    }
+
     // ── 细胞级操作：随机挑一个段，借道 `mutate_anatomy` 的成熟算子 ──
     if genome.segments.is_empty() {
         return false;
@@ -80,17 +88,63 @@ pub fn mutate_genome(
     let seg = &mut genome.segments[si];
     let mut a = Anatomy::default();
     for c in &seg.cells {
-        a.add_cell(c.type_id, c.dx, c.dy, c.dir);
+        // **必须带上 org**：不带的话这一趟往返会把细胞器向量重置成类型预设，
+        // 阶段 3 的所有中间态在一次细胞级变异后全部丢失。
+        a.add_cell_with(c.type_id, c.dx, c.dy, c.dir, c.org);
     }
     let changed = mutate_anatomy(&mut a, rng, m, cfg.life.max_body_cells);
     if changed {
         seg.cells = a
             .cells
             .iter()
-            .map(|c| crate::genome::GeneCell::new(c.type_id, c.dx, c.dy, c.dir))
+            .map(|c| crate::genome::GeneCell::with_org(c.type_id, c.dx, c.dy, c.dir, c.org))
             .collect();
     }
     changed
+}
+
+/// 细胞器变异：把某一格的某条器官轴挪一格（±32 / ±64）。
+///
+/// 只在**已经有器官**的格子上动（`is_dead()` 为 false）。
+///
+/// **两条轴都进候选**，包括当前是 0 的那条。这一点是实测逼出来的：
+/// 第一版只把 `> 0` 的轴放进候选，于是"生产者格"永远拿不到嘴的基因，
+/// 6000 tick 之后中间态只有 2.8%，而且全是"半个生产者"这种**严格更差**的
+/// 形态（成本减半、产出减半，净收益也减半 → 满速永远赢）。
+/// 真正有意思的中间态是**两条轴同时 > 0** 的杂食格——那才需要"新开一条轴"。
+///
+/// 步长取 32 / 64 而不是 1：基因是 u8，每次 ±1 需要几百代才能跨过
+/// 端点→中点，实测在这种规模的种群（~1200 只、6000 tick）里根本漂不动。
+fn nudge_organelle(g: &mut crate::genome::Genome, rng: &mut Rng) -> bool {
+    // (段下标, 格下标, 轴 0=photo 1=mouth)
+    let mut slots: Vec<(usize, usize, usize)> = Vec::new();
+    for (si, seg) in g.segments.iter().enumerate() {
+        for (ci, c) in seg.cells.iter().enumerate() {
+            if c.org.is_dead() {
+                continue;
+            }
+            // 两条轴都给，哪怕当前是 0 —— 否则杂食格永远长不出来
+            slots.push((si, ci, 0));
+            slots.push((si, ci, 1));
+        }
+    }
+    if slots.is_empty() {
+        return false;
+    }
+    let (si, ci, axis) = slots[rng.int(slots.len())];
+    let step = [-64i32, -32, 32, 64][rng.int(4)];
+    let org = &mut g.segments[si].cells[ci].org;
+    let cur = if axis == 0 { org.photo } else { org.mouth } as i32;
+    let nv = (cur + step).clamp(0, 255) as u8;
+    if nv as i32 == cur {
+        return false;
+    }
+    if axis == 0 {
+        org.photo = nv;
+    } else {
+        org.mouth = nv;
+    }
+    true
 }
 
 /// 基因组展开后的总格数（"细胞预算"用）。**含子段**——见 `Genome::plan_cells`。
@@ -397,6 +451,10 @@ fn change_random_cell(anatomy: &mut Anatomy, rng: &mut Rng) -> bool {
         return false;
     }
     anatomy.cells[idx].type_id = type_id;
+    // **换类型必须重置细胞器向量**（阶段 3）：否则一个"满速生产者"被改成
+    // 嘴细胞之后还带着 `photo = 255`，它会一边当嘴一边满速光合，
+    // 而 `type_id` 却显示它是嘴——标签和行为对不上，生态判据也跟着错。
+    anatomy.cells[idx].org = crate::cell_type::organelles_of(type_id);
     anatomy.cells[idx].dir = if is_directional(type_id) {
         rng.int(4) as u8
     } else {
@@ -637,6 +695,70 @@ mod tests {
             touched,
             "400 次段级操作都没改到附肢（初始 {:?}）——子段不可达",
             before.cells.len()
+        );
+    }
+
+    /// 细胞器变异必须能把端点挪到中间值（阶段 3 的验收前提）。
+    #[test]
+    fn nudge_organelle_reaches_intermediate_values() {
+        let mut g = one_segment();
+        // one_segment 里是生产者，photo = 255
+        let mut rng = Rng::new(3);
+        let mut saw_intermediate = false;
+        for _ in 0..400 {
+            nudge_organelle(&mut g, &mut rng);
+            if g.segments[0].cells.iter().any(|c| c.org.is_intermediate()) {
+                saw_intermediate = true;
+                break;
+            }
+        }
+        assert!(saw_intermediate, "400 次都没挪出中间态——步长或判定有问题");
+
+        // 边界：不能越出 0..=255，也不能把两条轴都关掉之后还在动
+        for _ in 0..2000 {
+            nudge_organelle(&mut g, &mut rng);
+        }
+        for c in &g.segments[0].cells {
+            assert!(c.org.photo <= 255 && c.org.mouth <= 255);
+        }
+    }
+
+    /// 细胞级变异（加/改/删一格）不能把已有的中间态重置回预设。
+    #[test]
+    fn cell_level_mutation_preserves_organelles() {
+        let mut g = one_segment();
+        // 把唯一那格改成"半速生产者"
+        g.segments[0].cells[0].org = crate::cell_type::Organelles {
+            photo: 128,
+            mouth: 0,
+        };
+        let m = MutationCfg {
+            add_prob: 0.0,
+            change_prob: 0.0,
+            remove_prob: 0.0,
+            segment_op_prob: 0.0,
+            organelle_mut_prob: 0.0,
+            use_global_mutability: true,
+            global_mutability: 100.0,
+            ..MutationCfg::default()
+        };
+        let cfg = Config::default();
+        let mut org = Organism::new(
+            &cfg,
+            &mut Rng::new(1),
+            &crate::grid::Grid::new(8, 8, false),
+            3,
+            3,
+        );
+        org.anatomy = g.expand(0).to_anatomy();
+        // 100% 触发，但所有算子概率都是 0 → 结构不变，org 也不能被抹
+        let mut rng = Rng::new(9);
+        for _ in 0..50 {
+            mutate_genome(&mut g, &org, &mut rng, &cfg);
+        }
+        assert_eq!(
+            g.segments[0].cells[0].org.photo, 128,
+            "细胞级变异把中间态重置了"
         );
     }
 
