@@ -956,6 +956,26 @@ pub fn draw(
                          关：退回旧行为——四个邻居各抽一次，上限是咬合速率的 4 倍。\n\
                          食物不受这条限制：能舔到几格食物由几何决定。",
                     );
+                // ── 追猎（批次 50）──
+                let before_chase = cfg.life.chase_prob;
+                let mut chase = before_chase;
+                ui.add(
+                    egui::Slider::new(&mut chase, 0.0..=1.0)
+                        .text("追猎概率")
+                        .step_by(0.05)
+                        .fixed_decimals(2),
+                )
+                .on_hover_text(
+                    "有嘴/杀手、且身上没贴着猎物时，每 tick 有多大比例会把移动方向\n\
+                     掰向最近的那具身体（默认 0 = 关闭）。\n\
+                     感知分两档：嘴本身能「尝到」对角挨着的猎物（1 格），\n\
+                     眼睛把范围放大到视野距离（默认 20 格）。\n\
+                     注意：实测世界里同时有移动器 + 嘴/杀手的个体只有 0.2%，\n\
+                     所以这个旋钮目前几乎没有作用对象——调大不会看到明显变化。",
+                );
+                if (chase - before_chase).abs() > 1e-9 {
+                    cfg.life.chase_prob = chase;
+                }
                 // ── 捕食端体型差（批次 23）──
                 let before_adv = cfg.life.size_advantage;
                 let mut adv = before_adv;

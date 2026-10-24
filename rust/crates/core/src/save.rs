@@ -108,7 +108,7 @@ pub const MAGIC: &[u8; 8] = b"EVOSIM2\0";
 /// v35：`WorldCfg` 加了 `rich_terrain`（批次 44 世界生成默认带地形）。
 /// v36：`Organism` 加了 `genome`，`growth_plan` 从 `Anatomy` 换成 `BodyPlan`
 /// （批次 45 基因组与发育阶段 0）。**旧存档不兼容**。
-pub const VERSION: u32 = 38;
+pub const VERSION: u32 = 39;
 /// 定长头：8 + 4 + 4 + 4 + 8 + 4 + 4
 pub const HEADER_LEN: usize = 36;
 pub const EXT: &str = "evosim";

@@ -120,6 +120,17 @@ struct Row {
     /// 成体蓝图里出现过的最大嵌套深度
     depth_max: u8,
     /// **中间态细胞占比（%）**：成体身体里 `Organelles::is_intermediate()` 的格数占比。
+    /// **咬合收入占总收入的比例（%）**：全体个体的 `gain_bite / (gain_photo + gain_bite + gain_food)`。
+    ///
+    /// 和 `hetero` 是两个不同的判据：`hetero` 数**结构**（有嘴、没生产者），
+    /// 这个数**钱从哪来**。批次 50 的追猎机制只动"能不能碰到"，
+    /// 所以它该推动的是这一个，而不是结构计数。
+    bite_share: f64,
+    /// **追猎者占比（%）**：同时有眼睛 + 嘴/杀手的个体。批次 50 的机制
+    /// 只对它们生效——这一列是 0 的话，`chase=` 调多大都不会有任何反应。
+    hunters: f64,
+    /// 眼睛占比（%）。视觉档只有它们能用。
+    eye: f64,
     /// 阶段 3 的验收指标——旧结构下这个数恒为 0。
     mid_cells: f64,
     /// **杂食格占比（%）**：`photo > 0 && mouth > 0` 的格子。
@@ -181,6 +192,8 @@ fn run(
     expprod: f64,
     expup: f64,
     orgmut: f64,
+    chase: f64,
+    movercost: f64,
 ) -> Row {
     let mut cfg = Config::default();
     cfg.life.breed_cost_exponent = p;
@@ -264,6 +277,13 @@ fn run(
     cfg.life.exposure_upkeep_exp = expup;
     // `orgmut=K`：细胞器变异率（阶段 3），0 = 关闭
     cfg.mutation.organelle_mut_prob = orgmut;
+    // `chase=K`：追猎概率（批次 50），0 = 关闭
+    cfg.life.chase_prob = chase;
+    // `movercost=K`：移动器的每格维持成本（默认 0.040 = 生产者的 4 倍）。
+    // 批次 50 的专用诊断：验证"移动器太贵"是不是捕食者行会立不起来的原因。
+    if movercost >= 0.0 {
+        cfg.cells[ct::MOVER as usize].cost = movercost;
+    }
     // `cloud`：云影（光岛 + 暗廊），用来造空间异质性
     cfg.world.sky_patchiness = cloud;
     // `rich`：富贫斑块（光岛 + 微光暗廊 + 食物跟着走）
@@ -465,6 +485,40 @@ fn run(
     let mid_cells = cell_pct(mid_n);
     let mixed_cells = cell_pct(mixed_n);
 
+    // ── 批次 50：咬合收入占比 ──
+    // 只数**收入**，不数种群——人口是二阶量（记忆里的铁律 2）。
+    let (mut gb, mut gp, mut gf) = (0.0f64, 0.0f64, 0.0f64);
+    for o in w.organisms.iter() {
+        gb += o.gain_bite;
+        gp += o.gain_photo;
+        gf += o.gain_food;
+    }
+    let total = gb + gp + gf;
+    let bite_share = if total > 0.0 { gb * 100.0 / total } else { 0.0 };
+
+    // 追猎者：**移动器 + 嘴/杀手**（不要求眼睛——接触档不需要）。
+    // 没有这一类个体，`chase_prob` 就是个空旋钮：`think()` 在
+    // `!has_mover && !rotate_without_mover` 时直接返回，走不到追猎那一步。
+    let hunters = w
+        .organisms
+        .iter()
+        .filter(|o| {
+            o.anatomy.has(Flags::MOVER)
+                && (o.anatomy.has(Flags::MOUTH) || o.anatomy.has(Flags::KILLER))
+        })
+        .count() as f64
+        * 100.0
+        / n as f64;
+    // 眼睛占比单独一列：视觉档只有它们能用。这一列长期为 0 的话，
+    // 说明"眼睛在演化里活不下来"——那是批次 50 挖出来的真问题。
+    let eye_pct = w
+        .organisms
+        .iter()
+        .filter(|o| o.anatomy.has(Flags::EYE))
+        .count() as f64
+        * 100.0
+        / n as f64;
+
     Row {
         pop: w.organisms.len() as f64,
         body_avg: st.avg_cells,
@@ -567,6 +621,9 @@ fn run(
         compact,
         limbs,
         depth_max,
+        bite_share,
+        hunters,
+        eye: eye_pct,
         mid_cells,
         mixed_cells,
     }
@@ -624,6 +681,8 @@ fn run_seeds(
     expprod: f64,
     expup: f64,
     orgmut: f64,
+    chase: f64,
+    movercost: f64,
 ) -> Row {
     let mut acc = Row {
         pop: 0.0,
@@ -668,6 +727,9 @@ fn run_seeds(
         compact: 0.0,
         limbs: 0.0,
         depth_max: 0,
+        bite_share: 0.0,
+        hunters: 0.0,
+        eye: 0.0,
         mid_cells: 0.0,
         mixed_cells: 0.0,
     };
@@ -676,7 +738,7 @@ fn run_seeds(
             p, cap, ticks, s, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup, orgmut,
+            expprod, expup, orgmut, chase, movercost,
         );
         acc.pop += r.pop;
         acc.body_avg += r.body_avg;
@@ -731,6 +793,9 @@ fn run_seeds(
         acc.limbs += r.limbs;
         acc.depth_max = acc.depth_max.max(r.depth_max);
         acc.mid_cells += r.mid_cells;
+        acc.bite_share += r.bite_share;
+        acc.hunters += r.hunters;
+        acc.eye += r.eye;
         acc.mixed_cells += r.mixed_cells;
     }
     let n = seeds.len() as f64;
@@ -775,6 +840,9 @@ fn run_seeds(
     acc.compact /= n;
     acc.limbs /= n;
     acc.mid_cells /= n;
+    acc.bite_share /= n;
+    acc.hunters /= n;
+    acc.eye /= n;
     acc.mixed_cells /= n;
     acc
 }
@@ -973,6 +1041,16 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("orgmut=").and_then(|v| v.parse().ok()))
         .unwrap_or(Config::default().mutation.organelle_mut_prob);
+    // `chase=K`：追猎概率（批次 50），0 = 关闭
+    let chase: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("chase=").and_then(|v| v.parse().ok()))
+        .unwrap_or(Config::default().life.chase_prob);
+    // `movercost=K`：移动器每格维持成本，负数 = 不改（默认 0.040）
+    let movercost: f64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("movercost=").and_then(|v| v.parse().ok()))
+        .unwrap_or(-1.0);
     // `exponly`：只跑「体型收益」那一节（其余全跳过）。批次 47 的专用模式。
     let exponly = args.iter().any(|a| a == "exponly");
     // `shade=K`：遮挡强度（默认跟 Config 走）
@@ -1074,9 +1152,9 @@ fn main() {
         };
         println!("【0】体型收益：光合产出 × svr^k（svr = 8×格数 ÷ 暴露面数，1 格恒为 1.00）");
         println!(
-            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>7}  {:>7}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
+            "{:>6}  {:>6}  {:>7}  {:>9}  {:>9}  {:>9}  {:>8}  {:>7}  {:>7}  {:>7}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
             "k产出", "k维持", "个体", "平均体型", "成体体型", "最大体型", "svr", "产出倍率",
-            "紧凑%", "附肢%", "深度", "中间态%", "杂食格%", "存活种", "物种聚", "异养%"
+            "紧凑%", "附肢%", "深度", "中间态%", "杂食格%", "咬合%", "追猎者%", "眼%", "存活种", "物种聚", "异养%"
         );
         for &u in &ups {
             for &k in &ks {
@@ -1085,13 +1163,13 @@ fn main() {
                     temp_dmg, photo, ambient, comfort, growth, gcost, stall, cloud, rich, mingrow,
                     bud, budper, budfeed, oldbite, bite, shade, oldmouth, day, night, sizeadv, kin,
                     spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat,
-                    cave, cooldown, egg, hatch, spec, k, u, orgmut,
+                    cave, cooldown, egg, hatch, spec, k, u, orgmut, chase, movercost,
                 );
                 println!(
-                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>6.1}%  {:>6.1}%  {:>5}  {:>6.1}%  {:>6.1}%  {:>7.1}  {:>7.1}  {:>7.1}",
+                    "{:>6.2}  {:>6.2}  {:>7.0}  {:>9.2}  {:>9.2}  {:>9}  {:>9.2}  {:>8.2}  {:>6.1}%  {:>6.1}%  {:>5}  {:>6.1}%  {:>6.1}%  {:>6.1}%  {:>7.1}%  {:>6.1}%  {:>7.1}  {:>7.1}  {:>7.1}",
                     k, u, r.pop, r.body_avg, r.body_adult, r.body_max, r.svr, r.prod_mult,
-                    r.compact, r.limbs, r.depth_max, r.mid_cells, r.mixed_cells, r.species,
-                    r.species_clustered, r.hetero
+                    r.compact, r.limbs, r.depth_max, r.mid_cells, r.mixed_cells, r.bite_share,
+                    r.hunters, r.eye, r.species, r.species_clustered, r.hetero
                 );
             }
         }
@@ -1129,7 +1207,7 @@ fn main() {
             p, 0, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup, orgmut,
+            expprod, expup, orgmut, chase, movercost,
         );
         println!(
             "{:>5.2}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}  {:>7.1}%  {:>7.1}  {:>6.1}  {:>7.1}  {:>9.2}  {:>6.1}%  {:>7.1}  {:>6.1}  {:>6.1}",
@@ -1329,7 +1407,7 @@ fn main() {
             1.0, cap, ticks, &seeds, free, tries, min_cells, cost_mul, upkeep_p, heat, temp_dmg, photo,
             ambient, comfort, growth, gcost, stall, cloud, rich, mingrow, bud, budper, budfeed,
             oldbite, bite, shade, oldmouth, day, night, sizeadv, kin, spdist, kinspec, brain, starve, produce, soil, soilr, soilf, rec, rot, flat, cave, cooldown, egg, hatch, spec,
-            expprod, expup, orgmut,
+            expprod, expup, orgmut, chase, movercost,
         );
         println!(
             "  {:>6}  {:>7.0}  {:>9.2}  {:>9}  {:>7.1}",

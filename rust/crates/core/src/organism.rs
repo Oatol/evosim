@@ -550,22 +550,182 @@ impl Organism {
             }
         }
 
+        // 原来这里是 `if best == out_n-1 { plan_turn = true; return; }`。
+        // 批次 50 改成打标记而不是直接返回，因为**追猎必须有机会推翻大脑**——
+        // 大脑想转身的那一刻，往往正是"眼睛看见猎物但还没对准"的那一刻。
+        let mut turning = false;
         if best == out_n - 1 && self.turn_cooldown <= 0 {
             self.plan_turn = true;
-            return;
+            turning = true;
         }
 
-        // o[4] 最强但还在冷却 → 退化成"按移动倾向里最强的那个走"
-        let mut dir = best;
-        if dir == out_n - 1 {
-            dir = 0;
-            for i in 1..out_n - 1 {
-                if out[i] > out[dir] {
-                    dir = i;
+        if !turning {
+            // o[4] 最强但还在冷却 → 退化成"按移动倾向里最强的那个走"
+            let mut dir = best;
+            if dir == out_n - 1 {
+                dir = 0;
+                for i in 1..out_n - 1 {
+                    if out[i] > out[dir] {
+                        dir = i;
+                    }
+                }
+            }
+            self.plan_direction = ((self.rotation as usize + dir) & 3) as u8;
+        }
+
+        self.chase_steer(grid, cfg);
+    }
+
+    /// 追猎（批次 50）：看到（或碰到）身体、而身上**没有**贴着的猎物时，
+    /// 把移动方向掰向最近的那具身体。
+    ///
+    /// 两档感知，这是刻意设计的：
+    ///
+    /// | 档 | 谁有 | 范围 | 精度 |
+    /// |---|---|---|---|
+    /// | 接触 | 任何有嘴/杀手的个体 | 8 邻域（实际只剩对角） | 精确方向 |
+    /// | 视觉 | 还要有眼睛 | `SenseRange`（默认 20） | 4 个方向之一 |
+    ///
+    /// **为什么必须有"接触"这一档**：实测 6000 tick 之后，同时拥有
+    /// 眼睛 + 移动器 + 嘴/杀手的个体占比是 **0.0%**——眼睛的维持成本是
+    /// 生产者的 3 倍（0.030 vs 0.010），而它此前唯一的用处是给大脑多加
+    /// 36 维输入，大脑又是个随机网络。**眼睛在演化里已经死了。**
+    /// 如果追猎必须靠眼睛，那这个机制永远不会有任何个体能触发
+    /// （实测 chase=0/0.1/0.3/1.0 四个取值的扫描结果**逐位相同**）。
+    ///
+    /// 所以第一档不要求眼睛：嘴和杀手本身就是化学感受器，挨着就能"尝到"。
+    /// 这样机制立刻对**现存的**「移动器 + 嘴」个体生效；眼睛则从
+    /// "没有回报的装饰"变成"把 1 格感知放大到 20 格"的升级件——
+    /// 这正好打破了「没眼睛 → 追猎不触发 → 眼睛没价值 → 没眼睛」的死循环。
+    fn chase_steer(&mut self, grid: &Grid, cfg: &Config) {
+        let p = cfg.life.chase_prob;
+        if !(p > 0.0) {
+            return;
+        }
+        // 得能"利用"看到的东西。没有嘴也没有杀手，追上去也是白追。
+        if !self.anatomy.has(Flags::MOUTH) && !self.anatomy.has(Flags::KILLER) {
+            return;
+        }
+        // **已经贴着了就别追**：继续朝猎物走会被 `attempt_move` 挡下，
+        // 然后走 `attempt_rotate` 转身——结果是在猎物旁边打转而不是啃它。
+        if self.touching_prey(grid) {
+            return;
+        }
+        // 接触档优先：对角贴着的猎物方向是**确定**的，比"4 个方向里挑一个"准。
+        let dir = match self.contact_prey_dir(grid) {
+            Some(d) => d,
+            None => match self.seen_prey_dir() {
+                Some(d) => d,
+                None => return,
+            },
+        };
+        // 不碰世界 RNG：`think()` 跑在 rayon 并行路径上，用 `id + age` 的哈希
+        // （和大脑消融模式 2 同一个手法，见上面）。
+        let h = (self.id as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (self.age as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
+        let roll = ((h >> 40) & 0xFFFF) as f64 / 65536.0;
+        if roll >= p {
+            return;
+        }
+        self.plan_turn = false;
+        self.plan_direction = ((self.rotation as usize + dir as usize) & 3) as u8;
+    }
+
+    /// 接触档：八邻域里有没有别人的活体，有就返回朝向它的**相对**方向。
+    ///
+    /// 因为 `touching_prey` 已经把"四邻域有活体"的情况拦掉了，
+    /// 这里实际只会命中**对角**接触——也就是"它贴着我但我还咬不到"的位置。
+    fn contact_prey_dir(&self, grid: &Grid) -> Option<u8> {
+        const N8: [(i32, i32); 8] = [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ];
+        for cell in &self.anatomy.cells {
+            let c = self.real_col(cell);
+            let r = self.real_row(cell);
+            for (dx, dy) in N8 {
+                let Some(idx) = grid.index(c + dx, r + dy) else {
+                    continue;
+                };
+                let owner = grid.owners[idx];
+                if owner < 0 || owner == self.id as i32 {
+                    continue;
+                }
+                // 世界方向 → 相对方向：先减掉自身朝向
+                let abs = if dx.abs() >= dy.abs() {
+                    if dx > 0 { 1 } else { 3 }
+                } else if dy > 0 {
+                    2
+                } else {
+                    0
+                };
+                return Some(((abs + 4 - self.rotation) & 3) as u8);
+            }
+        }
+        None
+    }
+
+    /// 视觉档：从已经算好的感知向量里挑最近的那具身体，返回**相对**方向。
+    ///
+    /// `sense()` 刚填过 `self.sensors`：4 个方向 × 9 维，第 9 维是"近度"
+    /// （`1 - 距离/射程`）。槽位顺序见 `VISIBLE_CELL_TYPES`。
+    fn seen_prey_dir(&self) -> Option<u8> {
+        if !self.anatomy.has(Flags::EYE) {
+            return None;
+        }
+        let mut best_dir: i32 = -1;
+        let mut best_near = 0.0f64;
+        for d in 0..crate::sensors::VISION_DIRS {
+            let base = d * crate::sensors::VISUAL_SLOTS;
+            let near = self.sensors[base + crate::sensors::VISUAL_SLOTS - 1] as f64;
+            if near <= best_near {
+                continue;
+            }
+            // 这一方向看到的是不是**身体**？食物和墙不算猎物。
+            // 感知向量里没有"所有权"，所以同种也会被追——那正好，
+            // 亲缘折扣（`kin_penalty`）会在咬的时候把它扣回来。
+            let is_body = (0..crate::cell_type::VISIBLE_CELL_TYPES.len()).any(|slot| {
+                self.sensors[base + slot] > 0.5
+                    && crate::cell_type::is_body_cell(crate::cell_type::VISIBLE_CELL_TYPES[slot])
+            });
+            if is_body {
+                best_near = near;
+                best_dir = d as i32;
+            }
+        }
+        if best_dir < 0 {
+            None
+        } else {
+            Some(best_dir as u8)
+        }
+    }
+
+    /// 身体四邻域里有没有**别人**的活体（不是食物、不是地形）。
+    ///
+    /// 只看四邻域而不是八邻域：嘴和杀手都只够到四邻域，用八邻域判定
+    /// 会让"斜对角有人"的个体误以为自己在进食、于是停止追猎。
+    fn touching_prey(&self, grid: &Grid) -> bool {
+        const N: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        for cell in &self.anatomy.cells {
+            let c = self.real_col(cell);
+            let r = self.real_row(cell);
+            for (dx, dy) in N {
+                if let Some(idx) = grid.index(c + dx, r + dy) {
+                    let owner = grid.owners[idx];
+                    if owner >= 0 && owner != self.id as i32 {
+                        return true;
+                    }
                 }
             }
         }
-        self.plan_direction = ((self.rotation as usize + dir) & 3) as u8;
+        false
     }
 
     // ────────────────────────────── 占位判定 ──────────────────────────────
@@ -785,5 +945,205 @@ mod tests {
     fn bogus_exponent_falls_back_to_linear() {
         assert_eq!(breed_cost(7, 0.0), 7.0);
         assert_eq!(breed_cost(7, -1.0), 7.0);
+    }
+}
+
+// ────────────────── 批次 50：追猎（感知驱动的趋近）──────────────────
+#[cfg(test)]
+mod chase_tests {
+    use super::*;
+
+    fn empty_grid() -> Grid {
+        Grid::new(20, 20, false)
+    }
+
+    /// 一只「移动器 + 嘴 + 眼睛(朝右)」的捕食者，横排三格，眼睛在**最右端**。
+    ///
+    /// 眼睛放最右端不是随手排的：`sense()` 遇到自己的格子会 `break`，
+    /// 一只把眼睛藏在身体中间、朝自己身体看过去的个体**永远看不见东西**。
+    /// 真实演化出来的捕食者也只能靠"眼睛长在外侧"才能追猎——这正是
+    /// `see_through_self` 那个开关的意义。
+    fn hunter(cfg: &Config, with_eye: bool, with_mouth: bool) -> Organism {
+        let mut rng = Rng::new(7);
+        let g = empty_grid();
+        let mut o = Organism::new(cfg, &mut rng, &g, 10, 10);
+        o.anatomy.add_cell(ct::MOVER, 0, 0, 0);
+        if with_mouth {
+            o.anatomy.add_cell(ct::MOUTH, 1, 0, 0);
+        }
+        if with_eye {
+            o.anatomy.add_cell(ct::EYE, 2, 0, 1); // 朝右
+        }
+        o.anatomy.recompute();
+        o.id = 5;
+        o
+    }
+
+    /// 往某个方向的视觉槽里写「看到一具身体，近度 near」。
+    fn see(o: &mut Organism, dir: usize, ty: u8, near: f32) {
+        let base = dir * crate::sensors::VISUAL_SLOTS;
+        let slot = crate::cell_type::VISION_SLOT[ty as usize];
+        assert!(slot >= 0, "{} 不在视觉槽里", crate::cell_type::label(ty));
+        o.sensors[base + slot as usize] = 1.0;
+        o.sensors[base + crate::sensors::VISUAL_SLOTS - 1] = near;
+    }
+
+    /// `chase_prob = 1` 时方向被掰向看到的那具身体，并且取消转身。
+    #[test]
+    fn aims_at_the_seen_body() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 1, ct::PRODUCER, 0.9); // 右边有人
+        o.plan_direction = 0; // 大脑本来想往上
+        o.plan_turn = true;
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 1, "必须转向猎物所在的绝对方向");
+        assert!(!o.plan_turn, "追猎时不能还在转身");
+    }
+
+    /// 多个方向都有目标 → 挑**最近**的那个，而不是先扫到的那个。
+    #[test]
+    fn picks_the_closest_of_several_targets() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 0, ct::PRODUCER, 0.30); // 前面，很远
+        see(&mut o, 3, ct::KILLER, 0.95); // 左边，很近
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 3, "应该追更近的那个");
+    }
+
+    /// 食物和墙**不是**猎物——只有身体才值得追。
+    #[test]
+    fn food_and_wall_are_not_prey() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 1, ct::FOOD, 0.9);
+        see(&mut o, 2, ct::WALL, 0.9);
+        o.plan_direction = 0;
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 0, "食物和墙不该引发追猎");
+    }
+
+    /// 关掉（默认 0）必须什么都不做。
+    #[test]
+    fn zero_prob_is_a_no_op() {
+        let cfg = Config::default();
+        assert_eq!(cfg.life.chase_prob, 0.0, "默认必须是关的");
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 1, ct::PRODUCER, 0.9);
+        o.plan_direction = 0;
+        o.plan_turn = true;
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 0);
+        assert!(o.plan_turn, "关掉时连转身标记都不能动");
+    }
+
+    /// **视觉档**需要眼睛：没有眼睛就看不见远处的东西。
+    /// （近处的东西还能"尝到"，那是接触档，见下一条。）
+    #[test]
+    fn vision_tier_needs_an_eye() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, false, true);
+        see(&mut o, 1, ct::PRODUCER, 0.9);
+        o.plan_direction = 0;
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 0, "没有眼睛不该走视觉档");
+    }
+
+    /// **接触档不需要眼睛**：嘴本身就是化学感受器，对角贴着就能转过去。
+    ///
+    /// 这一条是整个机制能不能落地的关键——实测世界里同时有
+    /// 眼睛 + 移动器 + 嘴/杀手的个体是 **0.0%**，眼睛已经灭绝。
+    /// 如果只有视觉档，`chase_prob` 调多大都是空旋钮。
+    #[test]
+    fn contact_tier_works_without_eye() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, false, true); // 没有眼睛
+        o.plan_direction = 0;
+        let mut g = empty_grid();
+        // 猎物在 (12,9)：和嘴 (11,10) 对角相邻，但不与任何一格四邻相接
+        let idx = g.index(12, 9).unwrap();
+        g.types[idx] = ct::PRODUCER;
+        g.owners[idx] = 99;
+        o.chase_steer(&g, &cfg);
+        assert_eq!(o.plan_direction, 1, "应该朝对角那具身体转过去");
+    }
+
+    /// 没有攻击器官 → 追上去也白追（嘴和杀手都没有，吃不了人家）。
+    #[test]
+    fn needs_a_weapon() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, false);
+        see(&mut o, 1, ct::PRODUCER, 0.9);
+        o.plan_direction = 0;
+        o.chase_steer(&empty_grid(), &cfg);
+        assert_eq!(o.plan_direction, 0);
+    }
+
+    /// **已经贴着了就别追**：否则它会朝猎物走 → 被挡下 → 转身 → 绕着打转。
+    #[test]
+    fn stops_chasing_once_in_contact() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 1, ct::PRODUCER, 0.9);
+        o.plan_direction = 0;
+        // 身体在 (10,10)/(11,10)/(12,10)，把猎物放在 (10,9) —— 紧贴第一格
+        let mut g = empty_grid();
+        let idx = g.index(10, 9).unwrap();
+        g.types[idx] = ct::PRODUCER;
+        g.owners[idx] = 99;
+        o.chase_steer(&g, &cfg);
+        assert_eq!(o.plan_direction, 0, "贴脸时应该停下来啃，不是继续走");
+    }
+
+    /// 自己的格子不算"贴着的猎物"（否则所有个体一出生就放弃追猎）。
+    #[test]
+    fn own_body_is_not_prey() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        see(&mut o, 1, ct::PRODUCER, 0.9);
+        let mut g = empty_grid();
+        for (dx, dy) in [(0, 0), (1, 0), (2, 0)] {
+            let idx = g.index(10 + dx, 10 + dy).unwrap();
+            g.types[idx] = ct::MOVER;
+            g.owners[idx] = 5; // 就是自己
+        }
+        o.chase_steer(&g, &cfg);
+        assert_eq!(o.plan_direction, 1, "自己的格子不该被当成猎物");
+    }
+
+    /// 端到端：感知真的从网格里读到猎物，`think()` 真的把方向掰过去。
+    ///
+    /// 上面几条都是直接喂 `sensors`，只验证了 `chase_steer` 本身；
+    /// 这一条走完整条链：`sense()` → `sensors` → `chase_steer` → `plan_direction`。
+    #[test]
+    fn end_to_end_through_think() {
+        let mut cfg = Config::default();
+        cfg.life.chase_prob = 1.0;
+        let mut o = hunter(&cfg, true, true);
+        let mut g = empty_grid();
+        // 把身体真的写进网格：否则 `touching_prey` 会看到"猎物贴着我的空壳"。
+        for dx in 0..3 {
+            let idx = g.index(10 + dx, 10).unwrap();
+            g.types[idx] = ct::MOVER;
+            g.owners[idx] = 5;
+        }
+        // 猎物在眼睛（最右端 (12,10)）正前方两格
+        let idx = g.index(14, 10).unwrap();
+        g.types[idx] = ct::PRODUCER;
+        g.owners[idx] = 99;
+        o.think(&g, &cfg, 1.0);
+        assert_eq!(
+            o.plan_direction, 1,
+            "眼睛看到正前方的身体，移动方向必须指向它"
+        );
     }
 }
